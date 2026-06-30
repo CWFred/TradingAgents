@@ -41,7 +41,7 @@ ops/
   broker/
     base.py             # Broker ABC
     paper.py            # PaperBroker (default)
-    robinhood.py        # RobinhoodBroker (gated, MCP-backed)
+    robinhood.py        # RobinhoodBroker (gated, MCP-backed) — Plan 3
     guarded.py          # GuardedBroker wraps any Broker
   guardrails/
     rules.py            # One class per rule
@@ -52,7 +52,7 @@ ops/
     orchestrator.py     # The always-on loop
   universe/
     sp500.py            # S&P 500 membership (cached weekly)
-    earnings.py         # Recent-earnings filter via MCP
+    earnings.py         # Recent-earnings filter via yfinance
     filters.py          # Liquidity, ETF exclusions
   strategy/
     base.py             # Strategy ABC
@@ -70,7 +70,7 @@ ops/
 
 ### Component responsibilities
 
-**`Broker` (ABC).** The single interface that touches money. Methods: `place_market_order`, `place_limit_order`, `cancel`, `get_positions`, `get_quote`, `get_cash`, `get_equity`. Concrete impls: `PaperBroker` (in-memory book + SQLite ledger) and `RobinhoodBroker` (Python MCP client connecting to `https://agent.robinhood.com/mcp/trading`).
+**`Broker` (ABC).** The single interface that touches money. Methods: `place_market_order`, `place_limit_order`, `cancel`, `get_positions`, `get_quote`, `get_cash`, `get_equity`. Concrete impls: `PaperBroker` (in-memory book + SQLite ledger) and — Plan 3 — `RobinhoodBroker` (Python MCP client connecting to `https://agent.robinhood.com/mcp/trading`).
 
 **`GuardedBroker`.** Wraps any `Broker` with an ordered rule chain. Every `place_*` call runs the rules; first failure short-circuits with a structured `OrderRejected` exception, journaled with which rule fired. This is *the* enforcement boundary — guardrails cannot be bypassed because the inner broker is never exposed outside `GuardedBroker`.
 
@@ -90,7 +90,14 @@ ops/
 
 **LLM provider plumbing.** Use the upstream's existing `TRADINGAGENTS_LLM_PROVIDER`, `TRADINGAGENTS_DEEP_THINK_LLM`, `TRADINGAGENTS_QUICK_THINK_LLM`, and `TRADINGAGENTS_BACKEND_URL` env vars. Document the `.env` knobs in `ops/README.md`, including the local-Ollama recipe.
 
-**Robinhood auth path.** `RobinhoodBroker` uses the Python MCP SDK to connect to `https://agent.robinhood.com/mcp/trading` (OAuth, no password storage). MCP knowledge is isolated to that one file.
+**Data sources — the two-layer split.** Live-trading code uses *different* data sources for market data vs. broker access:
+
+- **Market data** (S&P 500 membership, earnings calendar, EPS/revenue beats, intraday and historical quotes): use `yfinance`. Free, no auth, ToS-clean for personal use. This is what the `ops/universe/` modules and the position guardian read.
+- **Broker** (positions, cash, place/cancel orders): use the official **Robinhood MCP** (`https://agent.robinhood.com/mcp/trading`) via the Python MCP SDK from `RobinhoodBroker`. OAuth, no passwords stored. The MCP is Robinhood's officially-sanctioned programmatic-agent surface, so ToS is clean. Trade-off: first-run OAuth flow requires a browser; we accept this for the ToS guarantee.
+- **News and sentiment** for the multi-agent pipeline: stays inside the upstream TradingAgents framework. Its News Analyst and Sentiment Analyst already wire up their own data adapters (Finnhub, Reddit, etc.). We do not add a news layer in `ops/`; we just pass `.env` API keys through.
+- **Interactive use** through Claude Code (asking about your account, ad-hoc trades): the same Robinhood MCP, but called from the chat session — not from the always-on service. This is the MCP's intended interaction model.
+
+`robin_stocks` (the unofficial password-based RH library) is explicitly NOT used — ToS risk on a real-money account is not worth the convenience.
 
 ## Guardrail rules (defaults in `ops/config.py`)
 
@@ -216,7 +223,8 @@ Documented now, not implemented in v1 — sets the bar before we get tempted to 
 - APScheduler — scheduling.
 - pandas-market-calendars — NYSE calendar.
 - SQLite (via `sqlite3` stdlib + light wrapper) — journal.
-- Python MCP SDK — Robinhood broker.
+- `yfinance` — market data (universe, earnings, quotes).
+- Python MCP SDK — Robinhood broker (Plan 3).
 - Pushover — push notifications.
 - `smtplib` (stdlib) — email.
 - Existing TradingAgents deps for the pipeline.
