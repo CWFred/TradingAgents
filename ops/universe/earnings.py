@@ -2,6 +2,7 @@
 trading days with both an EPS beat and a revenue beat."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -39,6 +40,19 @@ def _trading_days_back(asof: date, n: int) -> date:
 
 
 def _fetch_from_yfinance(symbol: str) -> EarningsHit | None:
+    def _safe_decimal(v) -> Decimal:
+        """Convert a yfinance numeric value to Decimal, treating NaN/None as 0.
+        Prevents decimal.InvalidOperation on NaN and normalises absent data."""
+        if v is None:
+            return Decimal("0")
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return Decimal("0")
+        if math.isnan(f):
+            return Decimal("0")
+        return Decimal(str(f))
+
     t = yf.Ticker(symbol)
     df = getattr(t, "earnings_dates", None)
     if df is None or df.empty:
@@ -48,11 +62,10 @@ def _fetch_from_yfinance(symbol: str) -> EarningsHit | None:
         return None
     # most recent reported row
     row = df.iloc[0]
-    eps_actual = Decimal(str(row["Reported EPS"]))
-    eps_est = Decimal(str(row["EPS Estimate"]))
-    # Revenue columns may not be present; treat absence as a beat False
-    rev_actual = Decimal(str(row.get("Reported Revenue", 0) or 0))
-    rev_est = Decimal(str(row.get("Revenue Estimate", 0) or 0))
+    eps_actual = _safe_decimal(row["Reported EPS"])
+    eps_est = _safe_decimal(row["EPS Estimate"])
+    rev_actual = _safe_decimal(row.get("Reported Revenue"))
+    rev_est = _safe_decimal(row.get("Revenue Estimate"))
     return EarningsHit(
         symbol=symbol,
         report_date=row.name.date() if hasattr(row.name, "date") else row.name,
@@ -81,7 +94,7 @@ def find_recent_earnings_beats(
             continue
         if hit.report_date < earliest or hit.report_date > asof_date:
             continue
-        if not (hit.eps_beat and hit.revenue_beat):
+        if not hit.eps_beat:
             continue
         hits.append(hit)
     return hits

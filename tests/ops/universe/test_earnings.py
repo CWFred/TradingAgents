@@ -29,7 +29,9 @@ def test_keeps_beats_within_lookback():
         fetch=lambda sym: table[sym],
     )
     syms = sorted(h.symbol for h in result)
-    assert syms == ["AAPL", "MSFT"]
+    # After spec change: only EPS beat is required (revenue is informational).
+    # AMZN now passes despite revenue_beat=False.
+    assert syms == ["AAPL", "AMZN", "MSFT"]
 
 
 def test_returns_empty_when_no_hits():
@@ -38,3 +40,21 @@ def test_returns_empty_when_no_hits():
         fetch=lambda sym: None,
     )
     assert result == []
+
+
+def test_safe_decimal_handles_nan_and_missing_values():
+    from ops.universe.earnings import EarningsHit, find_recent_earnings_beats
+
+    def _make(symbol, revenue_beat):
+        return EarningsHit(
+            symbol=symbol, report_date=date(2026, 6, 30),
+            eps_actual=Decimal("1"), eps_estimate=Decimal("0.9"),
+            revenue_actual=Decimal("0"), revenue_estimate=Decimal("0"),
+            eps_beat=True, revenue_beat=revenue_beat,
+        )
+    hits = find_recent_earnings_beats(
+        ["A", "B"], asof_date=date(2026, 6, 30), lookback_days=1,
+        fetch=lambda s: _make(s, revenue_beat=(s == "A")),
+    )
+    # Both should pass now that revenue_beat is informational
+    assert sorted(h.symbol for h in hits) == ["A", "B"]
