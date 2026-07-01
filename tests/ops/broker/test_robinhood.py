@@ -187,3 +187,27 @@ def test_close_position_spot_hard_check_rejects(fake_client, journal):
         broker.close_position("SPOT")
     assert exc.value.rule_name == "SpotDenyList"
     assert len(fake_client.placed) == 0
+
+
+def test_token_path_defaults_to_home(monkeypatch, tmp_path):
+    from ops.broker.mcp_client import _resolve_token_path
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("OPS_RH_TOKEN_PATH", raising=False)
+    path = _resolve_token_path()
+    assert path == tmp_path / ".config" / "tradingagents" / "robinhood_token.json"
+
+
+def test_token_path_env_override(monkeypatch, tmp_path):
+    from ops.broker.mcp_client import _resolve_token_path
+    override = tmp_path / "custom.json"
+    monkeypatch.setenv("OPS_RH_TOKEN_PATH", str(override))
+    assert _resolve_token_path() == override
+
+
+def test_write_token_creates_dir_with_0600_perms(tmp_path):
+    from ops.broker.mcp_client import _write_token
+    path = tmp_path / "sub" / "token.json"
+    _write_token(path, {"access_token": "xyz", "expires_at": "..."})
+    assert path.exists()
+    mode = path.stat().st_mode & 0o777
+    assert mode == 0o600
