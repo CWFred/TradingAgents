@@ -18,7 +18,7 @@ from ops.broker.base import (
     Broker, BrokerError, NoSuchPosition, OrderRejected,
 )
 from ops.broker.mcp_client import (
-    MCPUnavailable, RobinhoodMCPClient,
+    MCPOrderAck, MCPUnavailable, RobinhoodMCPClient,
 )
 from ops.broker.types import Fill, Order, OrderType, Position, Side
 from ops.journal import Journal
@@ -100,14 +100,14 @@ class RobinhoodBroker(Broker):
             )
         except MCPUnavailable as exc:
             raise BrokerError(f"mcp unavailable: {exc}") from exc
-        return self._ack_to_fill_close(symbol, existing.quantity, ack)
+        return self._ack_to_fill_close(symbol, requested_qty=existing.quantity, ack=ack)
 
     def _enforce_spot_hard_check(self, symbol: str) -> None:
         if symbol.upper() in _SPOT_SYMBOLS:
             raise OrderRejected("SpotDenyList", "SPOT is contractually restricted")
 
-    def _ack_to_fill(self, order, ack) -> Fill:
-        # Fill quantity from ack; fall back to notional/price if ack missing qty.
+    def _ack_to_fill(self, order: Order, ack: MCPOrderAck) -> Fill:
+        # Fill quantity from ack; fall back to 0 if the ack doesn't report one.
         qty = ack.quantity if ack.quantity is not None else Decimal("0")
         price = ack.fill_price if ack.fill_price is not None else Decimal("0")
         fill = Fill(
@@ -122,7 +122,15 @@ class RobinhoodBroker(Broker):
         )
         return fill
 
-    def _ack_to_fill_close(self, symbol: str, qty: Decimal, ack) -> Fill:
+    def _ack_to_fill_close(
+        self, symbol: str, *, requested_qty: Decimal, ack: MCPOrderAck,
+    ) -> Fill:
+        # Prefer the ack's actual filled quantity when it reports one; fall
+        # back to the pre-trade snapshot only if the ack lacks a quantity.
+        # A real market SELL can partially fill (halted stock, illiquid,
+        # etc.), and journaling the requested quantity in that case would
+        # misrecord the position.
+        qty = ack.quantity if ack.quantity is not None else requested_qty
         price = ack.fill_price if ack.fill_price is not None else Decimal("0")
         fill = Fill(
             order_id=ack.order_id, client_order_id=ack.client_order_id,

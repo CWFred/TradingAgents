@@ -98,6 +98,22 @@ def test_close_position_places_quantity_sell(fake_client, journal):
     assert ack.notional is None
 
 
+def test_place_order_sell_calls_mcp(fake_client, journal):
+    fake_client.set_quote("AAPL", Decimal("10"))
+    fake_client.seed_position("AAPL", Decimal("5"), Decimal("10"))
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    fill = broker.place_order(Order(
+        client_order_id="s-1", symbol="AAPL", side=Side.SELL,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+        stop_loss_price=None,
+    ))
+    assert fill.side == Side.SELL
+    assert fill.quantity == Decimal("5")
+    assert len(fake_client.placed) == 1
+    assert fake_client.placed[0].side == Side.SELL
+    assert fake_client.placed[0].notional == Decimal("50")
+
+
 def test_close_position_missing_raises(fake_client, journal):
     broker = RobinhoodBroker(client=fake_client, journal=journal)
     with pytest.raises(NoSuchPosition):
@@ -129,6 +145,27 @@ def test_mcp_unavailable_wraps_on_close_position(fake_client, journal):
     fake_client.fail_next(MCPUnavailable("network"))
     with pytest.raises(BrokerError):
         broker.close_position("AAPL")
+
+
+def test_get_equity_wraps_mcp_unavailable(fake_client, journal):
+    fake_client.fail_next(MCPUnavailable("net"))
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    with pytest.raises(BrokerError):
+        broker.get_equity()
+
+
+def test_get_positions_wraps_mcp_unavailable(fake_client, journal):
+    fake_client.fail_next(MCPUnavailable("net"))
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    with pytest.raises(BrokerError):
+        broker.get_positions()
+
+
+def test_get_quote_wraps_mcp_unavailable(fake_client, journal):
+    fake_client.fail_next(MCPUnavailable("net"))
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    with pytest.raises(BrokerError):
+        broker.get_quote("AAPL")
 
 
 def test_place_order_spot_hard_check_rejects(fake_client, journal):
