@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -45,8 +46,10 @@ CREATE TABLE IF NOT EXISTS fills (
 CREATE TABLE IF NOT EXISTS equity_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'manual',
     equity TEXT NOT NULL,
-    cash TEXT NOT NULL
+    cash TEXT NOT NULL,
+    note TEXT
 );
 """
 
@@ -68,12 +71,34 @@ def _from_iso(s: str) -> datetime:
     return dt
 
 
+@dataclass(frozen=True)
+class EquitySnapshot:
+    at: datetime
+    kind: str
+    equity: Decimal
+    cash: Decimal
+    note: str | None
+
+
 class Journal:
     def __init__(self, path: str):
         self._path = path
         self._conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+
+        # Defensive migration for DBs created before kind/note existed.
+        cur = self._conn.execute("PRAGMA table_info(equity_snapshots)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "kind" not in cols:
+            self._conn.execute(
+                "ALTER TABLE equity_snapshots ADD COLUMN kind TEXT NOT NULL DEFAULT 'manual'"
+            )
+        if "note" not in cols:
+            self._conn.execute("ALTER TABLE equity_snapshots ADD COLUMN note TEXT")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_equity_kind_at ON equity_snapshots (kind, at)"
+        )
 
     def record_event(self, kind: str, payload: dict[str, Any]) -> None:
         self._conn.execute(
@@ -145,16 +170,47 @@ class Journal:
             for row in cur
         ]
 
-    def record_equity_snapshot(self, *, at: datetime, equity: Decimal, cash: Decimal) -> None:
+    def record_equity_snapshot(
+        self, *, kind: str, equity: Decimal, cash: Decimal,
+        at: datetime | None = None, note: str | None = None,
+    ) -> None:
+        ts = _to_iso(at) if at is not None else _now_iso()
         self._conn.execute(
-            "INSERT INTO equity_snapshots (at, equity, cash) VALUES (?, ?, ?)",
-            (_to_iso(at), str(equity), str(cash)),
+            "INSERT INTO equity_snapshots (at, kind, equity, cash, note) VALUES (?, ?, ?, ?, ?)",
+            (ts, kind, str(equity), str(cash), note),
+        )
+
+    def get_latest_equity_snapshot(
+        self, *, kind: str, since: datetime | None = None,
+    ) -> EquitySnapshot | None:
+        if since is None:
+            row = self._conn.execute(
+                "SELECT at, kind, equity, cash, note FROM equity_snapshots"
+                " WHERE kind = ? ORDER BY at DESC LIMIT 1",
+                (kind,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT at, kind, equity, cash, note FROM equity_snapshots"
+                " WHERE kind = ? AND at >= ? ORDER BY at DESC LIMIT 1",
+                (kind, _to_iso(since)),
+            ).fetchone()
+        if row is None:
+            return None
+        return EquitySnapshot(
+            at=_from_iso(row[0]), kind=row[1],
+            equity=Decimal(row[2]), cash=Decimal(row[3]), note=row[4],
         )
 
     def read_equity_snapshots(self) -> list[dict[str, Any]]:
-        cur = self._conn.execute("SELECT at, equity, cash FROM equity_snapshots ORDER BY id")
+        cur = self._conn.execute(
+            "SELECT at, kind, equity, cash, note FROM equity_snapshots ORDER BY id"
+        )
         return [
-            {"at": _from_iso(row[0]), "equity": Decimal(row[1]), "cash": Decimal(row[2])}
+            {
+                "at": _from_iso(row[0]), "kind": row[1],
+                "equity": Decimal(row[2]), "cash": Decimal(row[3]), "note": row[4],
+            }
             for row in cur
         ]
 

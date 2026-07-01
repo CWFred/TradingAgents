@@ -7,12 +7,26 @@ from decimal import Decimal
 
 import pytest
 
-from ops import build_default_rule_chain, build_guarded_paper_broker
+from ops import (
+    build_default_rule_chain,
+    build_guarded_paper_broker,
+    build_guarded_robinhood_broker,
+)
 from ops.broker.base import OrderRejected
 from ops.broker.guarded import GuardedBroker
 from ops.broker.types import Order, OrderType, Side
 from ops.config import OpsConfig
 from ops.journal import Journal
+
+
+@pytest.fixture
+def config():
+    return OpsConfig()
+
+
+@pytest.fixture
+def journal(tmp_path):
+    return Journal(str(tmp_path / "j.sqlite"))
 
 
 def _factory(tmp_path, *, starting_cash="250", quotes=None):
@@ -96,7 +110,7 @@ def test_broker_layer_exception_is_journaled(tmp_path):
     )
     sell = Order(
         client_order_id="cS", symbol="AAPL", side=Side.SELL,
-        notional_dollars=Decimal("0"), order_type=OrderType.MARKET,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
     )
     with pytest.raises(Exception):
         guarded.place_order(sell)
@@ -180,3 +194,32 @@ def test_config_defaults_still_valid():
     # Default construction must still succeed.
     cfg = OpsConfig()
     assert cfg.broker_mode == "paper"
+
+
+def test_build_guarded_robinhood_broker_with_fake_client(config, journal):
+    from tests.ops.broker.fakes import FakeMCPClient
+    client = FakeMCPClient()
+    client.set_quote("AAPL", Decimal("10"))
+    broker = build_guarded_robinhood_broker(
+        config=config, journal=journal,
+        mcp_client=client,
+        start_of_day_equity=lambda: Decimal("1000"),
+        start_of_week_equity=lambda: Decimal("1000"),
+    )
+    assert isinstance(broker, GuardedBroker)
+
+
+def test_build_guarded_robinhood_broker_blocks_spot(config, journal):
+    from tests.ops.broker.fakes import FakeMCPClient
+    client = FakeMCPClient()
+    broker = build_guarded_robinhood_broker(
+        config=config, journal=journal, mcp_client=client,
+        start_of_day_equity=lambda: Decimal("1000"),
+        start_of_week_equity=lambda: Decimal("1000"),
+    )
+    with pytest.raises(OrderRejected):
+        broker.place_order(Order(
+            client_order_id="b-1", symbol="SPOT", side=Side.BUY,
+            notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+            stop_loss_price=Decimal("100"),
+        ))

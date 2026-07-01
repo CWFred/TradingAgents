@@ -31,6 +31,8 @@ class Order:
             raise ValueError("notional_dollars cannot be negative")
         if self.side == Side.BUY and self.notional_dollars <= 0:
             raise ValueError("BUY order requires positive notional_dollars")
+        if self.side == Side.SELL and self.notional_dollars <= 0:
+            raise ValueError("SELL order requires positive notional_dollars")
         if self.order_type == OrderType.LIMIT and self.limit_price is None:
             raise ValueError("LIMIT order requires limit_price")
 

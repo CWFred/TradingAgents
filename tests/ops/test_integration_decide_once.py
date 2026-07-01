@@ -5,6 +5,7 @@ from datetime import date
 from decimal import Decimal
 
 from ops import build_guarded_paper_broker
+from ops.broker.types import Order, OrderType, Side
 from ops.config import OpsConfig
 from ops.journal import Journal
 from ops.pipeline_adapter import PipelineDecision, StubPipelineAdapter
@@ -73,5 +74,66 @@ def test_full_pass_fill_then_stop(tmp_path):
     fills = j.read_fills()
     sides = [f["side"] for f in fills]
     assert sides == ["BUY", "SELL"]
+    # The stop-triggered SELL is closed via close_position, whose
+    # client_order_id is close-<symbol>-<8hex>.
+    close_fill = fills[1]
+    assert close_fill["client_order_id"].startswith("close-AAPL-")
     stop_events = [e for e in j.read_events() if e["kind"] == "stop_hit"]
     assert len(stop_events) == 1
+    assert stop_events[0]["payload"]["mode"] == "absolute"
+
+
+def test_integration_buy_stop_hit_via_close_position(tmp_path):
+    """Full lifecycle: BUY through the guarded paper broker, guardian
+    triggers on price drop, close_position sells everything.
+
+    Seeds the BUY directly against the guarded broker (no pipeline/LLM
+    involved) with an explicit stop_loss_price, mirroring what
+    PostEarningsMomentumStrategy attaches to every proposal."""
+    cfg = OpsConfig()
+    j = Journal(str(tmp_path / "j.sqlite"))
+    quotes = {"AAPL": Decimal("200")}
+    guarded = build_guarded_paper_broker(
+        config=cfg, journal=j,
+        quote_source=lambda s: quotes["AAPL"],
+        starting_cash=Decimal("250"),
+        start_of_day_equity=lambda: Decimal("250"),
+        start_of_week_equity=lambda: Decimal("250"),
+    )
+
+    # Act 1: place a BUY with an explicit (absolute) stop_loss_price.
+    order = Order(
+        client_order_id="buy-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("184"),
+    )
+    guarded.place_order(order)
+
+    cash_after_buy = guarded.get_cash()
+    positions = guarded.get_positions()
+    assert len(positions) == 1
+    assert positions[0].symbol == "AAPL"
+    assert positions[0].stop_loss_price == Decimal("184")
+
+    # Act 2: drop the quote below the stop and let the guardian react.
+    quotes["AAPL"] = Decimal("180")
+    guardian = PositionGuardian(
+        broker=guarded, quote_source=lambda s: quotes["AAPL"], config=cfg,
+    )
+    actions = guardian.check_stops_once()
+    assert any(a.sold and a.symbol == "AAPL" for a in actions)
+
+    # Assert: position closed, cash increased by the sale proceeds.
+    assert guarded.get_positions() == []
+    proceeds = positions[0].quantity * quotes["AAPL"]
+    assert guarded.get_cash() == cash_after_buy + proceeds
+
+    # Assert: journal has the close fill and a stop_hit event.
+    fills = j.read_fills()
+    close_fills = [f for f in fills if f["side"] == "SELL"]
+    assert len(close_fills) == 1
+    assert close_fills[0]["client_order_id"].startswith("close-AAPL-")
+
+    stop_events = [e for e in j.read_events() if e["kind"] == "stop_hit"]
+    assert len(stop_events) == 1
+    assert stop_events[0]["payload"]["mode"] == "absolute"

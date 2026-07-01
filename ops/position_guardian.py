@@ -5,14 +5,12 @@ if the position is at or past the per_position_stop_pct threshold. This is
 the single-pass variant; Plan 3 will wrap it in a background-thread loop."""
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable
 
 from ops.broker.base import BrokerError, QuoteUnavailable
 from ops.broker.guarded import GuardedBroker
-from ops.broker.types import Order, OrderType, Side
 from ops.config import OpsConfig
 
 
@@ -61,36 +59,35 @@ class PositionGuardian:
                     reason=f"quote unavailable: {exc}",
                 ))
                 continue
-            pct = pos.unrealized_pct(current)
-            triggered = pct <= self._cfg.per_position_stop_pct
+
+            if pos.stop_loss_price is not None:
+                triggered = current <= pos.stop_loss_price
+                mode = "absolute"
+                threshold_repr = f"abs {pos.stop_loss_price}"
+                pct = pos.unrealized_pct(current)
+            else:
+                pct = pos.unrealized_pct(current)
+                triggered = pct <= self._cfg.per_position_stop_pct
+                mode = "pct"
+                threshold_repr = f"pct {self._cfg.per_position_stop_pct}"
+
             if not triggered:
                 actions.append(StopAction(
                     symbol=pos.symbol, entry=pos.avg_entry_price,
                     current=current, pct=pct, sold=False,
-                    reason=f"unrealized {pct} above stop {self._cfg.per_position_stop_pct}",
+                    reason=f"unrealized {pct} above stop ({mode} {threshold_repr})",
                 ))
                 continue
-            # UUID suffix ensures each stop-sell attempt has a distinct
-            # client_order_id — otherwise re-entering the same symbol after
-            # a prior stop would emit a duplicate ID and confuse any future
-            # replay/idempotency logic keyed on client_order_id.
-            sell = Order(
-                client_order_id=f"stop-{pos.symbol}-{uuid.uuid4().hex[:8]}",
-                symbol=pos.symbol, side=Side.SELL,
-                notional_dollars=Decimal("0"),  # sell-all
-                order_type=OrderType.MARKET,
-            )
+
             try:
-                self._broker.place_order(sell)
+                self._broker.close_position(pos.symbol)
             except BrokerError as exc:
                 self._broker.journal.record_event(
                     "stop_failed",
                     {
-                        "symbol": pos.symbol,
-                        "entry": str(pos.avg_entry_price),
-                        "current": str(current),
-                        "pct": str(pct),
-                        "threshold": str(self._cfg.per_position_stop_pct),
+                        "symbol": pos.symbol, "entry": str(pos.avg_entry_price),
+                        "current": str(current), "pct": str(pct),
+                        "mode": mode, "threshold_repr": threshold_repr,
                         "error": f"{type(exc).__name__}: {exc}",
                     },
                 )
@@ -100,19 +97,18 @@ class PositionGuardian:
                     reason=f"stop-sell failed: {type(exc).__name__}: {exc}",
                 ))
                 continue
+
             self._broker.journal.record_event(
                 "stop_hit",
                 {
-                    "symbol": pos.symbol,
-                    "entry": str(pos.avg_entry_price),
-                    "current": str(current),
-                    "pct": str(pct),
-                    "threshold": str(self._cfg.per_position_stop_pct),
+                    "symbol": pos.symbol, "entry": str(pos.avg_entry_price),
+                    "current": str(current), "pct": str(pct),
+                    "mode": mode, "threshold_repr": threshold_repr,
                 },
             )
             actions.append(StopAction(
                 symbol=pos.symbol, entry=pos.avg_entry_price,
                 current=current, pct=pct, sold=True,
-                reason=f"stop hit at {pct} (threshold {self._cfg.per_position_stop_pct})",
+                reason=f"stop hit at {pct} ({mode} {threshold_repr})",
             ))
         return actions

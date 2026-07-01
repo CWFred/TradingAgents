@@ -61,7 +61,7 @@ def test_long_only_allows_buy_and_sell():
     assert LongOnlyRule().check(_ctx(_buy())).allowed is True
     sell = Order(
         client_order_id="c", symbol="AAPL", side=Side.SELL,
-        notional_dollars=Decimal("0"), order_type=OrderType.MARKET,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
     )
     assert LongOnlyRule().check(_ctx(sell)).allowed is True
 
@@ -76,7 +76,7 @@ def test_stop_attached_requires_stop_on_buy():
 def test_stop_attached_allows_sell_without_stop():
     sell = Order(
         client_order_id="c", symbol="AAPL", side=Side.SELL,
-        notional_dollars=Decimal("0"), order_type=OrderType.MARKET,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
     )
     assert StopAttachedRule().check(_ctx(sell)).allowed is True
 

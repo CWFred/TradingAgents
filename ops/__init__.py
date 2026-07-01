@@ -90,10 +90,38 @@ def build_guarded_paper_broker(
     return GuardedBroker(inner=inner, engine=engine, journal=journal, config=config)
 
 
+def build_guarded_robinhood_broker(
+    *,
+    config: OpsConfig,
+    journal: Journal,
+    mcp_client: "RobinhoodMCPClient | None" = None,
+    start_of_day_equity: EquityFn,
+    start_of_week_equity: EquityFn,
+) -> GuardedBroker:
+    """Build a guarded Robinhood broker.
+
+    Pass `mcp_client=FakeMCPClient(...)` in tests; production callers omit it
+    and a `RealRobinhoodMCPClient` is constructed with default endpoint + token path.
+    """
+    from ops.broker.mcp_client import RealRobinhoodMCPClient
+    from ops.broker.robinhood import RobinhoodBroker
+
+    client = mcp_client if mcp_client is not None else RealRobinhoodMCPClient()
+    inner = RobinhoodBroker(client=client, journal=journal)
+    engine = RuleEngine(
+        build_default_rule_chain(
+            start_of_day_equity=start_of_day_equity,
+            start_of_week_equity=start_of_week_equity,
+        )
+    )
+    return GuardedBroker(inner=inner, engine=engine, journal=journal, config=config)
+
+
 __all__ = [
     "OpsConfig",
     "Journal",
     "GuardedBroker",
     "build_default_rule_chain",
     "build_guarded_paper_broker",
+    "build_guarded_robinhood_broker",
 ]

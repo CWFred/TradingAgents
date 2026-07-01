@@ -18,12 +18,15 @@ def test_order_buy_requires_positive_notional():
             notional_dollars=Decimal("0"), order_type=OrderType.MARKET,
         )
 
-def test_order_sell_allows_zero_notional_meaning_sell_all():
-    o = Order(
-        client_order_id="x", symbol="AAPL", side=Side.SELL,
-        notional_dollars=Decimal("0"), order_type=OrderType.MARKET,
-    )
-    assert o.notional_dollars == Decimal("0")
+def test_sell_order_requires_positive_notional():
+    with pytest.raises(ValueError, match="SELL order requires positive notional_dollars"):
+        Order(
+            client_order_id="s-1",
+            symbol="AAPL",
+            side=Side.SELL,
+            notional_dollars=Decimal("0"),
+            order_type=OrderType.MARKET,
+        )
 
 def test_position_value():
     p = Position(
