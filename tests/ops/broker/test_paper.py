@@ -60,17 +60,13 @@ def test_sell_reduces_position_and_credits_cash(tmp_path):
 
 
 def test_sell_zero_notional_closes_position(tmp_path):
-    pytest.skip("moves to close_position in task 2")
     b = _broker(tmp_path, {"AAPL": "200"})
     b.place_order(Order(
         client_order_id="c1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
         stop_loss_price=Decimal("184"),
     ))
-    b.place_order(Order(
-        client_order_id="c2", symbol="AAPL", side=Side.SELL,
-        notional_dollars=Decimal("0"), order_type=OrderType.MARKET,
-    ))
+    b.close_position("AAPL")
     assert b.get_positions() == []
     assert b.get_cash() == Decimal("250")
 
@@ -109,3 +105,36 @@ def test_fills_are_journaled(tmp_path):
     assert len(orders) == 1 and len(fills) == 1
     assert orders[0]["client_order_id"] == "c1"
     assert fills[0]["quantity"] == Decimal("0.125")
+
+
+def test_close_position_sells_full_qty(tmp_path):
+    b = _broker(tmp_path, {"AAPL": "10"}, cash="100")
+    b.place_order(Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+    ))
+    fill = b.close_position("AAPL")
+    assert fill.side == Side.SELL
+    assert fill.quantity == Decimal("5")
+    assert b.get_positions() == []
+    assert b.get_cash() == Decimal("100")
+
+
+def test_close_position_missing_symbol_raises(tmp_path):
+    b = _broker(tmp_path, {"AAPL": "10"}, cash="100")
+    with pytest.raises(NoSuchPosition):
+        b.close_position("NVDA")
+
+
+def test_close_position_records_fill_to_journal(tmp_path):
+    j = Journal(str(tmp_path / "j.sqlite"))
+    b = PaperBroker(journal=j, quote_source=lambda s: Decimal("10"), starting_cash=Decimal("100"))
+    b.place_order(Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+    ))
+    b.close_position("AAPL")
+    fills = j.read_fills()
+    close_fills = [f for f in fills if f["client_order_id"].startswith("close-AAPL-")]
+    assert len(close_fills) == 1
+    assert close_fills[0]["side"] == "SELL"

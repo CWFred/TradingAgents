@@ -78,14 +78,40 @@ class PaperBroker(Broker):
         self._positions[order.symbol] = new_pos
         return self._make_fill(order, qty, price)
 
+    def close_position(self, symbol: str) -> Fill:
+        existing = self._positions.get(symbol)
+        if existing is None:
+            raise NoSuchPosition(f"no position in {symbol}")
+        price = self._quote(symbol)
+        qty = existing.quantity
+        proceeds = qty * price
+        self._cash += proceeds
+        del self._positions[symbol]
+        fill = Fill(
+            order_id=str(uuid4()),
+            client_order_id=f"close-{symbol}-{uuid4().hex[:8]}",
+            symbol=symbol,
+            side=Side.SELL,
+            quantity=qty,
+            price=price,
+            filled_at=datetime.now(timezone.utc),
+        )
+        self._journal.record_fill(
+            order_id=fill.order_id,
+            client_order_id=fill.client_order_id,
+            symbol=fill.symbol,
+            side=fill.side.value,
+            quantity=fill.quantity,
+            price=fill.price,
+            filled_at=fill.filled_at,
+        )
+        return fill
+
     def _fill_sell(self, order: Order, price: Decimal) -> Fill:
         existing = self._positions.get(order.symbol)
         if existing is None:
             raise NoSuchPosition(f"no position in {order.symbol}")
-        if order.notional_dollars == 0:
-            qty_to_sell = existing.quantity
-        else:
-            qty_to_sell = order.notional_dollars / price
+        qty_to_sell = order.notional_dollars / price
         if qty_to_sell > existing.quantity + _EPSILON:
             raise NoSuchPosition(
                 f"sell qty {qty_to_sell} exceeds position {existing.quantity}"
