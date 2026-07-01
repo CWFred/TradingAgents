@@ -102,6 +102,21 @@ def test_close_position_places_quantity_sell(fake_client, journal):
     assert ack.notional is None
 
 
+def test_close_position_journals_order_before_fill(journal, fake_client):
+    fake_client.set_quote("AAPL", Decimal("10"))
+    fake_client.seed_position("AAPL", Decimal("5"), Decimal("10"))
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    broker.close_position("AAPL")
+    orders = journal.read_orders()
+    close_orders = [o for o in orders if o["client_order_id"].startswith("close-AAPL-")]
+    assert len(close_orders) == 1
+    assert close_orders[0]["side"] == "SELL"
+    assert close_orders[0]["notional_dollars"] == Decimal("50")
+    fills = journal.read_fills()
+    close_fills = [f for f in fills if f["client_order_id"] == close_orders[0]["client_order_id"]]
+    assert len(close_fills) == 1
+
+
 def test_place_order_sell_calls_mcp(fake_client, journal):
     fake_client.set_quote("AAPL", Decimal("10"))
     fake_client.seed_position("AAPL", Decimal("5"), Decimal("10"))
