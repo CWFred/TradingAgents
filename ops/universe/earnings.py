@@ -23,6 +23,20 @@ class EarningsHit:
     revenue_beat: bool
 
 
+def _safe_decimal(v) -> Decimal:
+    """Convert a yfinance numeric value to Decimal, treating NaN/None as 0.
+    Prevents decimal.InvalidOperation on NaN and normalises absent data."""
+    if v is None:
+        return Decimal("0")
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return Decimal("0")
+    if math.isnan(f):
+        return Decimal("0")
+    return Decimal(str(f))
+
+
 def _is_trading_day(d: date) -> bool:
     # Mon=0..Fri=4. Holidays are not handled here — a holiday inside the
     # lookback window simply shortens the effective range by one calendar day.
@@ -40,42 +54,41 @@ def _trading_days_back(asof: date, n: int) -> date:
 
 
 def _fetch_from_yfinance(symbol: str) -> EarningsHit | None:
-    def _safe_decimal(v) -> Decimal:
-        """Convert a yfinance numeric value to Decimal, treating NaN/None as 0.
-        Prevents decimal.InvalidOperation on NaN and normalises absent data."""
-        if v is None:
-            return Decimal("0")
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
-            return Decimal("0")
-        if math.isnan(f):
-            return Decimal("0")
-        return Decimal(str(f))
-
-    t = yf.Ticker(symbol)
-    df = getattr(t, "earnings_dates", None)
-    if df is None or df.empty:
+    """Fetch the most recent earnings row for `symbol` from yfinance.
+    Returns None on any failure — yfinance's scraping is flaky and one bad
+    symbol should never abort the batch. Prints a one-line diagnostic to
+    stderr on exception so we can spot systemic problems in the logs."""
+    try:
+        t = yf.Ticker(symbol)
+        df = getattr(t, "earnings_dates", None)
+        if df is None or df.empty:
+            return None
+        df = df.dropna(subset=["EPS Estimate", "Reported EPS"])
+        if df.empty:
+            return None
+        # most recent reported row
+        row = df.iloc[0]
+        eps_actual = _safe_decimal(row["Reported EPS"])
+        eps_est = _safe_decimal(row["EPS Estimate"])
+        rev_actual = _safe_decimal(row.get("Reported Revenue"))
+        rev_est = _safe_decimal(row.get("Revenue Estimate"))
+        return EarningsHit(
+            symbol=symbol,
+            report_date=row.name.date() if hasattr(row.name, "date") else row.name,
+            eps_actual=eps_actual,
+            eps_estimate=eps_est,
+            revenue_actual=rev_actual,
+            revenue_estimate=rev_est,
+            eps_beat=eps_actual > eps_est,
+            revenue_beat=rev_actual > rev_est,
+        )
+    except Exception as exc:
+        import sys
+        print(
+            f"[earnings] skipped {symbol}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return None
-    df = df.dropna(subset=["EPS Estimate", "Reported EPS"])
-    if df.empty:
-        return None
-    # most recent reported row
-    row = df.iloc[0]
-    eps_actual = _safe_decimal(row["Reported EPS"])
-    eps_est = _safe_decimal(row["EPS Estimate"])
-    rev_actual = _safe_decimal(row.get("Reported Revenue"))
-    rev_est = _safe_decimal(row.get("Revenue Estimate"))
-    return EarningsHit(
-        symbol=symbol,
-        report_date=row.name.date() if hasattr(row.name, "date") else row.name,
-        eps_actual=eps_actual,
-        eps_estimate=eps_est,
-        revenue_actual=rev_actual,
-        revenue_estimate=rev_est,
-        eps_beat=eps_actual > eps_est,
-        revenue_beat=rev_actual > rev_est,
-    )
 
 
 def find_recent_earnings_beats(

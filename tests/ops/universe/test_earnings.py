@@ -58,3 +58,18 @@ def test_safe_decimal_handles_nan_and_missing_values():
     )
     # Both should pass now that revenue_beat is informational
     assert sorted(h.symbol for h in hits) == ["A", "B"]
+
+
+def test_fetch_from_yfinance_returns_none_on_exception(monkeypatch, capsys):
+    """One flaky ticker must not abort the batch — the fetcher swallows and logs."""
+    import ops.universe.earnings as mod
+
+    class BoomTicker:
+        earnings_dates = property(lambda self: (_ for _ in ()).throw(KeyError("['Earnings Date']")))
+
+    monkeypatch.setattr(mod.yf, "Ticker", lambda symbol: BoomTicker())
+    result = mod._fetch_from_yfinance("ZZZZ")
+    assert result is None
+    err = capsys.readouterr().err
+    assert "ZZZZ" in err
+    assert "KeyError" in err
