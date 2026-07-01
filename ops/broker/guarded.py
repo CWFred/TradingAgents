@@ -12,10 +12,11 @@ state, both pass sizing/cash rules against stale numbers, and both fill.
 from __future__ import annotations
 
 import threading
+import uuid
 from decimal import Decimal
 
-from ops.broker.base import Broker, BrokerError, OrderRejected
-from ops.broker.types import Fill, Order, Position
+from ops.broker.base import Broker, BrokerError, NoSuchPosition, OrderRejected
+from ops.broker.types import Fill, Order, OrderType, Position, Side
 from ops.config import OpsConfig
 from ops.guardrails.base import RuleContext
 from ops.guardrails.engine import RuleEngine
@@ -75,6 +76,54 @@ class GuardedBroker(Broker):
                         "symbol": order.symbol,
                         "side": order.side.value,
                         "notional_dollars": str(order.notional_dollars),
+                    },
+                )
+                raise
+
+    def close_position(self, symbol: str) -> Fill:
+        with self._lock:
+            positions = self.__inner.get_positions()
+            existing = next((p for p in positions if p.symbol == symbol), None)
+            if existing is None:
+                raise NoSuchPosition(f"no position in {symbol}")
+            price = self.__inner.get_quote(symbol)
+            notional = existing.quantity * price
+            close_order = Order(
+                client_order_id=f"close-{symbol}-{uuid.uuid4().hex[:8]}",
+                symbol=symbol,
+                side=Side.SELL,
+                notional_dollars=notional,
+                order_type=OrderType.MARKET,
+            )
+            ctx = RuleContext(order=close_order, broker=self.__inner, config=self._config)
+            result = self._engine.evaluate(ctx)
+            if not result.allowed:
+                self._journal.record_event(
+                    "order_rejected",
+                    {
+                        "rule": result.failed_rule_name,
+                        "reason": result.reason,
+                        "client_order_id": close_order.client_order_id,
+                        "symbol": symbol,
+                        "side": "SELL",
+                        "notional_dollars": str(notional),
+                        "context": "close_position",
+                    },
+                )
+                raise OrderRejected(result.failed_rule_name, result.reason)
+            try:
+                return self.__inner.close_position(symbol)
+            except BrokerError as exc:
+                self._journal.record_event(
+                    "order_rejected",
+                    {
+                        "rule": "broker",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                        "client_order_id": close_order.client_order_id,
+                        "symbol": symbol,
+                        "side": "SELL",
+                        "notional_dollars": str(notional),
+                        "context": "close_position",
                     },
                 )
                 raise
