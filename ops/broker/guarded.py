@@ -81,6 +81,14 @@ class GuardedBroker(Broker):
                 raise
 
     def close_position(self, symbol: str) -> Fill:
+        """Close a position, holding _lock across snapshot + rule chain + inner delegate.
+
+        Note: this signature intentionally omits the ABC's `client_order_id` kwarg.
+        GuardedBroker mints the id itself (`close-{symbol}-{uuid[:8]}`) so any
+        order_rejected event and the successful fill in the inner broker share the
+        same id. Passing an override here would break that traceability, so
+        callers are not given that lever.
+        """
         with self._lock:
             positions = self.__inner.get_positions()
             existing = next((p for p in positions if p.symbol == symbol), None)
