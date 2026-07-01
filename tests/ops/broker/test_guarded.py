@@ -64,3 +64,8 @@ def test_guarded_passes_through_read_methods(tmp_path):
     assert guarded.get_cash() == paper.get_cash()
     assert guarded.get_equity() == paper.get_equity()
     assert guarded.get_quote("AAPL") == paper.get_quote("AAPL")
+
+
+def test_guarded_exposes_journal(tmp_path):
+    j, paper, guarded = _stack(tmp_path)
+    assert guarded.journal is j

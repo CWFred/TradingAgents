@@ -1,0 +1,75 @@
+from datetime import date
+from decimal import Decimal
+
+from ops.universe.earnings import EarningsHit, find_recent_earnings_beats
+
+
+def _hit(symbol, report_date, *, eps_beat=True, revenue_beat=True):
+    return EarningsHit(
+        symbol=symbol, report_date=report_date,
+        eps_actual=Decimal("1"), eps_estimate=Decimal("0.9"),
+        revenue_actual=Decimal("100"), revenue_estimate=Decimal("90"),
+        eps_beat=eps_beat, revenue_beat=revenue_beat,
+    )
+
+
+def test_keeps_beats_within_lookback():
+    today = date(2026, 6, 30)
+    table = {
+        "AAPL": _hit("AAPL", date(2026, 6, 27)),   # 1 trading day back
+        "MSFT": _hit("MSFT", date(2026, 6, 30)),   # today
+        "NVDA": _hit("NVDA", date(2026, 6, 24)),   # too old (>2 trading days)
+        "META": _hit("META", date(2026, 6, 30), eps_beat=False),   # miss
+        "AMZN": _hit("AMZN", date(2026, 6, 30), revenue_beat=False),  # miss
+        "GOOG": None,                              # no earnings recently
+    }
+    result = find_recent_earnings_beats(
+        ["AAPL", "MSFT", "NVDA", "META", "AMZN", "GOOG"],
+        asof_date=today, lookback_days=2,
+        fetch=lambda sym: table[sym],
+    )
+    syms = sorted(h.symbol for h in result)
+    # After spec change: only EPS beat is required (revenue is informational).
+    # AMZN now passes despite revenue_beat=False.
+    assert syms == ["AAPL", "AMZN", "MSFT"]
+
+
+def test_returns_empty_when_no_hits():
+    result = find_recent_earnings_beats(
+        ["AAPL"], asof_date=date(2026, 6, 30),
+        fetch=lambda sym: None,
+    )
+    assert result == []
+
+
+def test_safe_decimal_handles_nan_and_missing_values():
+    from ops.universe.earnings import EarningsHit, find_recent_earnings_beats
+
+    def _make(symbol, revenue_beat):
+        return EarningsHit(
+            symbol=symbol, report_date=date(2026, 6, 30),
+            eps_actual=Decimal("1"), eps_estimate=Decimal("0.9"),
+            revenue_actual=Decimal("0"), revenue_estimate=Decimal("0"),
+            eps_beat=True, revenue_beat=revenue_beat,
+        )
+    hits = find_recent_earnings_beats(
+        ["A", "B"], asof_date=date(2026, 6, 30), lookback_days=1,
+        fetch=lambda s: _make(s, revenue_beat=(s == "A")),
+    )
+    # Both should pass now that revenue_beat is informational
+    assert sorted(h.symbol for h in hits) == ["A", "B"]
+
+
+def test_fetch_from_yfinance_returns_none_on_exception(monkeypatch, capsys):
+    """One flaky ticker must not abort the batch — the fetcher swallows and logs."""
+    import ops.universe.earnings as mod
+
+    class BoomTicker:
+        earnings_dates = property(lambda self: (_ for _ in ()).throw(KeyError("['Earnings Date']")))
+
+    monkeypatch.setattr(mod.yf, "Ticker", lambda symbol: BoomTicker())
+    result = mod._fetch_from_yfinance("ZZZZ")
+    assert result is None
+    err = capsys.readouterr().err
+    assert "ZZZZ" in err
+    assert "KeyError" in err

@@ -31,6 +31,7 @@ dependencies = [
     "tqdm>=4.67.1",
     "typing-extensions>=4.14.0",
     "yfinance>=1.4.1",
+    "click>=8.1",
 ]
 
 [project.optional-dependencies]
@@ -47,9 +48,10 @@ bedrock = [
 
 [project.scripts]
 tradingagents = "cli.main:app"
+ops = "ops.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "ops*", "tests*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]

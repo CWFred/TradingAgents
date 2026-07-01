@@ -30,6 +30,10 @@ class GuardedBroker(Broker):
         self._config = config
         self._lock = threading.Lock()
 
+    @property
+    def journal(self) -> Journal:
+        return self._journal
+
     def get_cash(self) -> Decimal:
         return self.__inner.get_cash()
 

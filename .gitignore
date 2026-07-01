@@ -221,3 +221,10 @@ __marimo__/
 # Enterprise env file (secrets) and generated run reports
 .env.enterprise
 reports/
+
+# Subagent-driven development progress ledger (skill scratch state)
+.superpowers/
+
+# Cached universe data (refreshed weekly at runtime)
+ops/universe/_data/*
+!ops/universe/_data/.gitkeep
