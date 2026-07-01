@@ -82,7 +82,6 @@ def test_default_rule_chain_has_all_thirteen_rules():
 def test_broker_layer_exception_is_journaled(tmp_path):
     """If the inner broker rejects after guardrails pass (e.g. InsufficientFunds
     in a degenerate scenario), the rejection must still land in the journal."""
-    pytest.skip("moves to close_position in task 3")
     # Engineer a stack where guardrails pass but the inner broker rejects.
     # We start with $250 cash. We disable CashReserveRule to let the BUY past,
     # then SELL a position we don't have — inner raises NoSuchPosition.
@@ -97,7 +96,7 @@ def test_broker_layer_exception_is_journaled(tmp_path):
     )
     sell = Order(
         client_order_id="cS", symbol="AAPL", side=Side.SELL,
-        notional_dollars=Decimal("0"), order_type=OrderType.MARKET,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
     )
     with pytest.raises(Exception):
         guarded.place_order(sell)

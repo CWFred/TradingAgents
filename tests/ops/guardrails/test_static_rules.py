@@ -58,11 +58,10 @@ def test_long_only_blocks_short_marker_in_client_order_id():
     assert LongOnlyRule().check(_ctx(o)).allowed is False
 
 def test_long_only_allows_buy_and_sell():
-    pytest.skip("moves to close_position in task 2")
     assert LongOnlyRule().check(_ctx(_buy())).allowed is True
     sell = Order(
         client_order_id="c", symbol="AAPL", side=Side.SELL,
-        notional_dollars=Decimal("0"), order_type=OrderType.MARKET,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
     )
     assert LongOnlyRule().check(_ctx(sell)).allowed is True
 
@@ -75,10 +74,9 @@ def test_stop_attached_requires_stop_on_buy():
     assert StopAttachedRule().check(_ctx(o)).allowed is False
 
 def test_stop_attached_allows_sell_without_stop():
-    pytest.skip("moves to close_position in task 2")
     sell = Order(
         client_order_id="c", symbol="AAPL", side=Side.SELL,
-        notional_dollars=Decimal("0"), order_type=OrderType.MARKET,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
     )
     assert StopAttachedRule().check(_ctx(sell)).allowed is True
 

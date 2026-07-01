@@ -39,9 +39,16 @@ def test_daily_drawdown_blocks_at_threshold():
 
 
 def test_daily_drawdown_does_not_block_sells():
-    pytest.skip("moves to close_position in task 2")
     rule = DailyDrawdownRule(start_of_day_equity=lambda: Decimal("250"))
-    assert rule.check(_sell_ctx("200")).allowed is True
+    # Inline ctx with positive notional since drawdown rule short-circuits on side != BUY
+    o = Order(
+        client_order_id="c", symbol="AAPL", side=Side.SELL,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+    )
+    b = MagicMock()
+    b.get_equity.return_value = Decimal("200")
+    ctx = RuleContext(order=o, broker=b, config=OpsConfig())
+    assert rule.check(ctx).allowed is True
 
 
 def test_weekly_drawdown_allows_above_threshold():
@@ -55,6 +62,13 @@ def test_weekly_drawdown_blocks_at_threshold():
 
 
 def test_weekly_drawdown_blocks_sells_too():
-    pytest.skip("moves to close_position in task 2")
     rule = WeeklyDrawdownRule(start_of_week_equity=lambda: Decimal("250"))
-    assert rule.check(_sell_ctx("200")).allowed is True
+    # Inline ctx with positive notional since drawdown rule short-circuits on side != BUY
+    o = Order(
+        client_order_id="c", symbol="AAPL", side=Side.SELL,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+    )
+    b = MagicMock()
+    b.get_equity.return_value = Decimal("200")
+    ctx = RuleContext(order=o, broker=b, config=OpsConfig())
+    assert rule.check(ctx).allowed is True
