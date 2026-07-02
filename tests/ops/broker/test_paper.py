@@ -245,7 +245,30 @@ def test_from_journal_replay_matches_live_cash_exactly_with_fractional_notional(
     assert replayed.get_cash() == live_cash
 
 
-def test_from_journal_emits_positions_recovered_without_stops_event(tmp_path, quote_source):
+def test_from_journal_emits_positions_recovered_without_stops_event_for_legacy_fills(tmp_path, quote_source):
+    """A position whose BUY fill carries no journaled stop (legacy data,
+    predating Task 2's stop_loss_price persistence) still can't be rehydrated
+    with a stop, so the recovery warning still fires for it."""
+    journal = Journal(str(tmp_path / "j.sqlite"))
+    quote_source.set("AAPL", Decimal("10"))
+    journal.record_order(client_order_id="b-1", symbol="AAPL", side="BUY",
+                         notional_dollars=Decimal("100"), stop_loss_price=None)
+    journal.record_fill(order_id="o-1", client_order_id="b-1", symbol="AAPL",
+                        side="BUY", quantity=Decimal("10"), price=Decimal("10"),
+                        filled_at=datetime.now(timezone.utc), stop_loss_price=None)
+    PaperBroker.from_journal(
+        journal=journal, quote_source=quote_source, starting_cash=Decimal("500"),
+    )
+    warnings = [e for e in journal.read_events() if e["kind"] == "positions_recovered_without_stops"]
+    assert len(warnings) == 1
+    assert warnings[0]["payload"]["symbols"] == ["AAPL"]
+    assert warnings[0]["payload"]["count"] == 1
+
+
+def test_from_journal_no_warning_when_stop_is_recovered(tmp_path, quote_source):
+    """Task 2 closes the recovery gap: a BUY that journaled a stop_loss_price
+    is rehydrated on replay, so the position is no longer 'unstopped' and the
+    positions_recovered_without_stops warning must not fire for it."""
     journal = Journal(str(tmp_path / "j.sqlite"))
     quote_source.set("AAPL", Decimal("10"))
     seed = PaperBroker(journal=journal, quote_source=quote_source, starting_cash=Decimal("500"))
@@ -258,9 +281,52 @@ def test_from_journal_emits_positions_recovered_without_stops_event(tmp_path, qu
         journal=journal, quote_source=quote_source, starting_cash=Decimal("500"),
     )
     warnings = [e for e in journal.read_events() if e["kind"] == "positions_recovered_without_stops"]
-    assert len(warnings) == 1
-    assert warnings[0]["payload"]["symbols"] == ["AAPL"]
-    assert warnings[0]["payload"]["count"] == 1
+    assert warnings == []
+
+
+def test_fill_buy_journals_stop_loss_price(tmp_path):
+    b = _broker(tmp_path, prices={"AAPL": Decimal("10")}, cash=Decimal("500"))
+    b.place_order(Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("9.2"),
+    ))
+    fills = b._journal.read_fills()
+    assert fills[0]["side"] == "BUY"
+    assert fills[0]["stop_loss_price"] == Decimal("9.2")
+
+
+def test_from_journal_rehydrates_stop_loss_price(tmp_path, quote_source):
+    journal = Journal(str(tmp_path / "j.sqlite"))
+    quote_source.set("AAPL", Decimal("10"))
+    seed = PaperBroker(journal=journal, quote_source=quote_source, starting_cash=Decimal("500"))
+    seed.place_order(Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("9.2"),
+    ))
+    replayed = PaperBroker.from_journal(
+        journal=journal, quote_source=quote_source, starting_cash=Decimal("500"),
+    )
+    positions = replayed.get_positions()
+    assert positions[0].stop_loss_price == Decimal("9.2")
+
+
+def test_from_journal_stop_none_when_no_journaled_stop(tmp_path, quote_source):
+    """Positions opened via a BUY that has no stop (legacy) still get None."""
+    journal = Journal(str(tmp_path / "j.sqlite"))
+    quote_source.set("AAPL", Decimal("10"))
+    # Directly journal a BUY fill with stop_loss_price=None to simulate legacy data.
+    ts = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    journal.record_order(client_order_id="b-1", symbol="AAPL", side="BUY",
+                         notional_dollars=Decimal("50"), stop_loss_price=None)
+    journal.record_fill(order_id="o-1", client_order_id="b-1", symbol="AAPL",
+                        side="BUY", quantity=Decimal("5"), price=Decimal("10"),
+                        filled_at=ts, stop_loss_price=None)
+    replayed = PaperBroker.from_journal(
+        journal=journal, quote_source=quote_source, starting_cash=Decimal("500"),
+    )
+    assert replayed.get_positions()[0].stop_loss_price is None
 
 
 def test_from_journal_falls_back_to_qty_times_price_when_order_row_missing(tmp_path, quote_source):
