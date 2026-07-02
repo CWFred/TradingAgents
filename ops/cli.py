@@ -30,6 +30,14 @@ def cli() -> None:
     """ops — operational live-trading layer."""
 
 
+@cli.command()
+def run():
+    """Start the always-on orchestrator + guardian service."""
+    import sys
+    from ops.main import run as _run
+    sys.exit(_run())
+
+
 @cli.command("decide-once")
 @click.option("--date", "as_of", required=True,
               type=click.DateTime(formats=["%Y-%m-%d"]),
