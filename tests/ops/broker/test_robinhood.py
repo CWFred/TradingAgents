@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -52,6 +53,36 @@ def test_get_positions_maps_mcp_positions(fake_client, journal):
     assert positions[0].quantity == Decimal("5")
     assert positions[0].avg_entry_price == Decimal("10")
     assert positions[0].stop_loss_price is None
+
+
+def test_get_positions_attaches_stop_from_journal(fake_client, journal):
+    """A journaled BUY with stop → RobinhoodBroker.get_positions() carries it."""
+    fake_client.seed_position("AAPL", Decimal("5"), Decimal("10"))
+    ts = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    journal.record_fill(order_id="o-1", client_order_id="b-1", symbol="AAPL",
+                        side="BUY", quantity=Decimal("5"), price=Decimal("10"),
+                        filled_at=ts, stop_loss_price=Decimal("9.2"))
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    positions = broker.get_positions()
+    assert positions[0].stop_loss_price == Decimal("9.2")
+
+
+def test_get_positions_stop_none_when_no_journaled_buy(fake_client, journal):
+    """Manual (non-journaled) position in RH → stop_loss_price=None."""
+    fake_client.seed_position("MSFT", Decimal("2"), Decimal("300"))
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    positions = broker.get_positions()
+    assert positions[0].stop_loss_price is None
+
+
+def test_get_positions_stop_none_when_journaled_buy_lacks_stop(fake_client, journal):
+    fake_client.seed_position("NVDA", Decimal("1"), Decimal("500"))
+    ts = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    journal.record_fill(order_id="o-1", client_order_id="b-1", symbol="NVDA",
+                        side="BUY", quantity=Decimal("1"), price=Decimal("500"),
+                        filled_at=ts, stop_loss_price=None)
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    assert broker.get_positions()[0].stop_loss_price is None
 
 
 def test_get_quote_delegates_to_client(fake_client, journal):

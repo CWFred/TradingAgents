@@ -49,13 +49,17 @@ class RobinhoodBroker(Broker):
             mcp_positions = self._client.get_positions()
         except MCPUnavailable as exc:
             raise BrokerError(f"mcp unavailable: {exc}") from exc
-        return [
-            Position(
+        result: list[Position] = []
+        for p in mcp_positions:
+            stop = None
+            last_buy = self._journal.last_buy_fill_for(p.symbol)
+            if last_buy is not None:
+                stop = last_buy["stop_loss_price"]
+            result.append(Position(
                 symbol=p.symbol, quantity=p.quantity,
-                avg_entry_price=p.avg_price, stop_loss_price=None,
-            )
-            for p in mcp_positions
-        ]
+                avg_entry_price=p.avg_price, stop_loss_price=stop,
+            ))
+        return result
 
     def get_quote(self, symbol: str) -> Decimal:
         try:
