@@ -58,14 +58,38 @@ def _order(symbol):
 def test_tick_market_closed_noop(tmp_path):
     from ops.journal import Journal
     j = Journal(str(tmp_path / "j.sqlite"))
+    broker = _fake_broker()
     orch = Orchestrator(
-        broker=_fake_broker(), universe_builder=_fake_universe([]),
+        broker=broker, universe_builder=_fake_universe([]),
         strategy=_fake_strategy([], {}), pipeline_adapter=_fake_pipeline({}),
         calendar=_fake_calendar(is_open=False), journal=j,
         config=MagicMock(),
     )
     orch.tick()
     assert j.read_events() == []
+    broker.get_equity.assert_not_called()
+
+
+def test_tick_journals_orchestrator_tick_error_on_unexpected_exception(tmp_path):
+    """Any unexpected exception from a collaborator is swallowed and journaled."""
+    from ops.journal import Journal
+    from ops.config import OpsConfig
+    j = Journal(str(tmp_path / "j.sqlite"))
+    broker = _fake_broker()
+    universe = _fake_universe(["AAPL"])
+    universe.build.side_effect = RuntimeError("boom")
+    orch = Orchestrator(
+        broker=broker, universe_builder=universe,
+        strategy=_fake_strategy([MagicMock(symbol="AAPL")], {"AAPL": _order("AAPL")}),
+        pipeline_adapter=_fake_pipeline({"AAPL": "BUY"}),
+        calendar=_fake_calendar(is_open=True), journal=j,
+        config=OpsConfig(),
+    )
+    orch.tick()  # must NOT raise
+    events = j.read_events()
+    err_events = [e for e in events if e["kind"] == "orchestrator_tick_error"]
+    assert len(err_events) == 1
+    assert "boom" in err_events[0]["payload"]["error"]
 
 
 def test_tick_places_buy_when_pipeline_says_buy(tmp_path):
@@ -203,3 +227,4 @@ def test_tick_shortcircuits_on_weekly_kill_switch(tmp_path):
     )
     orch.tick()
     universe.build.assert_not_called()
+    broker.place_order.assert_not_called()

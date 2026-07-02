@@ -1,9 +1,7 @@
 """Orchestrator tick handler — called by APScheduler at :00/:30 during trading hours."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from decimal import Decimal
-from typing import Any
+from datetime import datetime, timezone
 
 from ops.broker.base import BrokerError, OrderRejected
 
