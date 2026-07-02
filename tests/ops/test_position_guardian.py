@@ -389,7 +389,7 @@ def test_kill_switch_not_tripped_when_within_threshold(_broker_with_positions):
         [("AAPL", Decimal("10"), Decimal("9"), Decimal("50"))],
         weekly_open_equity=Decimal("500"),
     )
-    # Small drop only (-5%): does NOT trip.
+    # Small drop only (-0.5% portfolio-level, -5% per-share): does NOT trip.
     quotes.set("AAPL", Decimal("9.5"))
     guardian = PositionGuardian(
         broker=broker, quote_source=quotes.get, config=cfg,
@@ -416,3 +416,61 @@ def test_guardian_records_stop_hit_with_mode_and_threshold(guardian_fixtures):
     stop_events = [e for e in events if e["kind"] == "stop_hit"]
     assert stop_events[-1]["payload"]["mode"] == "absolute"
     assert stop_events[-1]["payload"]["threshold_repr"].startswith("abs ")
+
+
+def test_kill_switch_idempotent_within_week(_broker_with_positions):
+    """Second guardian pass in the same week does NOT record a duplicate kill_switch event."""
+    broker, quotes, cfg, journal = _broker_with_positions(
+        [("AAPL", Decimal("10"), Decimal("0.50"), Decimal("50")),
+         ("MSFT", Decimal("100"), Decimal("5"), Decimal("50"))],
+        weekly_open_equity=Decimal("500"),
+    )
+    # Trigger >15% weekly loss: 10->2 loses $40, 100->20 loses $40, total -16%
+    quotes.set("AAPL", Decimal("2"))
+    quotes.set("MSFT", Decimal("20"))
+    guardian = PositionGuardian(
+        broker=broker, quote_source=quotes.get, config=cfg,
+        journal=journal, broker_mode="paper",
+    )
+    guardian.check_stops_once()   # trips kill_switch, closes positions
+    guardian.check_stops_once()   # runs again — should NOT record another kill_switch
+    events = journal.read_events()
+    kill_events = [e for e in events if e["kind"] == "kill_switch"]
+    assert len(kill_events) == 1
+
+
+def test_kill_switch_paper_mode_records_close_failure_and_continues(_broker_with_positions):
+    """Close failure during kill-switch sweep is journaled; sweep continues to next symbol."""
+    import unittest.mock as _mock
+    from ops.broker.base import BrokerError
+    broker, quotes, cfg, journal = _broker_with_positions(
+        [("AAPL", Decimal("10"), Decimal("0.50"), Decimal("50")),
+         ("MSFT", Decimal("100"), Decimal("5"), Decimal("50"))],
+        weekly_open_equity=Decimal("500"),
+    )
+    # Trigger >15% weekly loss: 10->2 loses $40, 100->20 loses $40, total -16%
+    quotes.set("AAPL", Decimal("2"))
+    quotes.set("MSFT", Decimal("20"))
+
+    original_close = broker.close_position
+    def _selective_close(symbol, **kw):
+        if symbol == "AAPL":
+            raise BrokerError("simulated failure on AAPL close")
+        return original_close(symbol, **kw)
+
+    with _mock.patch.object(broker, "close_position", side_effect=_selective_close):
+        guardian = PositionGuardian(
+            broker=broker, quote_source=quotes.get, config=cfg,
+            journal=journal, broker_mode="paper",
+        )
+        guardian.check_stops_once()
+
+    events = journal.read_events()
+    kinds = [e["kind"] for e in events]
+    assert "kill_switch" in kinds
+    fail_events = [e for e in events if e["kind"] == "kill_switch_close_failed"]
+    assert len(fail_events) == 1
+    assert fail_events[0]["payload"]["symbol"] == "AAPL"
+    # MSFT was still closed despite AAPL failing.
+    remaining = {p.symbol for p in broker.get_positions()}
+    assert "MSFT" not in remaining
