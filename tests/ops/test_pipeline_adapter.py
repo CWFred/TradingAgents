@@ -1,3 +1,4 @@
+import threading
 from datetime import date
 
 import pytest
@@ -70,3 +71,53 @@ def test_real_adapter_constructs_graph_lazily(monkeypatch):
     adapter.propagate("MSFT", date(2026, 6, 30))
     assert constructed == [{}]   # still only one construction
     assert r.decision == PipelineDecision.BUY
+
+
+def test_ensure_graph_is_thread_safe(monkeypatch):
+    """Two concurrent callers get the same graph instance; build runs once."""
+    build_count = 0
+    build_lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    class FakeGraph:
+        pass
+
+    def slow_build(self):
+        nonlocal build_count
+        # With a correct mutex around the whole build, only one thread ever
+        # reaches this point concurrently, so the second party to the
+        # barrier never arrives. Bound the wait so a correct (locked)
+        # implementation proceeds via timeout instead of hanging forever;
+        # a buggy (unlocked) implementation still lets both threads race in
+        # here and rendezvous on the barrier before the timeout elapses.
+        try:
+            barrier.wait(timeout=1)
+        except threading.BrokenBarrierError:
+            pass
+        # Simulate a slow build so two threads overlap.
+        import time
+        time.sleep(0.05)
+        with build_lock:
+            build_count += 1
+        return FakeGraph()
+
+    adapter = TradingAgentsPipelineAdapter.__new__(TradingAgentsPipelineAdapter)
+    adapter._graph = None
+    adapter._lock = threading.Lock()
+
+    # Monkeypatch the actual builder used inside _ensure_graph:
+    monkeypatch.setattr(TradingAgentsPipelineAdapter, "_build_graph", slow_build)
+
+    results = {}
+    def call(idx):
+        results[idx] = adapter._ensure_graph()
+
+    t1 = threading.Thread(target=call, args=(0,))
+    t2 = threading.Thread(target=call, args=(1,))
+    t1.start(); t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not t1.is_alive() and not t2.is_alive(), "threads did not complete — possible deadlock"
+    assert results[0] is results[1]
+    assert build_count == 1

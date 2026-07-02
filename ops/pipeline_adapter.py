@@ -6,6 +6,7 @@ importing this module is free of side effects."""
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -71,11 +72,21 @@ class TradingAgentsPipelineAdapter:
     def __init__(self, **graph_kwargs):
         self._kwargs = graph_kwargs
         self._graph: TradingAgentsGraph | None = None
+        self._lock = threading.Lock()
 
     def _ensure_graph(self) -> TradingAgentsGraph:
-        if self._graph is None:
-            self._graph = TradingAgentsGraph(**self._kwargs)
+        # Fast path: no lock once the cache is populated.
+        if self._graph is not None:
+            return self._graph
+        with self._lock:
+            # Double-checked: another thread may have built it while we
+            # were waiting for the lock.
+            if self._graph is None:
+                self._graph = self._build_graph()
         return self._graph
+
+    def _build_graph(self) -> TradingAgentsGraph:
+        return TradingAgentsGraph(**self._kwargs)
 
     def propagate(self, symbol: str, asof_date: date) -> PipelineResult:
         graph = self._ensure_graph()
