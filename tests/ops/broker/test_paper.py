@@ -312,6 +312,33 @@ def test_from_journal_rehydrates_stop_loss_price(tmp_path, quote_source):
     assert positions[0].stop_loss_price == Decimal("9.2")
 
 
+def test_from_journal_carries_stop_forward_through_addon_buy(tmp_path, quote_source):
+    """A stop set on the initial BUY must survive an add-on BUY that omits its own stop,
+    AND survive replay via from_journal."""
+    journal = Journal(str(tmp_path / "j.sqlite"))
+    quote_source.set("AAPL", Decimal("10"))
+    seed = PaperBroker(journal=journal, quote_source=quote_source, starting_cash=Decimal("500"))
+    # First BUY sets a stop.
+    seed.place_order(Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("9.5"),
+    ))
+    # Add-on BUY without a stop.
+    quote_source.set("AAPL", Decimal("11"))
+    seed.place_order(Order(
+        client_order_id="b-2", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("22"), order_type=OrderType.MARKET,
+    ))
+    # Live position kept the carried-forward stop.
+    assert seed.get_positions()[0].stop_loss_price == Decimal("9.5")
+    # Replay preserves it.
+    replayed = PaperBroker.from_journal(
+        journal=journal, quote_source=quote_source, starting_cash=Decimal("500"),
+    )
+    assert replayed.get_positions()[0].stop_loss_price == Decimal("9.5")
+
+
 def test_from_journal_stop_none_when_no_journaled_stop(tmp_path, quote_source):
     """Positions opened via a BUY that has no stop (legacy) still get None."""
     journal = Journal(str(tmp_path / "j.sqlite"))

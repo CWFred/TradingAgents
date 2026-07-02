@@ -184,7 +184,7 @@ class PaperBroker(Broker):
                 stop_loss_price=order.stop_loss_price or existing.stop_loss_price,
             )
         self._positions[order.symbol] = new_pos
-        return self._make_fill(order, qty, price, stop_loss_price=order.stop_loss_price)
+        return self._make_fill(order, qty, price, stop_loss_price=new_pos.stop_loss_price)
 
     def close_position(self, symbol: str, *, client_order_id: str | None = None) -> Fill:
         existing = self._positions.get(symbol)
