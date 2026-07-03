@@ -1,5 +1,12 @@
 """Post-earnings momentum strategy: for each candidate that the pipeline
-labels BUY, build a sized order with an entry-relative stop."""
+labels BUY, build a sized order with an entry-relative stop.
+
+The stop is carried as Order.stop_pct (entry-relative, e.g. -0.08) rather
+than an absolute price: cand.last_price is a stale previous-close reference
+(from the 20-day history call), and a gap between that reference and the
+actual fill can put an absolute stop on the wrong side of the fill. The
+broker resolves stop_pct to an absolute price from the real fill price at
+fill time (see PaperBroker/RobinhoodBroker)."""
 from __future__ import annotations
 
 from datetime import date
@@ -40,16 +47,13 @@ class PostEarningsMomentumStrategy:
             result = pipeline.propagate(cand.symbol, asof_date)
             if result.decision != PipelineDecision.BUY:
                 continue
-            stop_price = _quantize_money(
-                cand.last_price * (Decimal("1") + self._cfg.per_position_stop_pct)
-            )
             order = Order(
                 client_order_id=_client_order_id(cand.symbol, asof_date, idx),
                 symbol=cand.symbol,
                 side=Side.BUY,
                 notional_dollars=notional,
                 order_type=OrderType.MARKET,
-                stop_loss_price=stop_price,
+                stop_pct=self._cfg.per_position_stop_pct,
             )
             out.append(StrategyOrder(
                 order=order,

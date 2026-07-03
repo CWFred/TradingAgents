@@ -15,7 +15,7 @@ def _ctx(notional: str, positions: list[Position], equity: str, cash: str,
     o = Order(
         client_order_id="c", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal(notional), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     b = MagicMock()
     b.get_equity.return_value = Decimal(equity)
@@ -54,7 +54,7 @@ def test_max_open_positions_blocks_when_full():
     o = Order(
         client_order_id="c", symbol="META", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     b = MagicMock()
     b.get_positions.return_value = positions
@@ -67,7 +67,7 @@ def test_max_open_positions_allows_add_to_existing():
     o = Order(
         client_order_id="c", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     b = MagicMock()
     b.get_positions.return_value = positions
@@ -80,7 +80,7 @@ def test_max_open_positions_allows_under_cap():
     o = Order(
         client_order_id="c", symbol="NVDA", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     b = MagicMock()
     b.get_positions.return_value = positions

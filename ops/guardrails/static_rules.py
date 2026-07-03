@@ -60,11 +60,17 @@ class LongOnlyRule(Rule):
 
 
 class StopAttachedRule(Rule):
-    """Every BUY must carry a stop_loss_price. SELLs do not require one."""
+    """Every BUY must carry a negative, entry-relative stop_pct. SELLs do
+    not require one. The absolute stop price is resolved from the actual
+    fill price at fill time (see PaperBroker/RobinhoodBroker) — never from
+    a pre-trade reference — so this rule only validates the pct shape."""
 
     def check(self, ctx: RuleContext) -> RuleResult:
-        if ctx.order.side == Side.BUY and ctx.order.stop_loss_price is None:
-            return RuleResult.reject("BUY orders require stop_loss_price")
+        if ctx.order.side != Side.BUY:
+            return RuleResult.allow()
+        stop_pct = ctx.order.stop_pct
+        if stop_pct is None or stop_pct >= 0:
+            return RuleResult.reject("BUY orders require a negative stop_pct")
         return RuleResult.allow()
 
 

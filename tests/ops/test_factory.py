@@ -44,11 +44,11 @@ def _factory(tmp_path, *, starting_cash="250", quotes=None):
     return journal, guarded
 
 
-def _buy(symbol="AAPL", notional="25", stop="184", cid="c1") -> Order:
+def _buy(symbol="AAPL", notional="25", stop_pct="-0.08", cid="c1") -> Order:
     return Order(
         client_order_id=cid, symbol=symbol, side=Side.BUY,
         notional_dollars=Decimal(notional), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal(stop) if stop else None,
+        stop_pct=Decimal(stop_pct) if stop_pct else None,
     )
 
 
@@ -221,5 +221,5 @@ def test_build_guarded_robinhood_broker_blocks_spot(config, journal):
         broker.place_order(Order(
             client_order_id="b-1", symbol="SPOT", side=Side.BUY,
             notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-            stop_loss_price=Decimal("100"),
+            stop_pct=Decimal("-0.08"),
         ))

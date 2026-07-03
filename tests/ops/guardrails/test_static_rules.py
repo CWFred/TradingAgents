@@ -17,7 +17,7 @@ def _buy(symbol: str = "AAPL", **kwargs) -> Order:
     defaults = dict(
         client_order_id="c", symbol=symbol, side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     defaults.update(kwargs)
     return Order(**defaults)
@@ -69,8 +69,23 @@ def test_stop_attached_requires_stop_on_buy():
     o = Order(
         client_order_id="c", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=None,
+        stop_pct=None,
     )
+    assert StopAttachedRule().check(_ctx(o)).allowed is False
+
+def test_stop_attached_rejects_positive_stop_pct_on_buy():
+    """Order.__post_init__ already rejects stop_pct >= 0, so the only way to
+    get a positive stop_pct into the rule is a Rule-level check that doesn't
+    trust the dataclass invariant — build via object.__new__ to bypass
+    __post_init__ and exercise the rule's own guard directly."""
+    o = object.__new__(Order)
+    object.__setattr__(o, "client_order_id", "c")
+    object.__setattr__(o, "symbol", "AAPL")
+    object.__setattr__(o, "side", Side.BUY)
+    object.__setattr__(o, "notional_dollars", Decimal("25"))
+    object.__setattr__(o, "order_type", OrderType.MARKET)
+    object.__setattr__(o, "limit_price", None)
+    object.__setattr__(o, "stop_pct", Decimal("0.08"))
     assert StopAttachedRule().check(_ctx(o)).allowed is False
 
 def test_stop_attached_allows_sell_without_stop():

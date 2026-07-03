@@ -76,7 +76,11 @@ class RobinhoodBroker(Broker):
         self._journal.record_order(
             client_order_id=order.client_order_id, symbol=order.symbol,
             side=order.side.value, notional_dollars=order.notional_dollars,
-            stop_loss_price=order.stop_loss_price,
+            # The absolute stop is not knowable before the fill (it is
+            # entry-relative — see Order.stop_pct); only the fill row (and
+            # the Position rehydrated from it) ever carries a resolved
+            # absolute stop_loss_price.
+            stop_loss_price=None,
         )
         try:
             ack = self._client.place_equity_order(
@@ -159,11 +163,18 @@ class RobinhoodBroker(Broker):
             quantity=ack.quantity, price=ack.fill_price,
             filled_at=datetime.now(timezone.utc),
         )
+        # Resolve the stop from the ACTUAL fill price, never a stale
+        # reference — a gap between reference and fill can otherwise put an
+        # absolute stop on the wrong side of the fill (M2).
+        resolved_stop = (
+            ack.fill_price * (Decimal("1") + order.stop_pct)
+            if order.stop_pct is not None else None
+        )
         self._journal.record_fill(
             order_id=fill.order_id, client_order_id=fill.client_order_id,
             symbol=fill.symbol, side=fill.side.value,
             quantity=fill.quantity, price=fill.price, filled_at=fill.filled_at,
-            stop_loss_price=order.stop_loss_price,
+            stop_loss_price=resolved_stop,
         )
         return fill
 

@@ -35,7 +35,7 @@ def test_guarded_allows_passing_order(tmp_path):
     fill = guarded.place_order(Order(
         client_order_id="c1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     assert fill.symbol == "AAPL"
     assert paper.get_positions()[0].symbol == "AAPL"
@@ -47,7 +47,7 @@ def test_guarded_rejects_and_journals_rejection(tmp_path):
         guarded.place_order(Order(
             client_order_id="c1", symbol="BANNED", side=Side.BUY,
             notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-            stop_loss_price=Decimal("184"),
+            stop_pct=Decimal("-0.08"),
         ))
     assert exc.value.rule_name == "RejectSymbol"
     # Inner broker was not touched
@@ -112,7 +112,7 @@ def test_guarded_close_position_delegates_to_inner(guarded, inner, quote_source)
     guarded.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9"),
+        stop_pct=Decimal("-0.1"),
     ))
     fill = guarded.close_position("AAPL")
     assert fill.side == Side.SELL
@@ -150,7 +150,7 @@ def test_guarded_close_position_races_with_concurrent_buy(guarded, inner, quote_
     guarded.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9"),
+        stop_pct=Decimal("-0.1"),
     ))
     barrier = threading.Barrier(2)
     close_result = {}
@@ -169,7 +169,7 @@ def test_guarded_close_position_races_with_concurrent_buy(guarded, inner, quote_
             buy_result["fill"] = guarded.place_order(Order(
                 client_order_id="b-2", symbol="AAPL", side=Side.BUY,
                 notional_dollars=Decimal("20"), order_type=OrderType.MARKET,
-                stop_loss_price=Decimal("9"),
+                stop_pct=Decimal("-0.1"),
             ))
         except Exception as e:
             buy_result["exc"] = e
@@ -231,7 +231,7 @@ def test_guarded_emits_fill_event_on_place(tmp_path):
     guarded.place_order(Order(
         client_order_id="c1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     fills = [e for e in j.read_events() if e["kind"] == "fill"]
     assert len(fills) == 1
@@ -246,7 +246,7 @@ def test_guarded_no_fill_event_on_rejection(tmp_path):
         guarded.place_order(Order(
             client_order_id="c1", symbol="BANNED", side=Side.BUY,
             notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-            stop_loss_price=Decimal("184"),
+            stop_pct=Decimal("-0.08"),
         ))
     assert [e for e in j.read_events() if e["kind"] == "fill"] == []
 
@@ -259,7 +259,7 @@ def test_guarded_close_position_client_order_id_continuity_on_success(guarded, i
     guarded.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9"),
+        stop_pct=Decimal("-0.1"),
     ))
     fill = guarded.close_position("AAPL")
 

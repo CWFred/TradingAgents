@@ -41,7 +41,7 @@ def _order(symbol):
     return Order(
         client_order_id=f"b-{symbol}", symbol=symbol, side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.2"),
+        stop_pct=Decimal("-0.08"),
     )
 
 

@@ -28,7 +28,7 @@ def _open_position(guarded):
     guarded.place_order(Order(
         client_order_id="open", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
 
 
@@ -79,10 +79,15 @@ def _broker_with_positions(tmp_path):
             start_of_week_equity=lambda: weekly_open_equity,
         )
         for symbol, entry, stop, notional in positions:
+            # positions tuples carry an absolute target stop for readability;
+            # convert to entry-relative stop_pct since that's what Order
+            # carries now (the absolute stop is resolved from the fill price,
+            # which equals `entry` here since quotes are pinned before the buy).
+            stop_pct = (stop / entry) - Decimal("1")
             broker.place_order(Order(
                 client_order_id=f"b-{symbol}", symbol=symbol, side=Side.BUY,
                 notional_dollars=notional, order_type=OrderType.MARKET,
-                stop_loss_price=stop,
+                stop_pct=stop_pct,
             ))
         # Baseline must be in the CURRENT week — the guardian ignores stale
         # open_week snapshots, and a hardcoded date would rot next Monday.
@@ -144,12 +149,12 @@ def test_guardian_handles_multiple_positions(tmp_path):
     guarded.place_order(Order(
         client_order_id="a", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     guarded.place_order(Order(
         client_order_id="m", symbol="MSFT", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     quotes["AAPL"] = Decimal("220")    # +10%, hold
     quotes["MSFT"] = Decimal("180")    # -10%, stop
@@ -171,12 +176,12 @@ def test_guardian_continues_after_failed_sell(tmp_path):
     guarded.place_order(Order(
         client_order_id="a", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     guarded.place_order(Order(
         client_order_id="m", symbol="MSFT", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     quotes["AAPL"] = Decimal("180")   # -10%, stop
     quotes["MSFT"] = Decimal("180")   # -10%, stop
@@ -221,12 +226,12 @@ def test_guardian_survives_quote_unavailable(tmp_path):
     guarded.place_order(Order(
         client_order_id="a", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     guarded.place_order(Order(
         client_order_id="m", symbol="MSFT", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
 
     def flaky_quote(symbol):
@@ -260,12 +265,12 @@ def test_guardian_survives_brokererror_at_quote_step(tmp_path):
     guarded.place_order(Order(
         client_order_id="a", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     guarded.place_order(Order(
         client_order_id="m", symbol="MSFT", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
 
     def flaky_quote(symbol):
@@ -300,7 +305,7 @@ def test_guardian_blind_after_five_consecutive_fully_failed_passes(tmp_path):
     guarded.place_order(Order(
         client_order_id="a", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
 
     def always_fails(symbol):
@@ -333,7 +338,7 @@ def test_guardian_blind_streak_resets_after_successful_pass(tmp_path):
     guarded.place_order(Order(
         client_order_id="a", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
 
     state = {"fail": True}
@@ -383,7 +388,7 @@ def test_guardian_stop_sell_client_order_ids_are_unique_per_attempt(tmp_path):
     guarded.place_order(Order(
         client_order_id="open-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     quotes["AAPL"] = Decimal("180")   # trip the stop
     g = PositionGuardian(broker=guarded, quote_source=guarded.get_quote, config=cfg)
@@ -395,7 +400,7 @@ def test_guardian_stop_sell_client_order_ids_are_unique_per_attempt(tmp_path):
     guarded.place_order(Order(
         client_order_id="open-2", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     quotes["AAPL"] = Decimal("180")
     actions_2 = g.check_stops_once()
@@ -420,7 +425,7 @@ def test_guardian_uses_absolute_stop_when_position_has_one(guardian_fixtures):
     broker.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.5"),
+        stop_pct=Decimal("-0.05"),
     ))
     guardian = PositionGuardian(broker=broker, quote_source=quotes.get, config=cfg)
     # Price at $9.60 — below config default -8% (would be $9.20) but ABOVE explicit stop.
@@ -445,7 +450,7 @@ def test_guardian_falls_back_to_config_pct_when_no_position_stop(guardian_fixtur
     broker.place_order(Order(
         client_order_id="b-1", symbol="MSFT", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("80"),
+        stop_pct=Decimal("-0.2"),
     ))
     _clear_position_stop(broker, "MSFT")
     guardian = PositionGuardian(broker=broker, quote_source=quotes.get, config=cfg)
@@ -531,7 +536,7 @@ def test_guardian_records_stop_hit_with_mode_and_threshold(guardian_fixtures):
     broker.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.5"),
+        stop_pct=Decimal("-0.05"),
     ))
     guardian = PositionGuardian(broker=broker, quote_source=quotes.get, config=cfg)
     quotes.set("AAPL", Decimal("9.45"))

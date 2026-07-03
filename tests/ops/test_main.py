@@ -80,7 +80,7 @@ def test_paper_mode_restart_preserves_positions(tmp_path):
     broker_a.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("20"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.5"),
+        stop_pct=Decimal("-0.05"),
     ))
     positions_a = broker_a.get_positions()
     assert len(positions_a) == 1

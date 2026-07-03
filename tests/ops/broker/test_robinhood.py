@@ -97,7 +97,7 @@ def test_place_order_buy_calls_mcp(fake_client, journal):
     fill = broker.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9"),
+        stop_pct=Decimal("-0.1"),
     ))
     assert fill.side == Side.BUY
     assert fill.quantity == Decimal("5")
@@ -111,7 +111,7 @@ def test_place_order_journals_order_and_fill(fake_client, journal):
     broker.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9"),
+        stop_pct=Decimal("-0.1"),
     ))
     orders = journal.read_orders()
     fills = journal.read_fills()
@@ -155,7 +155,6 @@ def test_place_order_sell_calls_mcp(fake_client, journal):
     fill = broker.place_order(Order(
         client_order_id="s-1", symbol="AAPL", side=Side.SELL,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=None,
     ))
     assert fill.side == Side.SELL
     assert fill.quantity == Decimal("5")
@@ -178,7 +177,7 @@ def test_mcp_unavailable_wraps_as_broker_error(fake_client, journal):
         broker.place_order(Order(
             client_order_id="b-1", symbol="AAPL", side=Side.BUY,
             notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-            stop_loss_price=Decimal("9"),
+            stop_pct=Decimal("-0.1"),
         ))
 
 
@@ -224,7 +223,7 @@ def test_place_order_spot_hard_check_rejects(fake_client, journal):
         broker.place_order(Order(
             client_order_id="b-1", symbol="SPOT", side=Side.BUY,
             notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-            stop_loss_price=Decimal("9"),
+            stop_pct=Decimal("-0.1"),
         ))
     assert exc.value.rule_name == "SpotDenyList"
     assert len(fake_client.placed) == 0
@@ -332,7 +331,7 @@ def test_place_order_buy_journals_stop_on_fill(fake_client, journal):
     broker.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.2"),
+        stop_pct=Decimal("-0.08"),
     ))
     fills = journal.read_fills()
     assert len(fills) == 1
@@ -347,7 +346,7 @@ def test_buy_then_get_positions_rehydrates_stop(fake_client, journal):
     broker.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.2"),
+        stop_pct=Decimal("-0.08"),
     ))
     positions = broker.get_positions()
     assert positions[0].symbol == "AAPL"
@@ -395,8 +394,29 @@ def _buy_order():
     return Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.2"),
+        stop_pct=Decimal("-0.08"),
     )
+
+
+# --- M2: stop is entry-relative, resolved from the actual fill price -------
+
+
+def test_stop_computed_from_actual_fill_price(fake_client, journal):
+    """The absolute stop journaled on the fill must be derived from the
+    real ack.fill_price, not any pre-trade reference price."""
+    fake_client.set_quote("AAPL", Decimal("91"))  # gapped down from a stale reference
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    broker.place_order(Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+        stop_pct=Decimal("-0.08"),
+    ))
+    fills = journal.read_fills()
+    expected = Decimal("91") * (Decimal("1") + Decimal("-0.08"))
+    assert fills[0]["stop_loss_price"] == expected
+    assert expected < Decimal("91")
+    positions = broker.get_positions()
+    assert positions[0].stop_loss_price == expected
 
 
 def test_queued_ack_raises_and_journals_no_fill(journal):

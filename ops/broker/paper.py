@@ -144,7 +144,11 @@ class PaperBroker(Broker):
             symbol=order.symbol,
             side=order.side.value,
             notional_dollars=order.notional_dollars,
-            stop_loss_price=order.stop_loss_price,
+            # The absolute stop is not knowable before the fill (it is
+            # entry-relative — see Order.stop_pct); only the fill row (and
+            # the Position rehydrated from it) ever carries a resolved
+            # absolute stop_loss_price.
+            stop_loss_price=None,
         )
         price = self._quote(order.symbol)
         if order.side == Side.BUY:
@@ -157,13 +161,19 @@ class PaperBroker(Broker):
             raise InsufficientFunds(f"need ${cost}, have ${self._cash}")
         qty = cost / price
         self._cash -= cost
+        # Resolve the stop from the ACTUAL fill price, never a stale
+        # reference — a gap between reference and fill can otherwise put an
+        # absolute stop on the wrong side of the fill (M2).
+        resolved_stop = (
+            price * (Decimal("1") + order.stop_pct) if order.stop_pct is not None else None
+        )
         existing = self._positions.get(order.symbol)
         if existing is None:
             new_pos = Position(
                 symbol=order.symbol,
                 quantity=qty,
                 avg_entry_price=price,
-                stop_loss_price=order.stop_loss_price,
+                stop_loss_price=resolved_stop,
             )
         else:
             total_qty = existing.quantity + qty
@@ -174,7 +184,7 @@ class PaperBroker(Broker):
                 symbol=order.symbol,
                 quantity=total_qty,
                 avg_entry_price=avg,
-                stop_loss_price=order.stop_loss_price or existing.stop_loss_price,
+                stop_loss_price=resolved_stop if resolved_stop is not None else existing.stop_loss_price,
             )
         self._positions[order.symbol] = new_pos
         return self._make_fill(order, qty, price, stop_loss_price=new_pos.stop_loss_price)

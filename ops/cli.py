@@ -117,7 +117,7 @@ def decide_once(
     for p in proposals:
         click.echo(f"  - {p.order.symbol}: {p.pipeline.decision.value} "
                    f"→ ${p.order.notional_dollars} @ ~${p.candidate.last_price}, "
-                   f"stop ${p.order.stop_loss_price}")
+                   f"stop_pct {p.order.stop_pct}")
     click.echo("")
 
     # Place orders

@@ -88,7 +88,7 @@ def test_integration_buy_stop_hit_via_close_position(tmp_path):
     triggers on price drop, close_position sells everything.
 
     Seeds the BUY directly against the guarded broker (no pipeline/LLM
-    involved) with an explicit stop_loss_price, mirroring what
+    involved) with an explicit stop_pct, mirroring what
     PostEarningsMomentumStrategy attaches to every proposal."""
     cfg = OpsConfig()
     j = Journal(str(tmp_path / "j.sqlite"))
@@ -101,11 +101,11 @@ def test_integration_buy_stop_hit_via_close_position(tmp_path):
         start_of_week_equity=lambda: Decimal("250"),
     )
 
-    # Act 1: place a BUY with an explicit (absolute) stop_loss_price.
+    # Act 1: place a BUY with an explicit entry-relative stop_pct.
     order = Order(
         client_order_id="buy-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     guarded.place_order(order)
 

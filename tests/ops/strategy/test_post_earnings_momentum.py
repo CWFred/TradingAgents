@@ -37,8 +37,9 @@ def test_emits_buy_order_for_pipeline_buy():
     assert so.order.order_type == OrderType.MARKET
     # Per-position cap = 10% of 250 = 25
     assert so.order.notional_dollars == Decimal("25.00")
-    # Stop = 200 * (1 + -0.08) = 184
-    assert so.order.stop_loss_price == Decimal("184.00")
+    # Entry-relative stop_pct, resolved to an absolute price from the actual
+    # fill price at fill time — not from cand.last_price (M2).
+    assert so.order.stop_pct == cfg.per_position_stop_pct == Decimal("-0.08")
     assert so.order.client_order_id.startswith("pem-")
     assert so.candidate.symbol == "AAPL"
     assert so.pipeline.decision == PipelineDecision.BUY

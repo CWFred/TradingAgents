@@ -21,7 +21,7 @@ def _ctx() -> RuleContext:
     o = Order(
         client_order_id="c", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     return RuleContext(order=o, broker=MagicMock(), config=OpsConfig())
 
