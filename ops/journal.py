@@ -8,9 +8,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+
+from ops.trading_time import trading_day_start, trading_week_start
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -239,7 +241,7 @@ class Journal:
 
     def has_event_today(self, kind: str, *, now: datetime | None = None) -> bool:
         when = now if now is not None else datetime.now(timezone.utc)
-        start = when.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = trading_day_start(when)
         row = self._conn.execute(
             "SELECT 1 FROM events WHERE kind = ? AND at >= ? LIMIT 1",
             (kind, _to_iso(start)),
@@ -248,8 +250,7 @@ class Journal:
 
     def has_event_since_last_monday(self, kind: str, *, now: datetime | None = None) -> bool:
         when = now if now is not None else datetime.now(timezone.utc)
-        monday = when - timedelta(days=when.weekday())
-        monday = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+        monday = trading_week_start(when)
         row = self._conn.execute(
             "SELECT 1 FROM events WHERE kind = ? AND at >= ? LIMIT 1",
             (kind, _to_iso(monday)),

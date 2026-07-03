@@ -193,7 +193,9 @@ class PositionGuardian:
             self._blind_alarm_active = False
 
     def _maybe_trip_kill_switch(self) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timezone
+
+        from ops.trading_time import trading_week_start
 
         tripped = self._journal.has_event_since_last_monday("kill_switch")
         if not tripped:
@@ -202,8 +204,7 @@ class PositionGuardian:
             # compare current equity against weeks-old numbers and can
             # falsely liquidate the whole book.
             now = datetime.now(timezone.utc)
-            monday = (now - timedelta(days=now.weekday())).replace(
-                hour=0, minute=0, second=0, microsecond=0)
+            monday = trading_week_start(now)
             snap = self._journal.get_latest_equity_snapshot(
                 kind="open_week", since=monday)
             if snap is None or snap.equity <= 0:
@@ -247,18 +248,19 @@ class PositionGuardian:
 
     def _maybe_trip_daily_halt(self) -> None:
         """Computed in the same pass as the weekly kill switch, mirroring its
-        snapshot-freshness rule exactly (same UTC day-boundary convention —
-        see M7 for the future ET migration of both together). Unlike the
-        kill switch, a daily halt never closes positions: it only stops new
-        BUYs, which the orchestrator's has_event_today('daily_halt')
-        short-circuit and DailyDrawdownRule (order-boundary backstop) already
-        enforce."""
+        snapshot-freshness rule exactly (both use the ET trading-calendar
+        boundary from ops.trading_time — see M7). Unlike the kill switch, a
+        daily halt never closes positions: it only stops new BUYs, which the
+        orchestrator's has_event_today('daily_halt') short-circuit and
+        DailyDrawdownRule (order-boundary backstop) already enforce."""
         from datetime import datetime, timezone
+
+        from ops.trading_time import trading_day_start
 
         if self._journal.has_event_today("daily_halt"):
             return
         now = datetime.now(timezone.utc)
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_day = trading_day_start(now)
         snap = self._journal.get_latest_equity_snapshot(
             kind="open_day", since=start_of_day)
         if snap is None or snap.equity <= 0:

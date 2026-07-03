@@ -12,7 +12,7 @@ from __future__ import annotations
 import signal
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -30,6 +30,7 @@ from ops.position_guardian import PositionGuardian
 from ops.reconcile import ReconcileResult, emit_reconcile_events, reconcile
 from ops.scheduler.market_calendar import MarketCalendar
 from ops.scheduler.orchestrator import Orchestrator
+from ops.trading_time import trading_day_start, trading_week_start
 
 _shutdown_event = threading.Event()
 
@@ -47,15 +48,14 @@ def _start_of_day_equity(journal: Journal) -> Decimal:
     the orchestrator records a fresh snapshot at its first tick of the day.
     """
     now = datetime.now(timezone.utc)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = trading_day_start(now)
     snap = journal.get_latest_equity_snapshot(kind="open_day", since=start)
     return snap.equity if snap is not None else Decimal("0")
 
 
 def _start_of_week_equity(journal: Journal) -> Decimal:
     now = datetime.now(timezone.utc)
-    monday = (now - timedelta(days=now.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0)
+    monday = trading_week_start(now)
     snap = journal.get_latest_equity_snapshot(kind="open_week", since=monday)
     return snap.equity if snap is not None else Decimal("0")
 
