@@ -101,3 +101,16 @@ def test_starting_cash_must_be_positive():
     from ops.config import OpsConfig
     with pytest.raises(ValueError):
         OpsConfig(starting_cash=Decimal("0"))
+
+
+def test_live_gate_defaults():
+    c = OpsConfig()
+    assert c.live_max_position == Decimal("10")
+    assert c.live_fill_gate_count == 20
+
+
+def test_live_gate_from_env(monkeypatch):
+    monkeypatch.setenv("OPS_LIVE_MAX_POSITION", "8")
+    monkeypatch.setenv("OPS_LIVE_FILL_GATE_COUNT", "30")
+    c = load_config()
+    assert c.live_max_position == Decimal("8") and c.live_fill_gate_count == 30

@@ -77,7 +77,7 @@ def test_inner_broker_is_name_mangled(tmp_path):
         guarded._inner  # noqa: B018 — intentional access for the test
 
 
-def test_default_rule_chain_has_all_thirteen_rules():
+def test_default_rule_chain_has_all_fourteen_rules():
     rules = build_default_rule_chain(
         start_of_day_equity=lambda: Decimal("250"),
         start_of_week_equity=lambda: Decimal("250"),
@@ -86,7 +86,7 @@ def test_default_rule_chain_has_all_thirteen_rules():
     expected = [
         "DenyListRule", "NoMarginRule", "NoOptionsRule", "NoCryptoRule",
         "LongOnlyRule", "StopAttachedRule", "FractionalSharesOnlyRule",
-        "PerTradeDollarFloorRule", "PerPositionCapRule",
+        "PerTradeDollarFloorRule", "LiveMaxPositionRule", "PerPositionCapRule",
         "MaxOpenPositionsRule", "CashReserveRule",
         "DailyDrawdownRule", "WeeklyDrawdownRule",
     ]

@@ -17,6 +17,7 @@ from ops.guardrails.drawdown_rules import DailyDrawdownRule, WeeklyDrawdownRule
 from ops.guardrails.engine import RuleEngine
 from ops.guardrails.sizing_rules import (
     CashReserveRule,
+    LiveMaxPositionRule,
     MaxOpenPositionsRule,
     PerPositionCapRule,
     PerTradeDollarFloorRule,
@@ -39,6 +40,7 @@ def build_default_rule_chain(
     *,
     start_of_day_equity: EquityFn,
     start_of_week_equity: EquityFn,
+    live_fill_count: Callable[[], int] = lambda: 0,
 ) -> list:
     """Canonical rule order for v1.
 
@@ -56,6 +58,7 @@ def build_default_rule_chain(
         StopAttachedRule(),
         FractionalSharesOnlyRule(),
         PerTradeDollarFloorRule(),
+        LiveMaxPositionRule(live_fill_count=live_fill_count),
         PerPositionCapRule(),
         MaxOpenPositionsRule(),
         CashReserveRule(),

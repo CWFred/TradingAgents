@@ -52,6 +52,8 @@ class OpsConfig:
     per_position_stop_pct: Decimal = Decimal("-0.08")
     journal_path: str = field(default_factory=_default_journal_path)
     starting_cash: Decimal = Decimal("250")
+    live_max_position: Decimal = Decimal("10")
+    live_fill_gate_count: int = 20
 
     def __post_init__(self) -> None:
         # Drawdown and per-position-stop percentages must be negative — a
@@ -85,6 +87,12 @@ class OpsConfig:
             raise ValueError(
                 "full_blackout_symbols must be a subset of deny_list, got "
                 f"{self.full_blackout_symbols - self.deny_list}"
+            )
+        if self.live_max_position <= 0:
+            raise ValueError(f"live_max_position must be > 0, got {self.live_max_position}")
+        if self.live_fill_gate_count < 0:
+            raise ValueError(
+                f"live_fill_gate_count must be >= 0, got {self.live_fill_gate_count}"
             )
 
 
@@ -150,5 +158,13 @@ def load_config() -> OpsConfig:
     starting_cash = _env_decimal("OPS_STARTING_CASH")
     if starting_cash is not None:
         kwargs["starting_cash"] = starting_cash
+
+    live_max_position = _env_decimal("OPS_LIVE_MAX_POSITION")
+    if live_max_position is not None:
+        kwargs["live_max_position"] = live_max_position
+
+    live_fill_gate_count = _env_int("OPS_LIVE_FILL_GATE_COUNT")
+    if live_fill_gate_count is not None:
+        kwargs["live_fill_gate_count"] = live_fill_gate_count
 
     return OpsConfig(**kwargs)
