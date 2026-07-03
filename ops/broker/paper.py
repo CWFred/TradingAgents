@@ -1,9 +1,9 @@
 """In-memory paper broker. Records every order and fill to the journal."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Callable
 from uuid import uuid4
 
 from ops.broker.base import Broker, InsufficientFunds, NoSuchPosition
@@ -25,7 +25,7 @@ class PaperBroker(Broker):
     @classmethod
     def from_journal(
         cls, *, journal: Journal, quote_source: QuoteSource, starting_cash: Decimal,
-    ) -> "PaperBroker":
+    ) -> PaperBroker:
         """Rebuild in-memory state by replaying fills from the journal.
 
         stop_loss_price is journaled on each BUY fill (see PaperBroker._make_fill /
@@ -51,6 +51,8 @@ class PaperBroker(Broker):
         event so paper mode doesn't get a duplicate emission on every
         startup."""
         broker = cls(journal=journal, quote_source=quote_source, starting_cash=starting_cash)
+        for adj in journal.read_cash_adjustments():
+            broker._cash += adj["amount"]
         orders_by_id = {o["client_order_id"]: o for o in journal.read_orders()}
         for f in journal.read_fills():
             symbol = f["symbol"]
@@ -92,8 +94,21 @@ class PaperBroker(Broker):
             elif side == Side.SELL.value:
                 existing = broker._positions.get(symbol)
                 if existing is None:
-                    # Journal is inconsistent — SELL replayed without a prior BUY.
-                    # Log and skip. In production this triggers reconciliation.
+                    # Journal is inconsistent — SELL replayed without a prior
+                    # BUY (or a BUY that predates this journal). Journal it
+                    # (mirrors journal_replay_fallback) and skip — the SELL's
+                    # cash effect cannot be reconstructed without a position
+                    # to sell from. In production this triggers reconciliation.
+                    journal.record_event(
+                        "journal_replay_orphan_sell",
+                        {
+                            "client_order_id": f["client_order_id"],
+                            "symbol": symbol,
+                            "quantity": str(qty),
+                            "price": str(price),
+                            "reason": "SELL replayed with no matching prior BUY position",
+                        },
+                    )
                     continue
                 proceeds = notional
                 broker._cash += proceeds
@@ -142,7 +157,9 @@ class PaperBroker(Broker):
             symbol=order.symbol,
             side=order.side.value,
             notional_dollars=order.notional_dollars,
-            stop_loss_price=order.stop_loss_price,
+            # Not knowable before the fill — see Order.stop_pct docstring
+            # and _fill_buy below for why.
+            stop_loss_price=None,
         )
         price = self._quote(order.symbol)
         if order.side == Side.BUY:
@@ -155,13 +172,21 @@ class PaperBroker(Broker):
             raise InsufficientFunds(f"need ${cost}, have ${self._cash}")
         qty = cost / price
         self._cash -= cost
+        # Resolve the stop from the ACTUAL fill price, never a stale
+        # pre-trade reference — a gap between reference and fill can
+        # otherwise put an absolute stop on the wrong side of the fill
+        # (M2). See Order.stop_pct for the full rationale; RobinhoodBroker
+        # applies the identical resolution at its own fill point.
+        resolved_stop = (
+            price * (Decimal("1") + order.stop_pct) if order.stop_pct is not None else None
+        )
         existing = self._positions.get(order.symbol)
         if existing is None:
             new_pos = Position(
                 symbol=order.symbol,
                 quantity=qty,
                 avg_entry_price=price,
-                stop_loss_price=order.stop_loss_price,
+                stop_loss_price=resolved_stop,
             )
         else:
             total_qty = existing.quantity + qty
@@ -172,7 +197,7 @@ class PaperBroker(Broker):
                 symbol=order.symbol,
                 quantity=total_qty,
                 avg_entry_price=avg,
-                stop_loss_price=order.stop_loss_price or existing.stop_loss_price,
+                stop_loss_price=resolved_stop if resolved_stop is not None else existing.stop_loss_price,
             )
         self._positions[order.symbol] = new_pos
         return self._make_fill(order, qty, price, stop_loss_price=new_pos.stop_loss_price)

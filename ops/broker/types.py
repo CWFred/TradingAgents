@@ -24,17 +24,24 @@ class Order:
     notional_dollars: Decimal
     order_type: OrderType
     limit_price: Decimal | None = None
-    stop_loss_price: Decimal | None = None
+    stop_pct: Decimal | None = None
+    """Entry-relative stop, e.g. Decimal("-0.08") for an 8% trailing-from-entry
+    stop. Resolved to an absolute price at fill time from the ACTUAL fill
+    price (see PaperBroker/RobinhoodBroker), never from a pre-trade reference
+    price — a stale reference can gap past the fill and put an absolute stop
+    on the wrong side of it. Must be strictly negative when set."""
 
     def __post_init__(self) -> None:
-        if self.notional_dollars < 0:
-            raise ValueError("notional_dollars cannot be negative")
-        if self.side == Side.BUY and self.notional_dollars <= 0:
-            raise ValueError("BUY order requires positive notional_dollars")
-        if self.side == Side.SELL and self.notional_dollars <= 0:
-            raise ValueError("SELL order requires positive notional_dollars")
+        # Every order (BUY or SELL) requires strictly positive notional —
+        # the BUY and SELL branches used to be identical checks; this single
+        # check subsumes both (and the separate `< 0` check, since `<= 0`
+        # already covers negative values).
+        if self.notional_dollars <= 0:
+            raise ValueError("notional_dollars must be positive")
         if self.order_type == OrderType.LIMIT and self.limit_price is None:
             raise ValueError("LIMIT order requires limit_price")
+        if self.stop_pct is not None and self.stop_pct >= 0:
+            raise ValueError("stop_pct must be negative (entry-relative, e.g. -0.08)")
 
 
 @dataclass(frozen=True)

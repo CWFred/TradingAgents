@@ -38,12 +38,30 @@ def run():
     sys.exit(_run())
 
 
+@cli.command("notify-once")
+@click.option("--journal", "journal_path", default=None,
+              type=click.Path(dir_okay=False),
+              help="SQLite journal path (default: the configured ops journal path)")
+def notify_once(journal_path: str | None) -> None:
+    """Dispatch any pending journal events to notification transports once."""
+    from ops.main import _build_dispatcher
+
+    journal_path = journal_path or load_config().journal_path
+    journal = Journal(journal_path)
+    try:
+        n = _build_dispatcher(journal).dispatch_once()
+        click.echo(f"dispatched {n} message(s)")
+    finally:
+        journal.close()
+
+
 @cli.command("decide-once")
 @click.option("--date", "as_of", required=True,
               type=click.DateTime(formats=["%Y-%m-%d"]),
               help="Date to run for, YYYY-MM-DD")
-@click.option("--journal", "journal_path", default="ops_journal.sqlite",
-              type=click.Path(dir_okay=False), help="SQLite journal path")
+@click.option("--journal", "journal_path", default=None,
+              type=click.Path(dir_okay=False),
+              help="SQLite journal path (default: the configured ops journal path)")
 @click.option("--starting-cash", default="250",
               help="Paper-broker starting cash (Decimal string)")
 @click.option("--stub-pipeline", is_flag=True,
@@ -52,7 +70,7 @@ def run():
               help="Symbol(s) the stub pipeline should label BUY. Implies --stub-pipeline.")
 def decide_once(
     as_of: datetime,
-    journal_path: str,
+    journal_path: str | None,
     starting_cash: str,
     stub_pipeline: bool,
     stub_pipeline_buy: tuple[str, ...],
@@ -60,6 +78,7 @@ def decide_once(
     """Run a single decision/fill/stop-check pass."""
     asof_date = as_of.date()
     cfg = load_config()
+    journal_path = journal_path or cfg.journal_path
     journal = Journal(journal_path)
     cash = Decimal(starting_cash)
 
@@ -117,7 +136,7 @@ def decide_once(
     for p in proposals:
         click.echo(f"  - {p.order.symbol}: {p.pipeline.decision.value} "
                    f"→ ${p.order.notional_dollars} @ ~${p.candidate.last_price}, "
-                   f"stop ${p.order.stop_loss_price}")
+                   f"stop_pct {p.order.stop_pct}")
     click.echo("")
 
     # Place orders

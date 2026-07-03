@@ -53,7 +53,7 @@ def test_reconcile_paper_after_buy_no_diffs(tmp_path):
     broker.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("40"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9"),
+        stop_pct=Decimal("-0.1"),
     ))
     result_after = reconcile(journal=j, broker=broker, broker_mode="paper")
     assert result_after.diffs == []

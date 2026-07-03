@@ -49,7 +49,7 @@ def test_end_to_end_orchestrator_buy_then_guardian_stop_survives_restart(tmp_pat
     order = Order(
         client_order_id="b-AAPL", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("20"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.5"),
+        stop_pct=Decimal("-0.05"),
     )
     pipeline_result = PipelineResult(
         symbol="AAPL", date=date(2026, 6, 30), decision=PipelineDecision.BUY, raw={},

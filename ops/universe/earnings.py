@@ -1,5 +1,15 @@
 """Recent-earnings filter. Returns tickers that reported in the last N
-trading days with both an EPS beat and a revenue beat."""
+trading days with an EPS beat.
+
+v1 note: this only enforces an EPS beat. yfinance's `earnings_dates` frame
+does not expose reported/estimated revenue, so `revenue_actual`,
+`revenue_estimate`, and `revenue_beat` on `EarningsHit` are `None` when that
+data isn't genuinely available — they are populated (and `revenue_beat`
+computed) only when both source columns are actually present, and are never
+fabricated as zero. Revenue-beat enforcement would require a different data
+source (e.g. Finnhub's earnings calendar); see
+docs/superpowers/specs/2026-06-30-tradingagents-live-v1-design.md for the
+future option."""
 from __future__ import annotations
 
 import math
@@ -17,10 +27,10 @@ class EarningsHit:
     report_date: date
     eps_actual: Decimal
     eps_estimate: Decimal
-    revenue_actual: Decimal
-    revenue_estimate: Decimal
+    revenue_actual: Decimal | None
+    revenue_estimate: Decimal | None
     eps_beat: bool
-    revenue_beat: bool
+    revenue_beat: bool | None
 
 
 def _safe_decimal(v) -> Decimal:
@@ -34,6 +44,25 @@ def _safe_decimal(v) -> Decimal:
         return Decimal("0")
     if math.isnan(f):
         return Decimal("0")
+    return Decimal(str(f))
+
+
+def _optional_decimal(row, col: str) -> Decimal | None:
+    """Return a Decimal for `col` only if the column is actually present on
+    `row` and its value parses to a real (non-NaN) number. Returns None on
+    absence rather than fabricating a zero — callers must be able to tell
+    "no data" apart from "value of zero"."""
+    if col not in row.index:
+        return None
+    v = row[col]
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f):
+        return None
     return Decimal(str(f))
 
 
@@ -86,8 +115,17 @@ def _fetch_from_yfinance(symbol: str) -> EarningsHit | None:
     row = df.iloc[0]
     eps_actual = _safe_decimal(row["Reported EPS"])
     eps_est = _safe_decimal(row["EPS Estimate"])
-    rev_actual = _safe_decimal(row.get("Reported Revenue"))
-    rev_est = _safe_decimal(row.get("Revenue Estimate"))
+    rev_actual = _optional_decimal(row, "Reported Revenue")
+    rev_est = _optional_decimal(row, "Revenue Estimate")
+    if rev_actual is not None and rev_est is not None:
+        revenue_beat = rev_actual > rev_est
+    else:
+        # Only genuinely available when BOTH columns are present — a
+        # one-sided value is still absent data, not honest, so discard it
+        # rather than compare against a fabricated zero.
+        rev_actual = None
+        rev_est = None
+        revenue_beat = None
     report_date = row.name.date() if hasattr(row.name, "date") else row.name
     return EarningsHit(
         symbol=symbol,
@@ -97,7 +135,7 @@ def _fetch_from_yfinance(symbol: str) -> EarningsHit | None:
         revenue_actual=rev_actual,
         revenue_estimate=rev_est,
         eps_beat=eps_actual > eps_est,
-        revenue_beat=rev_actual > rev_est,
+        revenue_beat=revenue_beat,
     )
 
 

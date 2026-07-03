@@ -73,3 +73,97 @@ def test_fetch_from_yfinance_returns_none_on_exception(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "ZZZZ" in err
     assert "KeyError" in err
+
+
+def _earnings_dates_df(rows: dict, report_date: date):
+    """Build a minimal DataFrame shaped like yfinance's `earnings_dates`
+    attribute: a DatetimeIndex row per report, columns as given in `rows`."""
+    import pandas as pd
+
+    idx = pd.DatetimeIndex([pd.Timestamp(report_date)])
+    return pd.DataFrame(rows, index=idx)
+
+
+def test_fetch_from_yfinance_revenue_absent_is_honest_none(monkeypatch):
+    """yfinance's earnings_dates frame does not carry revenue columns in
+    practice — the fetcher must not fabricate zeros for missing data."""
+    import ops.universe.earnings as mod
+
+    report_date = date(2026, 6, 30)
+    df = _earnings_dates_df(
+        {"EPS Estimate": [0.9], "Reported EPS": [1.0]}, report_date
+    )
+
+    class FakeTicker:
+        earnings_dates = df
+
+    monkeypatch.setattr(mod.yf, "Ticker", lambda symbol: FakeTicker())
+    hit = mod._fetch_from_yfinance("AAPL")
+
+    assert hit is not None
+    assert hit.revenue_actual is None
+    assert hit.revenue_estimate is None
+    assert hit.revenue_beat is None
+    assert hit.eps_beat is True
+
+    # And the universe-level filter still passes it through (EPS-only gate).
+    result = find_recent_earnings_beats(
+        ["AAPL"], asof_date=report_date, lookback_days=2,
+        fetch=lambda sym: hit,
+    )
+    assert [h.symbol for h in result] == ["AAPL"]
+
+
+def test_fetch_from_yfinance_revenue_present_computes_beat(monkeypatch):
+    """When both revenue columns are genuinely present, revenue_beat
+    reflects actual vs. estimate rather than staying None."""
+    import ops.universe.earnings as mod
+
+    report_date = date(2026, 6, 30)
+    df = _earnings_dates_df(
+        {
+            "EPS Estimate": [0.9],
+            "Reported EPS": [1.0],
+            "Reported Revenue": [110.0],
+            "Revenue Estimate": [100.0],
+        },
+        report_date,
+    )
+
+    class FakeTicker:
+        earnings_dates = df
+
+    monkeypatch.setattr(mod.yf, "Ticker", lambda symbol: FakeTicker())
+    hit = mod._fetch_from_yfinance("AAPL")
+
+    assert hit is not None
+    assert hit.revenue_actual == Decimal("110.0")
+    assert hit.revenue_estimate == Decimal("100.0")
+    assert hit.revenue_beat is True
+
+
+def test_fetch_from_yfinance_revenue_partial_columns_is_honest_none(monkeypatch):
+    """Only one of the two revenue columns present is still absent data —
+    must not fabricate a comparison against a fabricated zero."""
+    import ops.universe.earnings as mod
+
+    report_date = date(2026, 6, 30)
+    df = _earnings_dates_df(
+        {
+            "EPS Estimate": [0.9],
+            "Reported EPS": [1.0],
+            "Reported Revenue": [110.0],
+        },
+        report_date,
+    )
+
+    class FakeTicker:
+        earnings_dates = df
+
+    monkeypatch.setattr(mod.yf, "Ticker", lambda symbol: FakeTicker())
+    hit = mod._fetch_from_yfinance("AAPL")
+
+    assert hit is not None
+    assert hit.revenue_actual is None
+    assert hit.revenue_estimate is None
+    assert hit.revenue_beat is None

@@ -44,11 +44,11 @@ def _factory(tmp_path, *, starting_cash="250", quotes=None):
     return journal, guarded
 
 
-def _buy(symbol="AAPL", notional="25", stop="184", cid="c1") -> Order:
+def _buy(symbol="AAPL", notional="25", stop_pct="-0.08", cid="c1") -> Order:
     return Order(
         client_order_id=cid, symbol=symbol, side=Side.BUY,
         notional_dollars=Decimal(notional), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal(stop) if stop else None,
+        stop_pct=Decimal(stop_pct) if stop_pct else None,
     )
 
 
@@ -77,7 +77,7 @@ def test_inner_broker_is_name_mangled(tmp_path):
         guarded._inner  # noqa: B018 — intentional access for the test
 
 
-def test_default_rule_chain_has_all_thirteen_rules():
+def test_default_rule_chain_has_all_fourteen_rules():
     rules = build_default_rule_chain(
         start_of_day_equity=lambda: Decimal("250"),
         start_of_week_equity=lambda: Decimal("250"),
@@ -86,7 +86,7 @@ def test_default_rule_chain_has_all_thirteen_rules():
     expected = [
         "DenyListRule", "NoMarginRule", "NoOptionsRule", "NoCryptoRule",
         "LongOnlyRule", "StopAttachedRule", "FractionalSharesOnlyRule",
-        "PerTradeDollarFloorRule", "PerPositionCapRule",
+        "PerTradeDollarFloorRule", "LiveMaxPositionRule", "PerPositionCapRule",
         "MaxOpenPositionsRule", "CashReserveRule",
         "DailyDrawdownRule", "WeeklyDrawdownRule",
     ]
@@ -94,23 +94,51 @@ def test_default_rule_chain_has_all_thirteen_rules():
 
 
 def test_broker_layer_exception_is_journaled(tmp_path):
-    """If the inner broker rejects after guardrails pass (e.g. InsufficientFunds
-    in a degenerate scenario), the rejection must still land in the journal."""
-    # Engineer a stack where guardrails pass but the inner broker rejects.
-    # We start with $250 cash. We disable CashReserveRule to let the BUY past,
-    # then SELL a position we don't have — inner raises NoSuchPosition.
+    """If the inner broker rejects after guardrails pass, the rejection must
+    still land in the journal.
+
+    LongOnlyRule (M5) now closes the old "SELL with no/insufficient position"
+    gap this test used to exploit — that exact scenario is caught by the
+    guardrail chain today, by design. What's still not closeable by a
+    pre-trade rule is a quote read TOCTOU: LongOnlyRule reads its own quote
+    to size the sell, and PaperBroker independently re-reads the quote at
+    fill time; a price move between those two reads can still make the
+    fill-time share count exceed the held quantity. We simulate exactly
+    that drift (quote flickers from $200 to $100 between the guardrail's
+    read and the broker's fill-time read) to keep exercising the broker-layer
+    journaling pathway without relying on a gap the new rule is supposed to
+    close."""
     journal = Journal(str(tmp_path / "j.sqlite"))
-    cfg = OpsConfig()  # default; we'll use a non-guarded path
+    cfg = OpsConfig()
+    quote_calls = {"n": 0}
+
+    def flaky_quote(symbol):
+        quote_calls["n"] += 1
+        # call #1: BUY fill price. call #2: LongOnlyRule's SELL check.
+        # call #3+: PaperBroker's own SELL fill-time price (post-guardrail).
+        return Decimal("200") if quote_calls["n"] <= 2 else Decimal("100")
+
     guarded = build_guarded_paper_broker(
         config=cfg, journal=journal,
-        quote_source=lambda s: Decimal("200"),
+        quote_source=flaky_quote,
         starting_cash=Decimal("250"),
         start_of_day_equity=lambda: Decimal("250"),
         start_of_week_equity=lambda: Decimal("250"),
     )
+    guarded.place_order(Order(
+        client_order_id="cB", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
+        stop_pct=Decimal("-0.08"),
+    ))
+    # BUY fills at $200 (call #1): 25/200 = 0.125 shares held.
+    # At $200 (call #2), 20/200 = 0.1 shares <= the 0.125 held —
+    # LongOnlyRule passes. At fill time the price has "moved" to $100
+    # (call #3), so PaperBroker computes 20/100 = 0.2 shares, which
+    # exceeds the 0.125 actually held and raises NoSuchPosition from
+    # inside _fill_sell.
     sell = Order(
         client_order_id="cS", symbol="AAPL", side=Side.SELL,
-        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+        notional_dollars=Decimal("20"), order_type=OrderType.MARKET,
     )
     with pytest.raises(Exception):
         guarded.place_order(sell)
@@ -221,5 +249,5 @@ def test_build_guarded_robinhood_broker_blocks_spot(config, journal):
         broker.place_order(Order(
             client_order_id="b-1", symbol="SPOT", side=Side.BUY,
             notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-            stop_loss_price=Decimal("100"),
+            stop_pct=Decimal("-0.08"),
         ))

@@ -6,6 +6,8 @@ SELL orders — sizing limits only apply to opening/adding exposure via BUYs.
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from ops.broker.types import Side
 from ops.guardrails.base import Rule, RuleContext, RuleResult
 
@@ -71,5 +73,30 @@ class CashReserveRule(Rule):
         if post_cash < floor:
             return RuleResult.reject(
                 f"post-trade cash ${post_cash} below reserve floor ${floor}"
+            )
+        return RuleResult.allow()
+
+
+class LiveMaxPositionRule(Rule):
+    """During the first `live_fill_gate_count` live BUY fills after the
+    paper->robinhood flip, cap each BUY notional at `live_max_position`.
+    Inert in paper mode and after the gate lifts. Independent of
+    PerPositionCapRule (the stricter of the two applies while active)."""
+
+    def __init__(self, live_fill_count: Callable[[], int]):
+        self._live_fill_count = live_fill_count
+
+    def check(self, ctx: RuleContext) -> RuleResult:
+        if ctx.order.side != Side.BUY:
+            return RuleResult.allow()
+        if ctx.config.broker_mode != "robinhood":
+            return RuleResult.allow()
+        if self._live_fill_count() >= ctx.config.live_fill_gate_count:
+            return RuleResult.allow()
+        if ctx.order.notional_dollars > ctx.config.live_max_position:
+            return RuleResult.reject(
+                f"live-gate: first {ctx.config.live_fill_gate_count} live fills "
+                f"capped at ${ctx.config.live_max_position}, "
+                f"order ${ctx.order.notional_dollars}"
             )
         return RuleResult.allow()

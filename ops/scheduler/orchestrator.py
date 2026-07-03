@@ -1,9 +1,10 @@
 """Orchestrator tick handler — called by APScheduler at :00/:30 during trading hours."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from ops.broker.base import BrokerError, OrderRejected
+from ops.trading_time import trading_day_start, trading_week_start
 
 
 class Orchestrator:
@@ -55,7 +56,7 @@ class Orchestrator:
 
     def _maybe_snapshot_equity(self) -> None:
         now = datetime.now(timezone.utc)
-        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_day = trading_day_start(now)
         existing_day = self._journal.get_latest_equity_snapshot(
             kind="open_day", since=start_of_day,
         )
@@ -67,9 +68,7 @@ class Orchestrator:
                 at=now,
             )
         # Weekly snapshot at first tick of the week.
-        weekday = now.weekday()
-        monday = now - timedelta(days=weekday)
-        monday = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+        monday = trading_week_start(now)
         existing_week = self._journal.get_latest_equity_snapshot(
             kind="open_week", since=monday,
         )

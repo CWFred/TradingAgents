@@ -8,6 +8,7 @@ from ops.broker.types import Order, OrderType, Side
 from ops.config import OpsConfig
 from ops.journal import Journal
 from ops.position_guardian import PositionGuardian
+from ops.trading_time import trading_week_start
 
 
 def _stack(tmp_path, *, starting_cash="250", quotes=None):
@@ -28,7 +29,7 @@ def _open_position(guarded):
     guarded.place_order(Order(
         client_order_id="open", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
 
 
@@ -57,9 +58,9 @@ class _MutableQuotes:
 
 @pytest.fixture
 def _broker_with_positions(tmp_path):
-    from ops.journal import Journal
     from ops import build_guarded_paper_broker
     from ops.config import OpsConfig
+    from ops.journal import Journal
 
     class _Q:
         def __init__(self):
@@ -79,15 +80,22 @@ def _broker_with_positions(tmp_path):
             start_of_week_equity=lambda: weekly_open_equity,
         )
         for symbol, entry, stop, notional in positions:
+            # positions tuples carry an absolute target stop for readability;
+            # convert to entry-relative stop_pct since that's what Order
+            # carries now (the absolute stop is resolved from the fill price,
+            # which equals `entry` here since quotes are pinned before the buy).
+            stop_pct = (stop / entry) - Decimal("1")
             broker.place_order(Order(
                 client_order_id=f"b-{symbol}", symbol=symbol, side=Side.BUY,
                 notional_dollars=notional, order_type=OrderType.MARKET,
-                stop_loss_price=stop,
+                stop_pct=stop_pct,
             ))
+        # Baseline must be in the CURRENT week — the guardian ignores stale
+        # open_week snapshots, and a hardcoded date would rot next Monday.
         from datetime import datetime, timezone
         j.record_equity_snapshot(
             kind="open_week", equity=weekly_open_equity, cash=Decimal("500"),
-            at=datetime(2026, 6, 29, 13, 30, tzinfo=timezone.utc),
+            at=datetime.now(timezone.utc),
         )
         return broker, quotes, OpsConfig(), j
     return _make
@@ -142,12 +150,12 @@ def test_guardian_handles_multiple_positions(tmp_path):
     guarded.place_order(Order(
         client_order_id="a", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     guarded.place_order(Order(
         client_order_id="m", symbol="MSFT", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     quotes["AAPL"] = Decimal("220")    # +10%, hold
     quotes["MSFT"] = Decimal("180")    # -10%, stop
@@ -169,12 +177,12 @@ def test_guardian_continues_after_failed_sell(tmp_path):
     guarded.place_order(Order(
         client_order_id="a", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     guarded.place_order(Order(
         client_order_id="m", symbol="MSFT", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     quotes["AAPL"] = Decimal("180")   # -10%, stop
     quotes["MSFT"] = Decimal("180")   # -10%, stop
@@ -219,12 +227,12 @@ def test_guardian_survives_quote_unavailable(tmp_path):
     guarded.place_order(Order(
         client_order_id="a", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     guarded.place_order(Order(
         client_order_id="m", symbol="MSFT", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
 
     def flaky_quote(symbol):
@@ -248,6 +256,128 @@ def test_guardian_survives_quote_unavailable(tmp_path):
     assert any(e["kind"] == "quote_unavailable" for e in events)
 
 
+def test_guardian_survives_brokererror_at_quote_step(tmp_path):
+    """A live BrokerError (RobinhoodBroker.get_quote's real failure mode, not
+    just QuoteUnavailable) for one position must not abort the pass; the
+    remaining position is still evaluated and no guardian_check_error fires."""
+    from ops.broker.base import BrokerError
+    quotes = {"AAPL": Decimal("200"), "MSFT": Decimal("200")}
+    j, guarded, cfg, _ = _stack(tmp_path, starting_cash="10000", quotes=quotes)
+    guarded.place_order(Order(
+        client_order_id="a", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
+        stop_pct=Decimal("-0.08"),
+    ))
+    guarded.place_order(Order(
+        client_order_id="m", symbol="MSFT", side=Side.BUY,
+        notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
+        stop_pct=Decimal("-0.08"),
+    ))
+
+    def flaky_quote(symbol):
+        if symbol == "AAPL":
+            raise BrokerError(f"live quote transport error on {symbol}")
+        return Decimal("180")   # MSFT will trip stop
+
+    g = PositionGuardian(broker=guarded, quote_source=flaky_quote, config=cfg)
+    actions = g.check_stops_once()
+
+    # Both positions were evaluated despite AAPL's raw BrokerError.
+    assert {a.symbol for a in actions} == {"AAPL", "MSFT"}
+    aapl = next(a for a in actions if a.symbol == "AAPL")
+    msft = next(a for a in actions if a.symbol == "MSFT")
+    assert aapl.sold is False
+    assert "quote unavailable" in aapl.reason.lower()
+    assert msft.sold is True
+    events = j.read_events()
+    assert any(e["kind"] == "quote_unavailable" for e in events)
+    assert not any(e["kind"] == "guardian_check_error" for e in events)
+
+
+# --- blind-guardian escalation: consecutive fully-failed passes -------------
+
+
+def test_guardian_blind_after_five_consecutive_fully_failed_passes(tmp_path):
+    """5 consecutive passes where the only open position's quote fails
+    journal exactly one guardian_blind event (not every pass thereafter)."""
+    from ops.broker.base import BrokerError
+    quotes = {"AAPL": Decimal("200")}
+    j, guarded, cfg, _ = _stack(tmp_path, starting_cash="10000", quotes=quotes)
+    guarded.place_order(Order(
+        client_order_id="a", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
+        stop_pct=Decimal("-0.08"),
+    ))
+
+    def always_fails(symbol):
+        raise BrokerError("broker unreachable")
+
+    g = PositionGuardian(broker=guarded, quote_source=always_fails, config=cfg)
+    for _ in range(4):
+        g.check_stops_once()
+    events = j.read_events()
+    assert not any(e["kind"] == "guardian_blind" for e in events)
+
+    g.check_stops_once()   # 5th consecutive fully-failed pass
+    events = j.read_events()
+    blind_events = [e for e in events if e["kind"] == "guardian_blind"]
+    assert len(blind_events) == 1
+
+    g.check_stops_once()   # 6th consecutive — must NOT duplicate
+    events = j.read_events()
+    blind_events = [e for e in events if e["kind"] == "guardian_blind"]
+    assert len(blind_events) == 1
+
+
+def test_guardian_blind_streak_resets_after_successful_pass(tmp_path):
+    """A pass that gets a usable quote resets the consecutive-failure
+    counter, so an intermittent outage doesn't cross the threshold on
+    stale count."""
+    from ops.broker.base import BrokerError
+    quotes = {"AAPL": Decimal("200")}
+    j, guarded, cfg, _ = _stack(tmp_path, starting_cash="10000", quotes=quotes)
+    guarded.place_order(Order(
+        client_order_id="a", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
+        stop_pct=Decimal("-0.08"),
+    ))
+
+    state = {"fail": True}
+
+    def toggling_quote(symbol):
+        if state["fail"]:
+            raise BrokerError("broker unreachable")
+        return Decimal("200")   # well above stop; holds, doesn't sell
+
+    g = PositionGuardian(broker=guarded, quote_source=toggling_quote, config=cfg)
+    for _ in range(4):
+        g.check_stops_once()
+    state["fail"] = False
+    g.check_stops_once()       # success resets the streak
+    state["fail"] = True
+    for _ in range(4):
+        g.check_stops_once()   # only 4 consecutive since the reset
+    events = j.read_events()
+    assert not any(e["kind"] == "guardian_blind" for e in events)
+
+    g.check_stops_once()       # 5th consecutive since the reset
+    events = j.read_events()
+    blind_events = [e for e in events if e["kind"] == "guardian_blind"]
+    assert len(blind_events) == 1
+
+
+def test_guardian_empty_book_does_not_trip_blind_alarm(tmp_path):
+    """A pass with zero open positions has nothing to check and must never
+    count toward the blind-guardian streak, no matter how many times it
+    repeats."""
+    j, guarded, cfg, _ = _stack(tmp_path, starting_cash="10000")
+    g = PositionGuardian(broker=guarded, quote_source=guarded.get_quote, config=cfg)
+    for _ in range(10):
+        g.check_stops_once()
+    events = j.read_events()
+    assert not any(e["kind"] == "guardian_blind" for e in events)
+
+
 def test_guardian_stop_sell_client_order_ids_are_unique_per_attempt(tmp_path):
     """Two check_stops_once() passes that hit the same symbol must emit
     distinct client_order_ids on the resulting close_position SELLs.
@@ -259,7 +389,7 @@ def test_guardian_stop_sell_client_order_ids_are_unique_per_attempt(tmp_path):
     guarded.place_order(Order(
         client_order_id="open-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     quotes["AAPL"] = Decimal("180")   # trip the stop
     g = PositionGuardian(broker=guarded, quote_source=guarded.get_quote, config=cfg)
@@ -271,7 +401,7 @@ def test_guardian_stop_sell_client_order_ids_are_unique_per_attempt(tmp_path):
     guarded.place_order(Order(
         client_order_id="open-2", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     ))
     quotes["AAPL"] = Decimal("180")
     actions_2 = g.check_stops_once()
@@ -296,7 +426,7 @@ def test_guardian_uses_absolute_stop_when_position_has_one(guardian_fixtures):
     broker.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.5"),
+        stop_pct=Decimal("-0.05"),
     ))
     guardian = PositionGuardian(broker=broker, quote_source=quotes.get, config=cfg)
     # Price at $9.60 — below config default -8% (would be $9.20) but ABOVE explicit stop.
@@ -321,7 +451,7 @@ def test_guardian_falls_back_to_config_pct_when_no_position_stop(guardian_fixtur
     broker.place_order(Order(
         client_order_id="b-1", symbol="MSFT", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("80"),
+        stop_pct=Decimal("-0.2"),
     ))
     _clear_position_stop(broker, "MSFT")
     guardian = PositionGuardian(broker=broker, quote_source=quotes.get, config=cfg)
@@ -407,7 +537,7 @@ def test_guardian_records_stop_hit_with_mode_and_threshold(guardian_fixtures):
     broker.place_order(Order(
         client_order_id="b-1", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("9.5"),
+        stop_pct=Decimal("-0.05"),
     ))
     guardian = PositionGuardian(broker=broker, quote_source=quotes.get, config=cfg)
     quotes.set("AAPL", Decimal("9.45"))
@@ -442,6 +572,7 @@ def test_kill_switch_idempotent_within_week(_broker_with_positions):
 def test_kill_switch_paper_mode_records_close_failure_and_continues(_broker_with_positions):
     """Close failure during kill-switch sweep is journaled; sweep continues to next symbol."""
     import unittest.mock as _mock
+
     from ops.broker.base import BrokerError
     broker, quotes, cfg, journal = _broker_with_positions(
         [("AAPL", Decimal("10"), Decimal("0.50"), Decimal("50")),
@@ -481,6 +612,7 @@ def test_guardian_journals_check_error_on_unexpected_exception(tmp_path):
     is journaled as guardian_check_error and swallowed. The APScheduler
     job body must never propagate an exception up."""
     from unittest.mock import MagicMock
+
     from ops.broker.base import BrokerError
 
     j = Journal(str(tmp_path / "j.sqlite"))
@@ -502,3 +634,166 @@ def test_guardian_journals_check_error_on_unexpected_exception(tmp_path):
     err_events = [e for e in events if e["kind"] == "guardian_check_error"]
     assert len(err_events) == 1
     assert "mcp down" in err_events[0]["payload"]["error"]
+
+
+# --- market-hours gate: the guardian must not trade outside RTH -------------
+
+
+def test_guardian_skips_entirely_when_market_closed(tmp_path):
+    """Spec: 'Guardian tracks AH quotes but does not trade. Any stop breached
+    AH fires at next open.' A breached stop with the market closed must not
+    sell, must not journal stop_hit, and must not trip the kill switch."""
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    _open_position(guarded)
+    quotes["AAPL"] = Decimal("100")   # far below the $184 stop
+    g = PositionGuardian(
+        broker=guarded, quote_source=guarded.get_quote, config=cfg,
+        market_open_fn=lambda: False,
+    )
+    assert g.check_stops_once() == []
+    assert len(guarded.get_positions()) == 1
+    kinds = [e["kind"] for e in j.read_events()]
+    assert "stop_hit" not in kinds
+    assert "kill_switch" not in kinds
+
+
+def test_guardian_trades_when_market_open_fn_true(tmp_path):
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    _open_position(guarded)
+    quotes["AAPL"] = Decimal("100")
+    g = PositionGuardian(
+        broker=guarded, quote_source=guarded.get_quote, config=cfg,
+        market_open_fn=lambda: True,
+    )
+    actions = g.check_stops_once()
+    assert actions[0].sold is True
+    assert guarded.get_positions() == []
+
+
+# --- kill switch: fresh weekly baseline only, and resumable auto-close ------
+
+
+def test_kill_switch_ignores_stale_week_snapshot_and_rebaselines(tmp_path):
+    """An open_week snapshot from a PREVIOUS week must not be used as the
+    drawdown baseline (a guardian-only or long-idle restart would otherwise
+    compare against weeks-old equity and can falsely liquidate everything).
+    Instead the guardian records a fresh baseline for this week."""
+    from datetime import datetime, timedelta, timezone
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    _open_position(guarded)
+    now = datetime.now(timezone.utc)
+    j.record_equity_snapshot(
+        kind="open_week", equity=Decimal("1000"), cash=Decimal("1000"),
+        at=now - timedelta(days=14),
+    )
+    g = PositionGuardian(
+        broker=guarded, quote_source=guarded.get_quote, config=cfg,
+        journal=j, broker_mode="paper",
+    )
+    g.check_stops_once()
+    kinds = [e["kind"] for e in j.read_events()]
+    assert "kill_switch" not in kinds       # equity 250 vs stale 1000 must NOT trip
+    assert len(guarded.get_positions()) == 1
+    # Use the real ET-calendar boundary (matches what PositionGuardian
+    # itself uses, per M7) rather than re-implementing the old
+    # UTC-Monday-midnight formula inline.
+    monday = trading_week_start(now)
+    fresh = [s for s in j.read_equity_snapshots()
+             if s["kind"] == "open_week" and s["at"] >= monday]
+    assert fresh, "guardian should have recorded a fresh weekly baseline"
+
+
+def test_kill_switch_paper_close_resumes_after_restart(tmp_path):
+    """If the kill_switch event was journaled but the process died before
+    the auto-close sweep finished, a later guardian pass (same week) must
+    close the remaining positions — without duplicating the event."""
+    from datetime import datetime, timezone
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    _open_position(guarded)
+    quotes["AAPL"] = Decimal("190")   # above the $184 stop: ordinary stop must not fire
+    j.record_equity_snapshot(
+        kind="open_week", equity=Decimal("250"), cash=Decimal("225"),
+        at=datetime.now(timezone.utc),
+    )
+    j.record_event("kill_switch", {"mode": "paper", "pct": "-0.2"})
+    g = PositionGuardian(
+        broker=guarded, quote_source=guarded.get_quote, config=cfg,
+        journal=j, broker_mode="paper",
+    )
+    g.check_stops_once()
+    assert guarded.get_positions() == [], "remaining positions must be swept"
+    kill_events = [e for e in j.read_events() if e["kind"] == "kill_switch"]
+    assert len(kill_events) == 1, "no duplicate kill_switch event"
+
+
+# --- daily halt: computed in the same pass as the weekly kill switch --------
+
+
+def _daily_halt_stack(tmp_path, *, drop_price):
+    """500 starting cash, one AAPL position bought at $10 (5 shares, notional
+    $50, cash 450). The stop is set absurdly loose (-99%, absolute stop
+    $0.10) so the ordinary per-position stop never interferes — only the
+    portfolio-level daily-halt check is exercised. An open_day baseline of
+    $500 is recorded 'now' (today), matching the freshness convention
+    _maybe_trip_kill_switch uses for open_week. `drop_price` sets AAPL's
+    quote so total equity = 450 + 5*drop_price."""
+    from datetime import datetime, timezone
+
+    j = Journal(str(tmp_path / "j.sqlite"))
+    cfg = OpsConfig()  # daily_drawdown_pct = -0.07
+    quotes = _MutableQuotes()
+    quotes.set("AAPL", Decimal("10"))
+    broker = build_guarded_paper_broker(
+        config=cfg, journal=j, quote_source=quotes.get,
+        starting_cash=Decimal("500"),
+        start_of_day_equity=lambda: Decimal("500"),
+        start_of_week_equity=lambda: Decimal("500"),
+    )
+    broker.place_order(Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+        stop_pct=Decimal("-0.99"),
+    ))
+    j.record_equity_snapshot(
+        kind="open_day", equity=Decimal("500"), cash=Decimal("500"),
+        at=datetime.now(timezone.utc),
+    )
+    quotes.set("AAPL", drop_price)
+    guardian = PositionGuardian(
+        broker=broker, quote_source=quotes.get, config=cfg,
+        journal=j, broker_mode="paper",
+    )
+    return j, broker, guardian
+
+
+def test_daily_halt_trips_at_exactly_threshold(tmp_path):
+    """equity 450 + 5*3 = 465, pct = (465-500)/500 = -0.07 exactly ==
+    daily_drawdown_pct. Must record daily_halt."""
+    j, broker, guardian = _daily_halt_stack(tmp_path, drop_price=Decimal("3"))
+    guardian.check_stops_once()
+    events = j.read_events()
+    halts = [e for e in events if e["kind"] == "daily_halt"]
+    assert len(halts) == 1
+    assert halts[0]["payload"]["pct"] == "-0.07"
+    # No position closing — daily halt only blocks new BUYs elsewhere.
+    assert len(broker.get_positions()) == 1
+
+
+def test_daily_halt_not_tripped_just_above_threshold(tmp_path):
+    """equity 450 + 5*3.1 = 465.5, pct = -0.069, ABOVE (less negative than)
+    the -0.07 threshold. Must NOT record daily_halt."""
+    j, broker, guardian = _daily_halt_stack(tmp_path, drop_price=Decimal("3.1"))
+    guardian.check_stops_once()
+    events = j.read_events()
+    assert not any(e["kind"] == "daily_halt" for e in events)
+
+
+def test_daily_halt_idempotent_within_day(tmp_path):
+    """A second guardian pass the same day, still past threshold, must not
+    duplicate the daily_halt event."""
+    j, broker, guardian = _daily_halt_stack(tmp_path, drop_price=Decimal("3"))
+    guardian.check_stops_once()
+    guardian.check_stops_once()
+    events = j.read_events()
+    halts = [e for e in events if e["kind"] == "daily_halt"]
+    assert len(halts) == 1

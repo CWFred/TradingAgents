@@ -1,7 +1,21 @@
-import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
+
+import pytest
+
 from ops.journal import Journal
+
+
+def test_journal_creates_missing_parent_directories(tmp_path):
+    """The default journal_path now lives under an XDG state directory that
+    may not exist yet on first run (e.g. ~/.local/state/tradingagents/).
+    Journal must create it on open rather than raising sqlite3.OperationalError."""
+    nested = tmp_path / "state" / "tradingagents" / "ops_journal.sqlite"
+    assert not nested.parent.exists()
+    j = Journal(str(nested))
+    assert nested.parent.exists()
+    j.record_event("test_kind", {"ok": True})
+    j.close()
 
 
 def test_journal_records_and_reads_event(tmp_path):
@@ -229,3 +243,75 @@ def test_migrates_pre_existing_fills_without_stop_column(tmp_path):
                   side="BUY", quantity=Decimal("1"), price=Decimal("10"),
                   filled_at=ts, stop_loss_price=Decimal("9"))
     assert j.read_fills()[0]["stop_loss_price"] == Decimal("9")
+
+
+def test_read_events_since_returns_id_and_filters(tmp_path):
+    j = Journal(str(tmp_path / "j.sqlite"))
+    j.record_event("a", {"n": 1})
+    j.record_event("b", {"n": 2})
+    j.record_event("c", {"n": 3})
+    all_ev = j.read_events_since(0)
+    assert [e["kind"] for e in all_ev] == ["a", "b", "c"]
+    assert all_ev[0]["id"] == 1 and all_ev[2]["id"] == 3
+    # only rows after id=1
+    after = j.read_events_since(1)
+    assert [e["kind"] for e in after] == ["b", "c"]
+    # limit
+    assert len(j.read_events_since(0, limit=2)) == 2
+
+
+def test_dispatch_cursor_roundtrip_and_default(tmp_path):
+    j = Journal(str(tmp_path / "j.sqlite"))
+    assert j.get_cursor("notify") == 0          # default when absent
+    j.set_cursor("notify", 5)
+    assert j.get_cursor("notify") == 5
+    j.set_cursor("notify", 9)                    # upsert, not duplicate
+    assert j.get_cursor("notify") == 9
+
+
+def test_cash_adjustment_roundtrip(tmp_path):
+    from decimal import Decimal
+    j = Journal(str(tmp_path / "j.sqlite"))
+    j.record_cash_adjustment(kind="seed", amount=Decimal("250"), note="initial")
+    j.record_cash_adjustment(kind="deposit", amount=Decimal("100.50"))
+    adjs = j.read_cash_adjustments()
+    assert len(adjs) == 2
+    assert adjs[0]["kind"] == "seed" and adjs[0]["amount"] == Decimal("250")
+    assert adjs[0]["note"] == "initial"
+    assert adjs[1]["kind"] == "deposit" and adjs[1]["amount"] == Decimal("100.50")
+    assert adjs[1]["at"].tzinfo is not None
+
+
+def test_duplicate_client_order_id_raises_integrity_error(tmp_path):
+    """M3: client_order_id is meant to be a unique idempotency key. A second
+    order row with the same client_order_id must be a write-time error, not
+    silent replay corruption (journal replay keys fills/orders by
+    client_order_id — last write wins on a collision)."""
+    import sqlite3
+
+    j = Journal(str(tmp_path / "j.sqlite"))
+    j.record_order(
+        client_order_id="dupe-1", symbol="AAPL", side="BUY",
+        notional_dollars=Decimal("25.00"), stop_loss_price=None,
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        j.record_order(
+            client_order_id="dupe-1", symbol="MSFT", side="BUY",
+            notional_dollars=Decimal("30.00"), stop_loss_price=None,
+        )
+
+
+def test_cash_adjustment_migrates_existing_db(tmp_path):
+    """A journal created before cash_adjustments existed must gain the table
+    on reopen (same defensive-migration pattern as the other tables)."""
+    import sqlite3
+    from decimal import Decimal
+    path = str(tmp_path / "old.sqlite")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 " at TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL)")
+    conn.commit()
+    conn.close()
+    j = Journal(path)
+    j.record_cash_adjustment(kind="seed", amount=Decimal("250"))
+    assert j.read_cash_adjustments()[0]["amount"] == Decimal("250")

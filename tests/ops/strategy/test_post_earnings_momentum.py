@@ -37,8 +37,9 @@ def test_emits_buy_order_for_pipeline_buy():
     assert so.order.order_type == OrderType.MARKET
     # Per-position cap = 10% of 250 = 25
     assert so.order.notional_dollars == Decimal("25.00")
-    # Stop = 200 * (1 + -0.08) = 184
-    assert so.order.stop_loss_price == Decimal("184.00")
+    # Entry-relative stop_pct, resolved to an absolute price from the actual
+    # fill price at fill time — not from cand.last_price (M2).
+    assert so.order.stop_pct == cfg.per_position_stop_pct == Decimal("-0.08")
     assert so.order.client_order_id.startswith("pem-")
     assert so.candidate.symbol == "AAPL"
     assert so.pipeline.decision == PipelineDecision.BUY
@@ -80,3 +81,30 @@ def test_client_order_id_is_unique_per_candidate(monkeypatch):
     )
     cids = {o.order.client_order_id for o in orders}
     assert len(cids) == 2
+
+
+def test_client_order_id_distinct_across_ticks_for_same_symbol_and_date():
+    """M3: the same symbol at the same universe index recurs every 30-minute
+    tick on the same trading date (e.g. after a CashReserveRule rejection on
+    the prior tick). Two separate propose_orders calls for the same
+    symbol/date must NOT produce the same client_order_id — a positional
+    index alone collides and journal replay keys on client_order_id (last
+    write wins), corrupting replayed cash."""
+    cfg = OpsConfig()
+    strat = PostEarningsMomentumStrategy(config=cfg)
+    pipe = StubPipelineAdapter({"AAPL": PipelineDecision.BUY})
+    asof = date(2026, 6, 30)
+
+    first_tick = strat.propose_orders(
+        candidates=[_candidate("AAPL")], pipeline=pipe,
+        current_equity=Decimal("250"), asof_date=asof,
+    )
+    second_tick = strat.propose_orders(
+        candidates=[_candidate("AAPL")], pipeline=pipe,
+        current_equity=Decimal("250"), asof_date=asof,
+    )
+    id1 = first_tick[0].order.client_order_id
+    id2 = second_tick[0].order.client_order_id
+    assert id1 != id2
+    assert id1.startswith("pem-2026-06-30-AAPL-")
+    assert id2.startswith("pem-2026-06-30-AAPL-")

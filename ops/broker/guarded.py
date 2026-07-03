@@ -8,6 +8,21 @@ in `ops.__init__` — callers should not construct GuardedBroker directly.
 Concurrency: every place_order call holds `_lock` for the full guardrail
 evaluation + inner fill, so two concurrent BUYs cannot both read pre-trade
 state, both pass sizing/cash rules against stale numbers, and both fill.
+
+get_positions/get_equity/get_cash also acquire `_lock` (read-only, but the
+inner broker's dicts are plain Python dicts mutated in place by
+place_order/close_position; without serializing reads against those writes
+a concurrent guardian pass can observe a dict mid-mutation and raise "dict
+changed size during iteration"). `_lock` is a plain, non-reentrant
+threading.Lock: place_order/close_position must never call
+self.get_positions/get_equity/get_cash (or any other `_lock`-holding
+method) while already holding `_lock` — they read state via
+`ctx.broker`/`self.__inner` directly instead, and the guardrail rule chain
+receives `broker=self.__inner` (never `self`, see RuleContext below), so
+rule reads never re-enter this lock either. That keeps the only lock
+nesting order in the system as GuardedBroker._lock (outer) wrapping
+Journal._lock (inner) — Journal never calls back into GuardedBroker — so
+there is no cycle and no deadlock.
 """
 from __future__ import annotations
 
@@ -35,14 +50,32 @@ class GuardedBroker(Broker):
     def journal(self) -> Journal:
         return self._journal
 
+    def _journal_fill_event(self, fill: Fill, context: str) -> None:
+        self._journal.record_event(
+            "fill",
+            {
+                "client_order_id": fill.client_order_id,
+                "order_id": fill.order_id,
+                "symbol": fill.symbol,
+                "side": fill.side.value,
+                "quantity": str(fill.quantity),
+                "price": str(fill.price),
+                "filled_at": fill.filled_at.isoformat(),
+                "context": context,
+            },
+        )
+
     def get_cash(self) -> Decimal:
-        return self.__inner.get_cash()
+        with self._lock:
+            return self.__inner.get_cash()
 
     def get_equity(self) -> Decimal:
-        return self.__inner.get_equity()
+        with self._lock:
+            return self.__inner.get_equity()
 
     def get_positions(self) -> list[Position]:
-        return self.__inner.get_positions()
+        with self._lock:
+            return self.__inner.get_positions()
 
     def get_quote(self, symbol: str) -> Decimal:
         return self.__inner.get_quote(symbol)
@@ -65,7 +98,9 @@ class GuardedBroker(Broker):
                 )
                 raise OrderRejected(result.failed_rule_name, result.reason)
             try:
-                return self.__inner.place_order(order)
+                fill = self.__inner.place_order(order)
+                self._journal_fill_event(fill, "place")
+                return fill
             except BrokerError as exc:
                 self._journal.record_event(
                     "order_rejected",
@@ -120,9 +155,11 @@ class GuardedBroker(Broker):
                 )
                 raise OrderRejected(result.failed_rule_name, result.reason)
             try:
-                return self.__inner.close_position(
+                fill = self.__inner.close_position(
                     symbol, client_order_id=close_order.client_order_id,
                 )
+                self._journal_fill_event(fill, "close")
+                return fill
             except BrokerError as exc:
                 self._journal.record_event(
                     "order_rejected",

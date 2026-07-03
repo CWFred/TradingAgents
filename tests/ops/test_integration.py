@@ -47,11 +47,18 @@ def _default_stack(tmp_path, *, starting_cash="250", quotes=None,
     return j, paper, GuardedBroker(inner=paper, engine=RuleEngine(rules), journal=j, config=cfg)
 
 
-def _buy(symbol="AAPL", notional="25", stop="184", cid="c1") -> Order:
+def _buy(symbol="AAPL", notional="25", stop_pct="-0.08", cid="c1") -> Order:
     return Order(
         client_order_id=cid, symbol=symbol, side=Side.BUY,
         notional_dollars=Decimal(notional), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal(stop) if stop else None,
+        stop_pct=Decimal(stop_pct) if stop_pct else None,
+    )
+
+
+def _sell(symbol="AAPL", notional="25", cid="c1") -> Order:
+    return Order(
+        client_order_id=cid, symbol=symbol, side=Side.SELL,
+        notional_dollars=Decimal(notional), order_type=OrderType.MARKET,
     )
 
 
@@ -72,8 +79,8 @@ def test_happy_path_fills_and_journals(tmp_path):
     (_buy(symbol="MARGIN:AAPL"), "NoMarginRule"),
     (_buy(symbol="AAPL  260117C00200000"), "NoOptionsRule"),
     (_buy(symbol="BTC"), "NoCryptoRule"),
-    (_buy(cid="SHORT-1"), "LongOnlyRule"),
-    (_buy(stop=None), "StopAttachedRule"),
+    (_sell(), "LongOnlyRule"),  # no position held; any SELL over-sells
+    (_buy(stop_pct=None), "StopAttachedRule"),
     (_buy(notional="4.99"), "PerTradeDollarFloorRule"),
     (_buy(notional="25.01"), "PerPositionCapRule"),
 ])

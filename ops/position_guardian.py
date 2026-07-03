@@ -5,9 +5,9 @@ if the position is at or past the per_position_stop_pct threshold. This is
 the single-pass variant; Plan 3 will wrap it in a background-thread loop."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Callable
 
 from ops.broker.base import BrokerError, QuoteUnavailable
 from ops.broker.guarded import GuardedBroker
@@ -25,6 +25,11 @@ class StopAction:
 
 
 class PositionGuardian:
+    # Consecutive fully-failed passes (every open position's quote failed)
+    # before the guardian escalates a guardian_blind event. A pass with
+    # zero open positions is never "fully-failed" (nothing to check).
+    _BLIND_STREAK_THRESHOLD = 5
+
     def __init__(
         self,
         *,
@@ -33,12 +38,23 @@ class PositionGuardian:
         config: OpsConfig,
         journal=None,
         broker_mode: str = "paper",
+        market_open_fn: Callable[[], bool] | None = None,
     ):
         self._broker = broker
         self._quote = quote_source
         self._cfg = config
         self._journal = journal if journal is not None else broker.journal
         self._broker_mode = broker_mode
+        # None = ungated (ad-hoc/decide-once runs). The always-on service
+        # MUST pass the market calendar here: the spec forbids the guardian
+        # from trading outside regular hours ("stops breached AH fire at
+        # next open"), and after-hours quotes are not executable liquidity.
+        self._market_open = market_open_fn
+        # Blind-guardian escalation state. This is instance state that
+        # persists across polls because the guardian is constructed once in
+        # _wire and check_stops_once is called every 60s by the scheduler.
+        self._consecutive_blind_passes = 0
+        self._blind_alarm_active = False
 
     def check_stops_once(self) -> list[StopAction]:
         """Scheduler-safe wrapper: any unexpected exception is journaled
@@ -55,11 +71,22 @@ class PositionGuardian:
             return []
 
     def _check_stops_once_impl(self) -> list[StopAction]:
+        if self._market_open is not None and not self._market_open():
+            return []
         actions: list[StopAction] = []
-        for pos in self._broker.get_positions():
+        positions = list(self._broker.get_positions())
+        quote_failures = 0
+        for pos in positions:
             try:
                 current = self._quote(pos.symbol)
-            except QuoteUnavailable as exc:
+            except (QuoteUnavailable, BrokerError) as exc:
+                # Live RobinhoodBroker.get_quote raises plain BrokerError,
+                # not just QuoteUnavailable — catch both so one bad quote
+                # skips only this position instead of aborting the pass
+                # (it would otherwise escape to check_stops_once's
+                # catch-all and discard every remaining position that
+                # minute).
+                quote_failures += 1
                 self._broker.journal.record_event(
                     "quote_unavailable",
                     {
@@ -129,30 +156,86 @@ class PositionGuardian:
                 current=current, pct=pct, sold=True,
                 reason=f"stop hit at {pct} ({mode} {threshold_repr})",
             ))
+        self._update_blind_streak(total=len(positions), failures=quote_failures)
         self._maybe_trip_kill_switch()
+        self._maybe_trip_daily_halt()
         return actions
 
+    def _update_blind_streak(self, *, total: int, failures: int) -> None:
+        """Track consecutive fully-failed passes (every open position's
+        quote failed) so a persistent live-quote outage escalates even
+        though each individual failure is otherwise silently swallowed as
+        quote_unavailable.
+
+        A pass with zero open positions has nothing to check: it is
+        deliberately excluded from both incrementing AND resetting the
+        streak, so an empty book never trips the alarm but also never
+        papers over an in-progress outage that started before the book
+        emptied out. Any pass that obtains at least one usable quote
+        resets the streak. The guardian_blind event fires once per
+        crossing of the threshold, not on every pass after.
+        """
+        if total == 0:
+            return
+        if failures == total:
+            self._consecutive_blind_passes += 1
+            if (
+                self._consecutive_blind_passes >= self._BLIND_STREAK_THRESHOLD
+                and not self._blind_alarm_active
+            ):
+                self._blind_alarm_active = True
+                self._journal.record_event(
+                    "guardian_blind",
+                    {"consecutive_failed_passes": self._consecutive_blind_passes},
+                )
+        else:
+            self._consecutive_blind_passes = 0
+            self._blind_alarm_active = False
+
     def _maybe_trip_kill_switch(self) -> None:
-        snap = self._journal.get_latest_equity_snapshot(kind="open_week")
-        if snap is None:
-            return
-        equity_now = self._broker.get_equity()
-        weekly_pct = (equity_now - snap.equity) / snap.equity
-        if weekly_pct > self._cfg.weekly_drawdown_pct:
-            return
-        # Idempotency: don't fire twice in the same week.
-        if self._journal.has_event_since_last_monday("kill_switch"):
-            return
-        self._journal.record_event(
-            "kill_switch",
-            {
-                "mode": self._broker_mode,
-                "equity_now": str(equity_now),
-                "equity_open_week": str(snap.equity),
-                "pct": str(weekly_pct),
-                "threshold": str(self._cfg.weekly_drawdown_pct),
-            },
-        )
+        from datetime import datetime, timezone
+
+        from ops.trading_time import trading_week_start
+
+        tripped = self._journal.has_event_since_last_monday("kill_switch")
+        if not tripped:
+            # Baseline must be from THIS week. A stale snapshot (guardian-only
+            # mode after a reconcile halt, or a long-idle restart) would
+            # compare current equity against weeks-old numbers and can
+            # falsely liquidate the whole book.
+            now = datetime.now(timezone.utc)
+            monday = trading_week_start(now)
+            snap = self._journal.get_latest_equity_snapshot(
+                kind="open_week", since=monday)
+            if snap is None or snap.equity <= 0:
+                # No baseline yet this week: record one now (≈ first pass of
+                # the week during market hours, i.e. Monday open) and measure
+                # from here on subsequent passes.
+                self._journal.record_equity_snapshot(
+                    kind="open_week",
+                    equity=self._broker.get_equity(),
+                    cash=self._broker.get_cash(),
+                    note="guardian baseline",
+                )
+                return
+            equity_now = self._broker.get_equity()
+            weekly_pct = (equity_now - snap.equity) / snap.equity
+            if weekly_pct > self._cfg.weekly_drawdown_pct:
+                return
+            self._journal.record_event(
+                "kill_switch",
+                {
+                    "mode": self._broker_mode,
+                    "equity_now": str(equity_now),
+                    "equity_open_week": str(snap.equity),
+                    "pct": str(weekly_pct),
+                    "threshold": str(self._cfg.weekly_drawdown_pct),
+                },
+            )
+        # Tripped this week — now or on an earlier pass. Paper mode sweeps
+        # any positions still open, so an auto-close interrupted by a crash
+        # or a transient close failure resumes on the next pass instead of
+        # being skipped forever by the idempotency check.
         if self._broker_mode == "paper":
             for pos in list(self._broker.get_positions()):
                 try:
@@ -162,3 +245,46 @@ class PositionGuardian:
                         "kill_switch_close_failed",
                         {"symbol": pos.symbol, "error": f"{type(exc).__name__}: {exc}"},
                     )
+
+    def _maybe_trip_daily_halt(self) -> None:
+        """Computed in the same pass as the weekly kill switch, mirroring its
+        snapshot-freshness rule exactly (both use the ET trading-calendar
+        boundary from ops.trading_time — see M7). Unlike the kill switch, a
+        daily halt never closes positions: it only stops new BUYs, which the
+        orchestrator's has_event_today('daily_halt') short-circuit and
+        DailyDrawdownRule (order-boundary backstop) already enforce."""
+        from datetime import datetime, timezone
+
+        from ops.trading_time import trading_day_start
+
+        if self._journal.has_event_today("daily_halt"):
+            return
+        now = datetime.now(timezone.utc)
+        start_of_day = trading_day_start(now)
+        snap = self._journal.get_latest_equity_snapshot(
+            kind="open_day", since=start_of_day)
+        if snap is None or snap.equity <= 0:
+            # No baseline yet today: record one now (mirrors the weekly
+            # kill-switch fallback) and measure from here on subsequent
+            # passes instead of comparing against a missing/stale snapshot.
+            self._journal.record_equity_snapshot(
+                kind="open_day",
+                equity=self._broker.get_equity(),
+                cash=self._broker.get_cash(),
+                note="guardian baseline",
+            )
+            return
+        equity_now = self._broker.get_equity()
+        daily_pct = (equity_now - snap.equity) / snap.equity
+        if daily_pct > self._cfg.daily_drawdown_pct:
+            return
+        self._journal.record_event(
+            "daily_halt",
+            {
+                "mode": self._broker_mode,
+                "equity_now": str(equity_now),
+                "equity_open_day": str(snap.equity),
+                "pct": str(daily_pct),
+                "threshold": str(self._cfg.daily_drawdown_pct),
+            },
+        )

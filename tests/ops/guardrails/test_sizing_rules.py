@@ -6,7 +6,7 @@ from ops.config import OpsConfig
 from ops.guardrails.base import RuleContext
 from ops.guardrails.sizing_rules import (
     PerPositionCapRule, PerTradeDollarFloorRule,
-    MaxOpenPositionsRule, CashReserveRule,
+    MaxOpenPositionsRule, CashReserveRule, LiveMaxPositionRule,
 )
 
 
@@ -15,7 +15,7 @@ def _ctx(notional: str, positions: list[Position], equity: str, cash: str,
     o = Order(
         client_order_id="c", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal(notional), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     b = MagicMock()
     b.get_equity.return_value = Decimal(equity)
@@ -54,7 +54,7 @@ def test_max_open_positions_blocks_when_full():
     o = Order(
         client_order_id="c", symbol="META", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     b = MagicMock()
     b.get_positions.return_value = positions
@@ -67,7 +67,7 @@ def test_max_open_positions_allows_add_to_existing():
     o = Order(
         client_order_id="c", symbol="AAPL", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     b = MagicMock()
     b.get_positions.return_value = positions
@@ -80,7 +80,7 @@ def test_max_open_positions_allows_under_cap():
     o = Order(
         client_order_id="c", symbol="NVDA", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
-        stop_loss_price=Decimal("184"),
+        stop_pct=Decimal("-0.08"),
     )
     b = MagicMock()
     b.get_positions.return_value = positions
@@ -110,3 +110,42 @@ def test_cash_reserve_does_not_constrain_sells():
     b.get_positions.return_value = []
     ctx = RuleContext(order=sell, broker=b, config=OpsConfig())
     assert CashReserveRule().check(ctx).allowed is True
+
+
+def test_live_gate_inert_in_paper():
+    rule = LiveMaxPositionRule(live_fill_count=lambda: 0)
+    r = rule.check(_ctx("50", [], "250", "250", cfg=OpsConfig(broker_mode="paper")))
+    assert r.allowed is True
+
+
+def test_live_gate_blocks_big_buy_during_window():
+    rule = LiveMaxPositionRule(live_fill_count=lambda: 0)
+    r = rule.check(_ctx("15", [], "250", "250", cfg=OpsConfig(broker_mode="robinhood")))
+    assert r.allowed is False
+
+
+def test_live_gate_allows_small_buy_during_window():
+    rule = LiveMaxPositionRule(live_fill_count=lambda: 0)
+    r = rule.check(_ctx("9", [], "250", "250", cfg=OpsConfig(broker_mode="robinhood")))
+    assert r.allowed is True
+
+
+def test_live_gate_boundary_20th_still_capped_21st_free():
+    cfg = OpsConfig(broker_mode="robinhood")   # gate=20, cap=$10
+    at_20 = LiveMaxPositionRule(live_fill_count=lambda: 19)  # 20th fill in flight
+    r20 = at_20.check(_ctx("15", [], "250", "250", cfg=cfg))
+    assert r20.allowed is False                # still within first 20
+    at_21 = LiveMaxPositionRule(live_fill_count=lambda: 20)  # 20 fills done, gate lifted
+    r21 = at_21.check(_ctx("15", [], "250", "250", cfg=cfg))
+    assert r21.allowed is True                 # normal cap now applies (handled elsewhere)
+
+
+def test_live_gate_allows_sell():
+    rule = LiveMaxPositionRule(live_fill_count=lambda: 0)
+    o = _ctx("15", [], "250", "250", cfg=OpsConfig(broker_mode="robinhood"))
+    sell = RuleContext(
+        order=Order(client_order_id="c", symbol="AAPL", side=Side.SELL,
+                    notional_dollars=Decimal("15"), order_type=OrderType.MARKET),
+        broker=o.broker, config=o.config,
+    )
+    assert rule.check(sell).allowed is True

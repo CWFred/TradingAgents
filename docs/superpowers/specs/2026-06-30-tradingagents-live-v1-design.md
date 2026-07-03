@@ -142,6 +142,14 @@ ops/
 - 20-day average dollar volume ≥ $50M.
 - Share price ≥ $5.
 - Earnings reported in last 2 trading days with EPS beat **and** revenue beat.
+  (v1 note: enforced as **EPS-beat-only**. The `yfinance` data source used by
+  `ops/universe/earnings.py` does not expose reported/estimated revenue, so
+  `revenue_actual`/`revenue_estimate`/`revenue_beat` are `None` when that
+  data isn't genuinely available rather than being fabricated as zero.
+  Enforcing the revenue-beat half of this requirement would need a
+  different vendor — e.g. Finnhub's earnings calendar
+  (`revenueActual`/`revenueEstimate`) — and is a documented future option,
+  not implemented in v1.)
 
 ## Data flow (a day in the life)
 
