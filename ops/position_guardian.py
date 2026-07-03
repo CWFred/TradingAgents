@@ -25,6 +25,11 @@ class StopAction:
 
 
 class PositionGuardian:
+    # Consecutive fully-failed passes (every open position's quote failed)
+    # before the guardian escalates a guardian_blind event. A pass with
+    # zero open positions is never "fully-failed" (nothing to check).
+    _BLIND_STREAK_THRESHOLD = 5
+
     def __init__(
         self,
         *,
@@ -45,6 +50,11 @@ class PositionGuardian:
         # from trading outside regular hours ("stops breached AH fire at
         # next open"), and after-hours quotes are not executable liquidity.
         self._market_open = market_open_fn
+        # Blind-guardian escalation state. This is instance state that
+        # persists across polls because the guardian is constructed once in
+        # _wire and check_stops_once is called every 60s by the scheduler.
+        self._consecutive_blind_passes = 0
+        self._blind_alarm_active = False
 
     def check_stops_once(self) -> list[StopAction]:
         """Scheduler-safe wrapper: any unexpected exception is journaled
@@ -64,10 +74,19 @@ class PositionGuardian:
         if self._market_open is not None and not self._market_open():
             return []
         actions: list[StopAction] = []
-        for pos in self._broker.get_positions():
+        positions = list(self._broker.get_positions())
+        quote_failures = 0
+        for pos in positions:
             try:
                 current = self._quote(pos.symbol)
-            except QuoteUnavailable as exc:
+            except (QuoteUnavailable, BrokerError) as exc:
+                # Live RobinhoodBroker.get_quote raises plain BrokerError,
+                # not just QuoteUnavailable — catch both so one bad quote
+                # skips only this position instead of aborting the pass
+                # (it would otherwise escape to check_stops_once's
+                # catch-all and discard every remaining position that
+                # minute).
+                quote_failures += 1
                 self._broker.journal.record_event(
                     "quote_unavailable",
                     {
@@ -137,8 +156,40 @@ class PositionGuardian:
                 current=current, pct=pct, sold=True,
                 reason=f"stop hit at {pct} ({mode} {threshold_repr})",
             ))
+        self._update_blind_streak(total=len(positions), failures=quote_failures)
         self._maybe_trip_kill_switch()
         return actions
+
+    def _update_blind_streak(self, *, total: int, failures: int) -> None:
+        """Track consecutive fully-failed passes (every open position's
+        quote failed) so a persistent live-quote outage escalates even
+        though each individual failure is otherwise silently swallowed as
+        quote_unavailable.
+
+        A pass with zero open positions has nothing to check: it is
+        deliberately excluded from both incrementing AND resetting the
+        streak, so an empty book never trips the alarm but also never
+        papers over an in-progress outage that started before the book
+        emptied out. Any pass that obtains at least one usable quote
+        resets the streak. The guardian_blind event fires once per
+        crossing of the threshold, not on every pass after.
+        """
+        if total == 0:
+            return
+        if failures == total:
+            self._consecutive_blind_passes += 1
+            if (
+                self._consecutive_blind_passes >= self._BLIND_STREAK_THRESHOLD
+                and not self._blind_alarm_active
+            ):
+                self._blind_alarm_active = True
+                self._journal.record_event(
+                    "guardian_blind",
+                    {"consecutive_failed_passes": self._consecutive_blind_passes},
+                )
+        else:
+            self._consecutive_blind_passes = 0
+            self._blind_alarm_active = False
 
     def _maybe_trip_kill_switch(self) -> None:
         from datetime import datetime, timedelta, timezone

@@ -250,6 +250,128 @@ def test_guardian_survives_quote_unavailable(tmp_path):
     assert any(e["kind"] == "quote_unavailable" for e in events)
 
 
+def test_guardian_survives_brokererror_at_quote_step(tmp_path):
+    """A live BrokerError (RobinhoodBroker.get_quote's real failure mode, not
+    just QuoteUnavailable) for one position must not abort the pass; the
+    remaining position is still evaluated and no guardian_check_error fires."""
+    from ops.broker.base import BrokerError
+    quotes = {"AAPL": Decimal("200"), "MSFT": Decimal("200")}
+    j, guarded, cfg, _ = _stack(tmp_path, starting_cash="10000", quotes=quotes)
+    guarded.place_order(Order(
+        client_order_id="a", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("184"),
+    ))
+    guarded.place_order(Order(
+        client_order_id="m", symbol="MSFT", side=Side.BUY,
+        notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("184"),
+    ))
+
+    def flaky_quote(symbol):
+        if symbol == "AAPL":
+            raise BrokerError(f"live quote transport error on {symbol}")
+        return Decimal("180")   # MSFT will trip stop
+
+    g = PositionGuardian(broker=guarded, quote_source=flaky_quote, config=cfg)
+    actions = g.check_stops_once()
+
+    # Both positions were evaluated despite AAPL's raw BrokerError.
+    assert {a.symbol for a in actions} == {"AAPL", "MSFT"}
+    aapl = next(a for a in actions if a.symbol == "AAPL")
+    msft = next(a for a in actions if a.symbol == "MSFT")
+    assert aapl.sold is False
+    assert "quote unavailable" in aapl.reason.lower()
+    assert msft.sold is True
+    events = j.read_events()
+    assert any(e["kind"] == "quote_unavailable" for e in events)
+    assert not any(e["kind"] == "guardian_check_error" for e in events)
+
+
+# --- blind-guardian escalation: consecutive fully-failed passes -------------
+
+
+def test_guardian_blind_after_five_consecutive_fully_failed_passes(tmp_path):
+    """5 consecutive passes where the only open position's quote fails
+    journal exactly one guardian_blind event (not every pass thereafter)."""
+    from ops.broker.base import BrokerError
+    quotes = {"AAPL": Decimal("200")}
+    j, guarded, cfg, _ = _stack(tmp_path, starting_cash="10000", quotes=quotes)
+    guarded.place_order(Order(
+        client_order_id="a", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("184"),
+    ))
+
+    def always_fails(symbol):
+        raise BrokerError("broker unreachable")
+
+    g = PositionGuardian(broker=guarded, quote_source=always_fails, config=cfg)
+    for _ in range(4):
+        g.check_stops_once()
+    events = j.read_events()
+    assert not any(e["kind"] == "guardian_blind" for e in events)
+
+    g.check_stops_once()   # 5th consecutive fully-failed pass
+    events = j.read_events()
+    blind_events = [e for e in events if e["kind"] == "guardian_blind"]
+    assert len(blind_events) == 1
+
+    g.check_stops_once()   # 6th consecutive — must NOT duplicate
+    events = j.read_events()
+    blind_events = [e for e in events if e["kind"] == "guardian_blind"]
+    assert len(blind_events) == 1
+
+
+def test_guardian_blind_streak_resets_after_successful_pass(tmp_path):
+    """A pass that gets a usable quote resets the consecutive-failure
+    counter, so an intermittent outage doesn't cross the threshold on
+    stale count."""
+    from ops.broker.base import BrokerError
+    quotes = {"AAPL": Decimal("200")}
+    j, guarded, cfg, _ = _stack(tmp_path, starting_cash="10000", quotes=quotes)
+    guarded.place_order(Order(
+        client_order_id="a", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("100"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("184"),
+    ))
+
+    state = {"fail": True}
+
+    def toggling_quote(symbol):
+        if state["fail"]:
+            raise BrokerError("broker unreachable")
+        return Decimal("200")   # well above stop; holds, doesn't sell
+
+    g = PositionGuardian(broker=guarded, quote_source=toggling_quote, config=cfg)
+    for _ in range(4):
+        g.check_stops_once()
+    state["fail"] = False
+    g.check_stops_once()       # success resets the streak
+    state["fail"] = True
+    for _ in range(4):
+        g.check_stops_once()   # only 4 consecutive since the reset
+    events = j.read_events()
+    assert not any(e["kind"] == "guardian_blind" for e in events)
+
+    g.check_stops_once()       # 5th consecutive since the reset
+    events = j.read_events()
+    blind_events = [e for e in events if e["kind"] == "guardian_blind"]
+    assert len(blind_events) == 1
+
+
+def test_guardian_empty_book_does_not_trip_blind_alarm(tmp_path):
+    """A pass with zero open positions has nothing to check and must never
+    count toward the blind-guardian streak, no matter how many times it
+    repeats."""
+    j, guarded, cfg, _ = _stack(tmp_path, starting_cash="10000")
+    g = PositionGuardian(broker=guarded, quote_source=guarded.get_quote, config=cfg)
+    for _ in range(10):
+        g.check_stops_once()
+    events = j.read_events()
+    assert not any(e["kind"] == "guardian_blind" for e in events)
+
+
 def test_guardian_stop_sell_client_order_ids_are_unique_per_attempt(tmp_path):
     """Two check_stops_once() passes that hit the same symbol must emit
     distinct client_order_ids on the resulting close_position SELLs.
