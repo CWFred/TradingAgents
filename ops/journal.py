@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     cash TEXT NOT NULL,
     note TEXT
 );
+
+CREATE TABLE IF NOT EXISTS dispatch_cursors (
+    consumer TEXT PRIMARY KEY,
+    last_event_id INTEGER NOT NULL
+);
 """
 
 
@@ -119,6 +124,33 @@ class Journal:
             {"at": _from_iso(row[0]), "kind": row[1], "payload": json.loads(row[2])}
             for row in cur
         ]
+
+    def read_events_since(self, min_id: int, limit: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT id, at, kind, payload FROM events WHERE id > ? ORDER BY id"
+        params: tuple[Any, ...] = (min_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (min_id, limit)
+        cur = self._conn.execute(sql, params)
+        return [
+            {"id": row[0], "at": _from_iso(row[1]), "kind": row[2],
+             "payload": json.loads(row[3])}
+            for row in cur
+        ]
+
+    def get_cursor(self, consumer: str) -> int:
+        row = self._conn.execute(
+            "SELECT last_event_id FROM dispatch_cursors WHERE consumer = ?",
+            (consumer,),
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def set_cursor(self, consumer: str, last_event_id: int) -> None:
+        self._conn.execute(
+            "INSERT INTO dispatch_cursors (consumer, last_event_id) VALUES (?, ?)"
+            " ON CONFLICT(consumer) DO UPDATE SET last_event_id = excluded.last_event_id",
+            (consumer, last_event_id),
+        )
 
     def record_order(
         self, *, client_order_id: str, symbol: str, side: str,

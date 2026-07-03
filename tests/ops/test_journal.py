@@ -229,3 +229,27 @@ def test_migrates_pre_existing_fills_without_stop_column(tmp_path):
                   side="BUY", quantity=Decimal("1"), price=Decimal("10"),
                   filled_at=ts, stop_loss_price=Decimal("9"))
     assert j.read_fills()[0]["stop_loss_price"] == Decimal("9")
+
+
+def test_read_events_since_returns_id_and_filters(tmp_path):
+    j = Journal(str(tmp_path / "j.sqlite"))
+    j.record_event("a", {"n": 1})
+    j.record_event("b", {"n": 2})
+    j.record_event("c", {"n": 3})
+    all_ev = j.read_events_since(0)
+    assert [e["kind"] for e in all_ev] == ["a", "b", "c"]
+    assert all_ev[0]["id"] == 1 and all_ev[2]["id"] == 3
+    # only rows after id=1
+    after = j.read_events_since(1)
+    assert [e["kind"] for e in after] == ["b", "c"]
+    # limit
+    assert len(j.read_events_since(0, limit=2)) == 2
+
+
+def test_dispatch_cursor_roundtrip_and_default(tmp_path):
+    j = Journal(str(tmp_path / "j.sqlite"))
+    assert j.get_cursor("notify") == 0          # default when absent
+    j.set_cursor("notify", 5)
+    assert j.get_cursor("notify") == 5
+    j.set_cursor("notify", 9)                    # upsert, not duplicate
+    assert j.get_cursor("notify") == 9
