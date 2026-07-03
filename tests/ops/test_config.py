@@ -23,6 +23,14 @@ def test_default_config_matches_spec():
     assert cfg.weekly_drawdown_pct == Decimal("-0.15")
     assert cfg.per_position_stop_pct == Decimal("-0.08")
     assert cfg.broker_mode == "paper"
+    # Full contractual blackout (buy AND sell rejected) is a strict subset
+    # of deny_list — see DenyListRule (M5).
+    assert cfg.full_blackout_symbols == {"SPOT"}
+    assert cfg.full_blackout_symbols <= cfg.deny_list
+
+def test_full_blackout_symbols_must_be_subset_of_deny_list():
+    with pytest.raises(ValueError):
+        OpsConfig(full_blackout_symbols=frozenset({"NOTDENIED"}))
 
 def test_load_config_reads_env_overrides(monkeypatch):
     monkeypatch.setenv("OPS_BROKER_MODE", "robinhood")

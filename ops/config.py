@@ -16,11 +16,20 @@ _DEFAULT_DENY_LIST = frozenset({
     "TMF", "TMV", "QLD", "QID",
 })
 
+# Symbols in this set are a FULL contractual blackout: buy AND sell are
+# rejected. This is a strict subset of deny_list. Everything else in
+# deny_list (the leveraged ETFs) is BUY-denied but SELL-allowed — selling
+# reduces risk, so DenyListRule permits exiting a leveraged-ETF position
+# that was somehow acquired manually. SPOT must never be exitable through
+# this path (see DenyListRule / RobinhoodBroker._enforce_spot_hard_check).
+_FULL_BLACKOUT_SYMBOLS = frozenset({"SPOT"})
+
 
 @dataclass(frozen=True)
 class OpsConfig:
     broker_mode: str = "paper"  # "paper" or "robinhood"
     deny_list: frozenset[str] = field(default_factory=lambda: _DEFAULT_DENY_LIST)  # Not env-overridable; extend via code
+    full_blackout_symbols: frozenset[str] = field(default_factory=lambda: _FULL_BLACKOUT_SYMBOLS)  # Not env-overridable; extend via code
     per_position_cap_pct: Decimal = Decimal("0.10")
     per_trade_dollar_floor: Decimal = Decimal("5")
     max_open_positions: int = 5
@@ -58,6 +67,11 @@ class OpsConfig:
         if self.broker_mode not in ("paper", "robinhood"):
             raise ValueError(
                 f"broker_mode must be 'paper' or 'robinhood', got {self.broker_mode!r}"
+            )
+        if not self.full_blackout_symbols <= self.deny_list:
+            raise ValueError(
+                "full_blackout_symbols must be a subset of deny_list, got "
+                f"{self.full_blackout_symbols - self.deny_list}"
             )
 
 

@@ -55,6 +55,13 @@ def _buy(symbol="AAPL", notional="25", stop_pct="-0.08", cid="c1") -> Order:
     )
 
 
+def _sell(symbol="AAPL", notional="25", cid="c1") -> Order:
+    return Order(
+        client_order_id=cid, symbol=symbol, side=Side.SELL,
+        notional_dollars=Decimal(notional), order_type=OrderType.MARKET,
+    )
+
+
 def test_happy_path_fills_and_journals(tmp_path):
     j, paper, guarded = _default_stack(tmp_path)
     fill = guarded.place_order(_buy())
@@ -72,7 +79,7 @@ def test_happy_path_fills_and_journals(tmp_path):
     (_buy(symbol="MARGIN:AAPL"), "NoMarginRule"),
     (_buy(symbol="AAPL  260117C00200000"), "NoOptionsRule"),
     (_buy(symbol="BTC"), "NoCryptoRule"),
-    (_buy(cid="SHORT-1"), "LongOnlyRule"),
+    (_sell(), "LongOnlyRule"),  # no position held; any SELL over-sells
     (_buy(stop_pct=None), "StopAttachedRule"),
     (_buy(notional="4.99"), "PerTradeDollarFloorRule"),
     (_buy(notional="25.01"), "PerPositionCapRule"),
