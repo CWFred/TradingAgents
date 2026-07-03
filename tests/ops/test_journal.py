@@ -1,6 +1,8 @@
-import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
+
+import pytest
+
 from ops.journal import Journal
 
 
@@ -253,3 +255,32 @@ def test_dispatch_cursor_roundtrip_and_default(tmp_path):
     assert j.get_cursor("notify") == 5
     j.set_cursor("notify", 9)                    # upsert, not duplicate
     assert j.get_cursor("notify") == 9
+
+
+def test_cash_adjustment_roundtrip(tmp_path):
+    from decimal import Decimal
+    j = Journal(str(tmp_path / "j.sqlite"))
+    j.record_cash_adjustment(kind="seed", amount=Decimal("250"), note="initial")
+    j.record_cash_adjustment(kind="deposit", amount=Decimal("100.50"))
+    adjs = j.read_cash_adjustments()
+    assert len(adjs) == 2
+    assert adjs[0]["kind"] == "seed" and adjs[0]["amount"] == Decimal("250")
+    assert adjs[0]["note"] == "initial"
+    assert adjs[1]["kind"] == "deposit" and adjs[1]["amount"] == Decimal("100.50")
+    assert adjs[1]["at"].tzinfo is not None
+
+
+def test_cash_adjustment_migrates_existing_db(tmp_path):
+    """A journal created before cash_adjustments existed must gain the table
+    on reopen (same defensive-migration pattern as the other tables)."""
+    import sqlite3
+    from decimal import Decimal
+    path = str(tmp_path / "old.sqlite")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 " at TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL)")
+    conn.commit()
+    conn.close()
+    j = Journal(path)
+    j.record_cash_adjustment(kind="seed", amount=Decimal("250"))
+    assert j.read_cash_adjustments()[0]["amount"] == Decimal("250")

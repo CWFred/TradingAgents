@@ -57,9 +57,9 @@ class _MutableQuotes:
 
 @pytest.fixture
 def _broker_with_positions(tmp_path):
-    from ops.journal import Journal
     from ops import build_guarded_paper_broker
     from ops.config import OpsConfig
+    from ops.journal import Journal
 
     class _Q:
         def __init__(self):
@@ -84,10 +84,12 @@ def _broker_with_positions(tmp_path):
                 notional_dollars=notional, order_type=OrderType.MARKET,
                 stop_loss_price=stop,
             ))
+        # Baseline must be in the CURRENT week — the guardian ignores stale
+        # open_week snapshots, and a hardcoded date would rot next Monday.
         from datetime import datetime, timezone
         j.record_equity_snapshot(
             kind="open_week", equity=weekly_open_equity, cash=Decimal("500"),
-            at=datetime(2026, 6, 29, 13, 30, tzinfo=timezone.utc),
+            at=datetime.now(timezone.utc),
         )
         return broker, quotes, OpsConfig(), j
     return _make
@@ -442,6 +444,7 @@ def test_kill_switch_idempotent_within_week(_broker_with_positions):
 def test_kill_switch_paper_mode_records_close_failure_and_continues(_broker_with_positions):
     """Close failure during kill-switch sweep is journaled; sweep continues to next symbol."""
     import unittest.mock as _mock
+
     from ops.broker.base import BrokerError
     broker, quotes, cfg, journal = _broker_with_positions(
         [("AAPL", Decimal("10"), Decimal("0.50"), Decimal("50")),
@@ -481,6 +484,7 @@ def test_guardian_journals_check_error_on_unexpected_exception(tmp_path):
     is journaled as guardian_check_error and swallowed. The APScheduler
     job body must never propagate an exception up."""
     from unittest.mock import MagicMock
+
     from ops.broker.base import BrokerError
 
     j = Journal(str(tmp_path / "j.sqlite"))
@@ -502,3 +506,91 @@ def test_guardian_journals_check_error_on_unexpected_exception(tmp_path):
     err_events = [e for e in events if e["kind"] == "guardian_check_error"]
     assert len(err_events) == 1
     assert "mcp down" in err_events[0]["payload"]["error"]
+
+
+# --- market-hours gate: the guardian must not trade outside RTH -------------
+
+
+def test_guardian_skips_entirely_when_market_closed(tmp_path):
+    """Spec: 'Guardian tracks AH quotes but does not trade. Any stop breached
+    AH fires at next open.' A breached stop with the market closed must not
+    sell, must not journal stop_hit, and must not trip the kill switch."""
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    _open_position(guarded)
+    quotes["AAPL"] = Decimal("100")   # far below the $184 stop
+    g = PositionGuardian(
+        broker=guarded, quote_source=guarded.get_quote, config=cfg,
+        market_open_fn=lambda: False,
+    )
+    assert g.check_stops_once() == []
+    assert len(guarded.get_positions()) == 1
+    kinds = [e["kind"] for e in j.read_events()]
+    assert "stop_hit" not in kinds
+    assert "kill_switch" not in kinds
+
+
+def test_guardian_trades_when_market_open_fn_true(tmp_path):
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    _open_position(guarded)
+    quotes["AAPL"] = Decimal("100")
+    g = PositionGuardian(
+        broker=guarded, quote_source=guarded.get_quote, config=cfg,
+        market_open_fn=lambda: True,
+    )
+    actions = g.check_stops_once()
+    assert actions[0].sold is True
+    assert guarded.get_positions() == []
+
+
+# --- kill switch: fresh weekly baseline only, and resumable auto-close ------
+
+
+def test_kill_switch_ignores_stale_week_snapshot_and_rebaselines(tmp_path):
+    """An open_week snapshot from a PREVIOUS week must not be used as the
+    drawdown baseline (a guardian-only or long-idle restart would otherwise
+    compare against weeks-old equity and can falsely liquidate everything).
+    Instead the guardian records a fresh baseline for this week."""
+    from datetime import datetime, timedelta, timezone
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    _open_position(guarded)
+    now = datetime.now(timezone.utc)
+    j.record_equity_snapshot(
+        kind="open_week", equity=Decimal("1000"), cash=Decimal("1000"),
+        at=now - timedelta(days=14),
+    )
+    g = PositionGuardian(
+        broker=guarded, quote_source=guarded.get_quote, config=cfg,
+        journal=j, broker_mode="paper",
+    )
+    g.check_stops_once()
+    kinds = [e["kind"] for e in j.read_events()]
+    assert "kill_switch" not in kinds       # equity 250 vs stale 1000 must NOT trip
+    assert len(guarded.get_positions()) == 1
+    monday = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    fresh = [s for s in j.read_equity_snapshots()
+             if s["kind"] == "open_week" and s["at"] >= monday]
+    assert fresh, "guardian should have recorded a fresh weekly baseline"
+
+
+def test_kill_switch_paper_close_resumes_after_restart(tmp_path):
+    """If the kill_switch event was journaled but the process died before
+    the auto-close sweep finished, a later guardian pass (same week) must
+    close the remaining positions — without duplicating the event."""
+    from datetime import datetime, timezone
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    _open_position(guarded)
+    quotes["AAPL"] = Decimal("190")   # above the $184 stop: ordinary stop must not fire
+    j.record_equity_snapshot(
+        kind="open_week", equity=Decimal("250"), cash=Decimal("225"),
+        at=datetime.now(timezone.utc),
+    )
+    j.record_event("kill_switch", {"mode": "paper", "pct": "-0.2"})
+    g = PositionGuardian(
+        broker=guarded, quote_source=guarded.get_quote, config=cfg,
+        journal=j, broker_mode="paper",
+    )
+    g.check_stops_once()
+    assert guarded.get_positions() == [], "remaining positions must be swept"
+    kill_events = [e for e in j.read_events() if e["kind"] == "kill_switch"]
+    assert len(kill_events) == 1, "no duplicate kill_switch event"

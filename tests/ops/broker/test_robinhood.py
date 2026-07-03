@@ -319,3 +319,141 @@ def test_cancel_equity_order_wraps_session_error(tmp_path):
     with pytest.raises(MCPUnavailable) as exc_info:
         client.cancel_equity_order("order-1")
     assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
+# --- fill journaling carries the ordered stop (live rehydration fix) --------
+
+
+def test_place_order_buy_journals_stop_on_fill(fake_client, journal):
+    """The BUY fill row must carry the order's stop_loss_price — it is what
+    get_positions/last_buy_fill_for rehydrate the stop from after a restart."""
+    fake_client.set_quote("AAPL", Decimal("10"))
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    broker.place_order(Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("9.2"),
+    ))
+    fills = journal.read_fills()
+    assert len(fills) == 1
+    assert fills[0]["stop_loss_price"] == Decimal("9.2")
+
+
+def test_buy_then_get_positions_rehydrates_stop(fake_client, journal):
+    """End-to-end: place a live BUY with a stop, then get_positions() must
+    report that stop (not None) — the guardian enforces the ordered stop."""
+    fake_client.set_quote("AAPL", Decimal("10"))
+    broker = RobinhoodBroker(client=fake_client, journal=journal)
+    broker.place_order(Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("9.2"),
+    ))
+    positions = broker.get_positions()
+    assert positions[0].symbol == "AAPL"
+    assert positions[0].stop_loss_price == Decimal("9.2")
+
+
+# --- ack.status enforcement: only real fills are journaled as fills ---------
+
+
+class _CannedAckClient:
+    """Protocol impl that returns one canned ack from place_equity_order.
+    Positions/quotes are seedable so close_position paths work."""
+
+    def __init__(self, ack, *, positions=None, quote=Decimal("10")):
+        self._ack = ack
+        self._positions = positions or []
+        self._quote = quote
+
+    def get_account(self):
+        raise AssertionError("not used in these tests")
+
+    def get_positions(self):
+        return list(self._positions)
+
+    def get_quote(self, symbol):
+        return self._quote
+
+    def place_equity_order(self, **kwargs):
+        return self._ack
+
+    def cancel_equity_order(self, order_id):
+        pass
+
+
+def _ack(status, *, quantity=None, fill_price=None):
+    from ops.broker.mcp_client import MCPOrderAck
+    return MCPOrderAck(
+        order_id="rh-1", client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        quantity=quantity, notional=Decimal("50"), status=status,
+        fill_price=fill_price,
+    )
+
+
+def _buy_order():
+    return Order(
+        client_order_id="b-1", symbol="AAPL", side=Side.BUY,
+        notional_dollars=Decimal("50"), order_type=OrderType.MARKET,
+        stop_loss_price=Decimal("9.2"),
+    )
+
+
+def test_queued_ack_raises_and_journals_no_fill(journal):
+    client = _CannedAckClient(_ack("queued"))
+    broker = RobinhoodBroker(client=client, journal=journal)
+    with pytest.raises(BrokerError):
+        broker.place_order(_buy_order())
+    assert journal.read_fills() == []
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert "order_not_filled" in kinds
+
+
+def test_queued_ack_event_carries_broker_order_id(journal):
+    """The order_not_filled event must carry the broker-side order id and
+    status so the pending order can be found/cancelled manually."""
+    client = _CannedAckClient(_ack("queued"))
+    broker = RobinhoodBroker(client=client, journal=journal)
+    with pytest.raises(BrokerError):
+        broker.place_order(_buy_order())
+    ev = [e for e in journal.read_events() if e["kind"] == "order_not_filled"][0]
+    assert ev["payload"]["order_id"] == "rh-1"
+    assert ev["payload"]["status"] == "queued"
+
+
+def test_rejected_ack_raises_and_journals_no_fill(journal):
+    client = _CannedAckClient(_ack("rejected"))
+    broker = RobinhoodBroker(client=client, journal=journal)
+    with pytest.raises(BrokerError):
+        broker.place_order(_buy_order())
+    assert journal.read_fills() == []
+
+
+def test_filled_ack_without_price_or_qty_raises(journal):
+    """A 'filled' ack missing fill_price/quantity must NOT journal a
+    qty=0/price=0 fill — that corrupts replayed cash and positions."""
+    client = _CannedAckClient(_ack("filled", quantity=Decimal("5"), fill_price=None))
+    broker = RobinhoodBroker(client=client, journal=journal)
+    with pytest.raises(BrokerError):
+        broker.place_order(_buy_order())
+    assert journal.read_fills() == []
+
+    client = _CannedAckClient(_ack("filled", quantity=None, fill_price=Decimal("10")))
+    broker = RobinhoodBroker(client=client, journal=journal)
+    with pytest.raises(BrokerError):
+        broker.place_order(_buy_order())
+    assert journal.read_fills() == []
+
+
+def test_close_position_queued_ack_raises_and_journals_no_fill(journal):
+    from ops.broker.mcp_client import MCPPosition
+    client = _CannedAckClient(
+        _ack("queued"),
+        positions=[MCPPosition(symbol="AAPL", quantity=Decimal("5"), avg_price=Decimal("10"))],
+    )
+    broker = RobinhoodBroker(client=client, journal=journal)
+    with pytest.raises(BrokerError):
+        broker.close_position("AAPL")
+    assert journal.read_fills() == []
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert "order_not_filled" in kinds

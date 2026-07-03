@@ -1,12 +1,9 @@
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
 
-import pytest
-
-from ops.main import _build_broker, _wire, _emit_halt_events
-from ops.reconcile import ReconcileResult, PositionDiff
 from ops.config import OpsConfig
 from ops.journal import Journal
+from ops.main import _build_broker, _emit_halt_events, _wire
+from ops.reconcile import PositionDiff, ReconcileResult
 
 
 def test_build_broker_paper(tmp_path):
@@ -108,3 +105,108 @@ def test_paper_mode_restart_preserves_positions(tmp_path):
     result = _reconcile(journal=j_b, broker=broker_b, broker_mode="paper")
     assert result.diffs == []
     j_b.close()
+
+
+def test_wire_gates_guardian_on_market_calendar(tmp_path):
+    """Regression: the always-on service must pass the market calendar to the
+    guardian — an ungated guardian trades on after-hours quotes."""
+    cfg = OpsConfig()
+    j = Journal(str(tmp_path / "j.sqlite"))
+    broker = _build_broker(cfg, j)
+    orch, guardian, cal = _wire(broker, j, cfg)
+    assert guardian._market_open == cal.is_open_now
+
+
+def test_ensure_paper_seed_records_once(tmp_path):
+    """First paper startup seeds the journal with starting cash as an
+    explicit adjustment; later startups must not duplicate it."""
+    from ops.main import _ensure_paper_seed
+    cfg = OpsConfig()
+    j = Journal(str(tmp_path / "j.sqlite"))
+    _ensure_paper_seed(j, cfg)
+    _ensure_paper_seed(j, cfg)
+    adjs = j.read_cash_adjustments()
+    assert len(adjs) == 1
+    assert adjs[0]["kind"] == "seed"
+    assert adjs[0]["amount"] == Decimal("250")
+
+
+def test_build_broker_paper_cash_comes_from_seed(tmp_path):
+    """The paper broker's cash must equal the seeded starting cash — no
+    hardcoded $250 separate from the journal."""
+    cfg = OpsConfig(starting_cash=Decimal("400"))
+    j = Journal(str(tmp_path / "j.sqlite"))
+    broker = _build_broker(cfg, j)
+    assert broker.get_cash() == Decimal("400")
+    # Restart on the same journal: same cash, no double-seed.
+    broker2 = _build_broker(cfg, j)
+    assert broker2.get_cash() == Decimal("400")
+
+
+def test_ensure_live_baseline_records_cash_delta_once(tmp_path):
+    """First robinhood startup records a one-time baseline adjustment equal
+    to (broker cash - journal-replayed cash), so reconciliation can pass on
+    an account whose funding predates the journal. Never recorded twice."""
+    from ops.broker.robinhood import RobinhoodBroker
+    from ops.main import _ensure_live_baseline
+    from tests.ops.broker.fakes import FakeMCPClient
+
+    j = Journal(str(tmp_path / "j.sqlite"))
+    client = FakeMCPClient(cash=Decimal("250"))
+    broker = RobinhoodBroker(client=client, journal=j)
+    _ensure_live_baseline(j, broker)
+    adjs = j.read_cash_adjustments()
+    assert len(adjs) == 1
+    assert adjs[0]["kind"] == "live_baseline"
+    assert adjs[0]["amount"] == Decimal("250")
+    _ensure_live_baseline(j, broker)
+    assert len(j.read_cash_adjustments()) == 1
+
+
+def test_live_baseline_makes_reconcile_cash_clean(tmp_path):
+    """End-to-end: after the baseline, robinhood reconciliation must not
+    flag cash drift on a freshly-funded account with an empty journal."""
+    from ops.broker.robinhood import RobinhoodBroker
+    from ops.main import _ensure_live_baseline
+    from ops.reconcile import reconcile
+    from tests.ops.broker.fakes import FakeMCPClient
+
+    j = Journal(str(tmp_path / "j.sqlite"))
+    client = FakeMCPClient(cash=Decimal("250"))
+    broker = RobinhoodBroker(client=client, journal=j)
+    _ensure_live_baseline(j, broker)
+    result = reconcile(journal=j, broker=broker, broker_mode="robinhood")
+    assert result.diffs == []
+
+
+def test_start_of_day_equity_ignores_stale_snapshot(tmp_path):
+    """A start-of-day baseline from a previous day must not be used — return
+    0 (drawdown rules treat <=0 as 'no baseline yet → allow')."""
+    from datetime import datetime, timedelta, timezone
+
+    from ops.main import _start_of_day_equity, _start_of_week_equity
+    j = Journal(str(tmp_path / "j.sqlite"))
+    j.record_equity_snapshot(
+        kind="open_day", equity=Decimal("500"), cash=Decimal("500"),
+        at=datetime.now(timezone.utc) - timedelta(days=3),
+    )
+    j.record_equity_snapshot(
+        kind="open_week", equity=Decimal("500"), cash=Decimal("500"),
+        at=datetime.now(timezone.utc) - timedelta(days=21),
+    )
+    assert _start_of_day_equity(j) == Decimal("0")
+    assert _start_of_week_equity(j) == Decimal("0")
+
+
+def test_start_of_day_equity_uses_fresh_snapshot(tmp_path):
+    from datetime import datetime, timezone
+
+    from ops.main import _start_of_day_equity, _start_of_week_equity
+    j = Journal(str(tmp_path / "j.sqlite"))
+    now = datetime.now(timezone.utc)
+    j.record_equity_snapshot(kind="open_day", equity=Decimal("300"),
+                             cash=Decimal("300"), at=now)
+    j.record_equity_snapshot(kind="open_week", equity=Decimal("310"),
+                             cash=Decimal("310"), at=now)
+    assert _start_of_day_equity(j) == Decimal("300")
+    assert _start_of_week_equity(j) == Decimal("310")

@@ -1,9 +1,9 @@
 """In-memory paper broker. Records every order and fill to the journal."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Callable
 from uuid import uuid4
 
 from ops.broker.base import Broker, InsufficientFunds, NoSuchPosition
@@ -25,7 +25,7 @@ class PaperBroker(Broker):
     @classmethod
     def from_journal(
         cls, *, journal: Journal, quote_source: QuoteSource, starting_cash: Decimal,
-    ) -> "PaperBroker":
+    ) -> PaperBroker:
         """Rebuild in-memory state by replaying fills from the journal.
 
         stop_loss_price is journaled on each BUY fill (see PaperBroker._make_fill /
@@ -51,6 +51,8 @@ class PaperBroker(Broker):
         event so paper mode doesn't get a duplicate emission on every
         startup."""
         broker = cls(journal=journal, quote_source=quote_source, starting_cash=starting_cash)
+        for adj in journal.read_cash_adjustments():
+            broker._cash += adj["amount"]
         orders_by_id = {o["client_order_id"]: o for o in journal.read_orders()}
         for f in journal.read_fills():
             symbol = f["symbol"]

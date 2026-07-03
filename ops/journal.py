@@ -57,6 +57,14 @@ CREATE TABLE IF NOT EXISTS dispatch_cursors (
     consumer TEXT PRIMARY KEY,
     last_event_id INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS cash_adjustments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    amount TEXT NOT NULL,
+    note TEXT
+);
 """
 
 
@@ -247,6 +255,29 @@ class Journal:
         ).fetchone()
         return row is not None
 
+    def record_cash_adjustment(
+        self, *, kind: str, amount: Decimal, note: str | None = None,
+        at: datetime | None = None,
+    ) -> None:
+        """Non-trade cash movement: startup seed, deposit, withdrawal, or the
+        one-time live-mode baseline. Replay adds these to cash so the journal
+        can account for money that did not arrive via a fill."""
+        ts = _to_iso(at) if at is not None else _now_iso()
+        self._conn.execute(
+            "INSERT INTO cash_adjustments (at, kind, amount, note) VALUES (?, ?, ?, ?)",
+            (ts, kind, str(amount), note),
+        )
+
+    def read_cash_adjustments(self) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            "SELECT at, kind, amount, note FROM cash_adjustments ORDER BY id"
+        )
+        return [
+            {"at": _from_iso(row[0]), "kind": row[1],
+             "amount": Decimal(row[2]), "note": row[3]}
+            for row in cur
+        ]
+
     def record_equity_snapshot(
         self, *, kind: str, equity: Decimal, cash: Decimal,
         at: datetime | None = None, note: str | None = None,
@@ -291,7 +322,7 @@ class Journal:
             for row in cur
         ]
 
-    def __enter__(self) -> "Journal":
+    def __enter__(self) -> Journal:
         return self
 
     def __exit__(self, *_: object) -> None:

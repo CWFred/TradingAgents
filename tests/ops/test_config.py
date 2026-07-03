@@ -1,7 +1,10 @@
 import os
-import pytest
 from decimal import Decimal
+
+import pytest
+
 from ops.config import OpsConfig, load_config
+
 
 def test_default_config_matches_spec():
     cfg = OpsConfig()
@@ -49,3 +52,22 @@ def test_load_config_raises_attributed_error_on_bad_int(monkeypatch):
     monkeypatch.setenv("OPS_MAX_OPEN_POSITIONS", "five")
     with pytest.raises(ValueError, match="OPS_MAX_OPEN_POSITIONS"):
         load_config()
+
+
+def test_starting_cash_default_and_env(monkeypatch):
+    from decimal import Decimal
+
+    from ops.config import OpsConfig, load_config
+    assert OpsConfig().starting_cash == Decimal("250")
+    monkeypatch.setenv("OPS_STARTING_CASH", "500")
+    assert load_config().starting_cash == Decimal("500")
+
+
+def test_starting_cash_must_be_positive():
+    from decimal import Decimal
+
+    import pytest
+
+    from ops.config import OpsConfig
+    with pytest.raises(ValueError):
+        OpsConfig(starting_cash=Decimal("0"))

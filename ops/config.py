@@ -29,6 +29,7 @@ class OpsConfig:
     weekly_drawdown_pct: Decimal = Decimal("-0.15")
     per_position_stop_pct: Decimal = Decimal("-0.08")
     journal_path: str = "ops_journal.sqlite"
+    starting_cash: Decimal = Decimal("250")
 
     def __post_init__(self) -> None:
         # Drawdown and per-position-stop percentages must be negative — a
@@ -45,6 +46,10 @@ class OpsConfig:
         if self.per_trade_dollar_floor < 0:
             raise ValueError(
                 f"per_trade_dollar_floor must be >= 0, got {self.per_trade_dollar_floor}"
+            )
+        if self.starting_cash <= 0:
+            raise ValueError(
+                f"starting_cash must be > 0, got {self.starting_cash}"
             )
         if self.max_open_positions <= 0:
             raise ValueError(
@@ -114,5 +119,9 @@ def load_config() -> OpsConfig:
     journal_path = os.environ.get("OPS_JOURNAL_PATH")
     if journal_path is not None:
         kwargs["journal_path"] = journal_path
+
+    starting_cash = _env_decimal("OPS_STARTING_CASH")
+    if starting_cash is not None:
+        kwargs["starting_cash"] = starting_cash
 
     return OpsConfig(**kwargs)

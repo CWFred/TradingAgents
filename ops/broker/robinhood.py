@@ -15,14 +15,18 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from ops.broker.base import (
-    Broker, BrokerError, NoSuchPosition, OrderRejected,
+    Broker,
+    BrokerError,
+    NoSuchPosition,
+    OrderRejected,
 )
 from ops.broker.mcp_client import (
-    MCPOrderAck, MCPUnavailable, RobinhoodMCPClient,
+    MCPOrderAck,
+    MCPUnavailable,
+    RobinhoodMCPClient,
 )
 from ops.broker.types import Fill, Order, OrderType, Position, Side
 from ops.journal import Journal
-
 
 _SPOT_SYMBOLS = {"SPOT"}
 
@@ -113,41 +117,62 @@ class RobinhoodBroker(Broker):
             )
         except MCPUnavailable as exc:
             raise BrokerError(f"mcp unavailable: {exc}") from exc
-        return self._ack_to_fill_close(symbol, requested_qty=existing.quantity, ack=ack)
+        return self._ack_to_fill_close(symbol, ack=ack)
 
     def _enforce_spot_hard_check(self, symbol: str) -> None:
         if symbol.upper() in _SPOT_SYMBOLS:
             raise OrderRejected("SpotDenyList", "SPOT is contractually restricted")
 
+    def _require_filled(self, ack: MCPOrderAck) -> None:
+        """Journal + raise unless the ack is a confirmed fill with real numbers.
+
+        A queued or rejected ack must never land in the fills table — the
+        journal is replayed as the source of truth, and a qty=0/price=0 row
+        (the old fallbacks) silently corrupts positions and cash. The
+        order row is already journaled, so a later broker-side fill shows
+        up as a reconciliation diff and halts startup rather than lying.
+        """
+        if ack.status == "filled" and ack.quantity is not None and ack.fill_price is not None:
+            return
+        self._journal.record_event(
+            "order_not_filled",
+            {
+                "order_id": ack.order_id,
+                "client_order_id": ack.client_order_id,
+                "symbol": ack.symbol,
+                "side": ack.side.value,
+                "status": ack.status,
+                "quantity": str(ack.quantity) if ack.quantity is not None else None,
+                "fill_price": str(ack.fill_price) if ack.fill_price is not None else None,
+            },
+        )
+        raise BrokerError(
+            f"order {ack.order_id} not confirmed filled "
+            f"(status={ack.status!r}, quantity={ack.quantity}, fill_price={ack.fill_price})"
+        )
+
     def _ack_to_fill(self, order: Order, ack: MCPOrderAck) -> Fill:
-        # Fill quantity from ack; fall back to 0 if the ack doesn't report one.
-        qty = ack.quantity if ack.quantity is not None else Decimal("0")
-        price = ack.fill_price if ack.fill_price is not None else Decimal("0")
+        self._require_filled(ack)
         fill = Fill(
             order_id=ack.order_id, client_order_id=ack.client_order_id,
-            symbol=order.symbol, side=order.side, quantity=qty, price=price,
+            symbol=order.symbol, side=order.side,
+            quantity=ack.quantity, price=ack.fill_price,
             filled_at=datetime.now(timezone.utc),
         )
         self._journal.record_fill(
             order_id=fill.order_id, client_order_id=fill.client_order_id,
             symbol=fill.symbol, side=fill.side.value,
             quantity=fill.quantity, price=fill.price, filled_at=fill.filled_at,
+            stop_loss_price=order.stop_loss_price,
         )
         return fill
 
-    def _ack_to_fill_close(
-        self, symbol: str, *, requested_qty: Decimal, ack: MCPOrderAck,
-    ) -> Fill:
-        # Prefer the ack's actual filled quantity when it reports one; fall
-        # back to the pre-trade snapshot only if the ack lacks a quantity.
-        # A real market SELL can partially fill (halted stock, illiquid,
-        # etc.), and journaling the requested quantity in that case would
-        # misrecord the position.
-        qty = ack.quantity if ack.quantity is not None else requested_qty
-        price = ack.fill_price if ack.fill_price is not None else Decimal("0")
+    def _ack_to_fill_close(self, symbol: str, *, ack: MCPOrderAck) -> Fill:
+        self._require_filled(ack)
         fill = Fill(
             order_id=ack.order_id, client_order_id=ack.client_order_id,
-            symbol=symbol, side=Side.SELL, quantity=qty, price=price,
+            symbol=symbol, side=Side.SELL,
+            quantity=ack.quantity, price=ack.fill_price,
             filled_at=datetime.now(timezone.utc),
         )
         self._journal.record_fill(

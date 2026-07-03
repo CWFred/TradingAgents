@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+
 import pytest
-from ops.broker.types import Order, Side, OrderType
+
 from ops.broker.base import InsufficientFunds, NoSuchPosition
 from ops.broker.paper import PaperBroker
+from ops.broker.types import Order, OrderType, Side
 from ops.journal import Journal
 
 
@@ -359,3 +361,17 @@ def test_from_journal_falls_back_to_qty_times_price_when_order_row_missing(tmp_p
     fallbacks = [e for e in journal.read_events() if e["kind"] == "journal_replay_fallback"]
     assert len(fallbacks) == 1
     assert fallbacks[0]["payload"]["client_order_id"] == "orphan-cid"
+
+
+def test_from_journal_applies_cash_adjustments(tmp_path, quote_source):
+    """Replayed cash = starting_cash + adjustments + fills. Deposits and the
+    startup seed are journaled as cash adjustments so restarts and live-mode
+    reconciliation see the same cash the account actually has."""
+    from ops.journal import Journal
+    journal = Journal(str(tmp_path / "j.sqlite"))
+    journal.record_cash_adjustment(kind="seed", amount=Decimal("250"))
+    journal.record_cash_adjustment(kind="deposit", amount=Decimal("100"))
+    broker = PaperBroker.from_journal(
+        journal=journal, quote_source=quote_source, starting_cash=Decimal("0"),
+    )
+    assert broker.get_cash() == Decimal("350")
