@@ -538,9 +538,13 @@ class RealRobinhoodMCPClient:
         Any transport/handshake failure (auth error, connection refused,
         timeout, a rejected `initialize()`) is mapped to `MCPUnavailable`; a
         connect that never signals readiness within `connect_timeout` cancels
-        the `_serve()` Task and also raises `MCPUnavailable`. Either way, no
-        connection is leaked: `_serve`'s `except BaseException`/`finally`
-        (Finding 2) guarantee cleanup runs even on that cancellation.
+        the `_serve()` Task, then calls `close()` (idempotent, best-effort)
+        to stop the worker thread before raising `MCPUnavailable` — a timed-
+        out connect must never leak the daemon thread, same as a
+        successfully-closed one. Either way, no connection is leaked:
+        `_serve`'s `except BaseException`/`finally` (Finding 2) guarantee
+        cleanup runs even on that cancellation. A subsequent `connect()`
+        call is safe to retry: it rebuilds the worker from scratch.
 
         Idempotent: a second call while already connected is a no-op.
         """
@@ -559,6 +563,7 @@ class RealRobinhoodMCPClient:
 
         if not became_ready:
             self._lifetime.cancel()
+            self.close()  # never leak the worker thread; see close()'s contract
             raise MCPUnavailable(f"MCP connect timed out after {self._connect_timeout}s")
 
         error = self._connect_error
@@ -830,6 +835,11 @@ class RealRobinhoodMCPClient:
             self.connect()
         if (notional is None) == (quantity is None):
             raise ValueError("place_equity_order requires exactly one of notional/quantity")
+        if notional is not None and order_type == OrderType.LIMIT:
+            raise ValueError(
+                "dollar-notional orders must be market; LIMIT+notional is not "
+                "supported by the Robinhood dollar_amount API"
+            )
 
         try:
             account_number = self._resolve_account()
@@ -918,7 +928,7 @@ class RealRobinhoodMCPClient:
 
         try:
             self.cancel_equity_order(order_id)
-        except MCPUnavailable:
+        except (MCPUnavailable, MCPProtocolError):
             pass  # best-effort; the timeout below is the primary signal
         raise MCPUnavailable(
             f"order {order_id} did not fill within {window_s}s; cancel requested"

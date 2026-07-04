@@ -80,3 +80,30 @@ def test_submit_before_start_raises_mcp_unavailable():
 def test_real_client_construction_does_no_io():
     c = RealRobinhoodMCPClient()
     assert c._worker is None
+
+
+def test_connect_timeout_stops_worker_thread():
+    """A connect() that never becomes ready within connect_timeout must not
+    leak the worker daemon thread — the same never-leak contract close()
+    documents (Finding 1, final review). Fakes `_serve` as a coroutine that
+    hangs forever (no real network); connect_timeout is tiny so the test
+    doesn't wait beyond a fraction of a second."""
+    client = RealRobinhoodMCPClient(connect_timeout=0.05)
+
+    async def _hanging_serve():
+        await asyncio.sleep(100)
+
+    client._serve = _hanging_serve
+
+    with pytest.raises(MCPUnavailable, match="timed out"):
+        client.connect()
+
+    assert client._worker is None
+    assert client._session is None
+
+    # Also verify it's actually safe to retry: connect() rebuilds a fresh
+    # worker rather than reusing a half-torn-down one.
+    client._serve = _hanging_serve
+    with pytest.raises(MCPUnavailable, match="timed out"):
+        client.connect()
+    assert client._worker is None

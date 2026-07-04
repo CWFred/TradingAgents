@@ -251,6 +251,23 @@ def test_place_equity_order_requires_exactly_one_of_notional_or_quantity():
         )
 
 
+def test_place_equity_order_notional_with_limit_raises_value_error():
+    """Dollar-notional orders are always market on the real dollar_amount
+    API (fractional shares are market-only) — a caller that ever wires
+    LIMIT+notional through must fail loud, not silently drop price
+    protection by forcing market underneath it (Finding 3, final review)."""
+    client, session = _client_with()
+    with pytest.raises(ValueError, match="dollar-notional orders must be market"):
+        client.place_equity_order(
+            symbol="MU", side=Side.BUY,
+            notional=Decimal("150"), quantity=None,
+            order_type=OrderType.LIMIT, limit_price=Decimal("100"),
+            client_order_id="pem-bad-notional-limit",
+        )
+    # Never reached the network — no tool call was made.
+    assert session.calls == []
+
+
 def test_place_equity_order_rejected_on_placement_raises_unavailable_without_polling():
     client, session = _client_with(
         place_equity_order=_place_response(ORDER_ID, "rejected"),
@@ -393,3 +410,29 @@ def test_await_fill_timeout_cancels_and_raises():
     assert len(cancel_calls) == 1
     assert cancel_calls[0]["order_id"] == ORDER_ID
     assert cancel_calls[0]["account_number"] == ACCOUNT_NUMBER
+
+
+def test_await_fill_timeout_survives_cancel_protocol_error():
+    """A failing best-effort cancel must never mask the timeout signal —
+    not just an MCPUnavailable cancel failure (already covered above), but
+    also an MCPProtocolError one (e.g. a shape mismatch in the cancel
+    response) (Finding 2, final review)."""
+    client, session = _client_with(
+        get_equity_orders=_orders_response(QUEUED_ORDER),  # never terminal
+    )
+    cancel_calls: list[str] = []
+
+    def _cancel_raises_protocol_error(order_id):
+        cancel_calls.append(order_id)
+        raise MCPProtocolError("cancel_equity_order response missing 'data'")
+
+    client.cancel_equity_order = _cancel_raises_protocol_error
+    clock = _FakeClock(step=6.0)  # deadline = 0+6+10=16; polls at t=12 (continue), t=18 (stop)
+    with pytest.raises(MCPUnavailable, match="did not fill"):
+        client._await_fill(
+            ORDER_ID, account_number=ACCOUNT_NUMBER,
+            window_s=10.0, poll_interval_s=1.0,
+            sleep_fn=lambda _s: None, clock_fn=clock,
+        )
+    assert len(_calls_for(session, "get_equity_orders")) == 2
+    assert cancel_calls == [ORDER_ID]
