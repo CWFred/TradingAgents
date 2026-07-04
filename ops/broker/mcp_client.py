@@ -7,18 +7,30 @@ Concrete implementations:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
+import threading
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Coroutine, Protocol, runtime_checkable
 
 from ops.broker.types import OrderType, Side
 
 
 class MCPUnavailable(Exception):
-    """Raised when the MCP endpoint fails (network, auth, protocol error)."""
+    """Raised when the MCP endpoint fails (network, auth, protocol error, or timeout)."""
+
+
+class MCPProtocolError(Exception):
+    """Raised when an MCP response doesn't match the expected shape.
+
+    Distinguished from `MCPUnavailable`: this is a parse/shape mismatch (a
+    renamed field, a missing key, an unexpected type) against a server that
+    *did* respond — not a transport/timeout/auth failure. Callers should not
+    treat this as "the broker is unreachable, retry later."
+    """
 
 
 @dataclass(frozen=True)
@@ -100,6 +112,84 @@ def _read_token(path: Path) -> dict | None:
         return json.load(f)
 
 
+# --- _AsyncWorker -------------------------------------------------------------
+#
+# The installed `mcp` SDK (1.28.1) is async-only, and its transports use
+# anyio cancel scopes that are bound to the asyncio Task that entered them.
+# A per-call `asyncio.run(...)` (or `loop.run_until_complete(...)` invoked
+# repeatedly on a stored-but-idle loop) runs each call in a *new* Task, so a
+# transport/session entered under one Task cannot be used from another —
+# anyio raises. The fix is structural: own exactly one event loop on one
+# background thread for the client's entire lifetime, and always schedule
+# coroutines onto that same loop via `run_coroutine_threadsafe`, so every
+# coroutine (session open in Task 2, and every tool call) runs as a Task on
+# the *same* loop, in the *same* thread, satisfying anyio's task affinity.
+
+
+class _AsyncWorker:
+    """Owns one asyncio event loop on one daemon thread, for a client's lifetime.
+
+    Sync callers submit coroutines (created on the calling thread, but never
+    awaited there) via `submit()`; they are scheduled onto the worker loop
+    with `asyncio.run_coroutine_threadsafe` and actually run on the worker
+    thread. This keeps every coroutine that ever touches the MCP session
+    bound to a single loop/thread, which is required for the SDK's anyio-based
+    transports (see module note above).
+    """
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Spawn the daemon thread and block until its loop is running."""
+        if self._thread is not None:
+            return  # already started
+        ready = threading.Event()
+
+        def _run() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._loop = loop
+            ready.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=_run, daemon=True, name="mcp-async-worker")
+        thread.start()
+        ready.wait()
+        self._thread = thread
+
+    def submit(self, coro: Coroutine, *, timeout: float):
+        """Schedule `coro` on the worker loop and block for its result.
+
+        `coro` must be created by the caller but is only ever awaited on the
+        worker thread's loop (never on the calling thread) — that hand-off is
+        exactly what `run_coroutine_threadsafe` is for.
+
+        On timeout, the future (not the loop) is cancelled: the worker loop
+        keeps running and remains usable for subsequent submits.
+        """
+        if self._loop is None or self._thread is None or not self._thread.is_alive():
+            coro.close()  # avoid a "coroutine was never awaited" warning
+            raise MCPUnavailable("MCP worker is not running")
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            fut.cancel()
+            raise MCPUnavailable(f"MCP call timed out after {timeout}s") from None
+
+    def stop(self) -> None:
+        """Stop the loop and join the thread. Idempotent; safe if never started."""
+        if self._loop is not None and self._thread is not None and self._thread.is_alive():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(timeout=5.0)
+        if self._loop is not None:
+            self._loop.close()
+        self._loop = None
+        self._thread = None
+
+
 # --- RealRobinhoodMCPClient --------------------------------------------------
 
 _RH_MCP_ENDPOINT = "https://agent.robinhood.com/mcp/trading"
@@ -120,21 +210,31 @@ class RealRobinhoodMCPClient:
     SDK version.
 
     This class exposes the RobinhoodMCPClient Protocol's *sync* methods, so
-    each protocol method bridges into the SDK via `_call_tool`, which runs
-    the coroutine with `asyncio.run(...)`. This is a stub bridge: `connect()`
-    does not yet open the transport/session (that requires a live OAuth
-    token and network endpoint), so `self._session` remains `None` and
-    `_call_tool` cannot actually be exercised until Task 12's opt-in live
-    tests wire up the transport and OAuth flow end-to-end. The shape here
-    (method signatures, CallToolResult parsing, error mapping) is what that
-    wiring will plug into.
+    each protocol method bridges into the SDK via `_call_tool`. The bridge is
+    a long-lived `_AsyncWorker`: one daemon thread owns one asyncio event
+    loop for this client's entire lifetime, and every coroutine (session
+    open, every tool call) is scheduled onto that same loop via
+    `asyncio.run_coroutine_threadsafe`. This is required because the SDK's
+    transports use anyio cancel scopes bound to the asyncio Task that entered
+    them — a per-call `asyncio.run(...)` (or repeated `run_until_complete` on
+    an otherwise-idle stored loop) creates a new Task each time, so a
+    transport/session entered in one call can't be reused from the next.
+    Routing every call through the same worker thread's loop keeps it all on
+    one Task-affine loop. See `_AsyncWorker` for the mechanics.
+
+    `connect()` does not yet open the transport/session (that requires a
+    live OAuth token and network endpoint), so `self._session` remains
+    `None` and `_call_tool` cannot actually be exercised until Task 2's
+    opt-in live tests wire up the transport and OAuth flow end-to-end. The
+    shape here (method signatures, CallToolResult parsing, error mapping,
+    and now the worker-thread transport) is what that wiring will plug into.
     """
 
     def __init__(self, *, endpoint: str = _RH_MCP_ENDPOINT, token_path: Path | None = None):
         self._endpoint = endpoint
         self._token_path = token_path or _resolve_token_path()
         self._session = None  # populated on connect(); see class docstring
-        self._loop: asyncio.AbstractEventLoop | None = None  # created lazily; see connect()
+        self._worker: _AsyncWorker | None = None  # started lazily; see connect()
 
     def connect(self) -> None:
         """Load (or mint via OAuth) a token, then establish the MCP session.
@@ -144,29 +244,30 @@ class RealRobinhoodMCPClient:
         transport is deferred — see class docstring — so `self._session`
         stays `None` after this call until that bridging lands.
 
-        Also creates this client's own event loop (`self._loop`), so every
-        `_call_tool` bridge for the lifetime of this client runs on the
-        same loop instead of `asyncio.run()` spinning up and tearing down a
-        fresh one per call. That matters once Task 12 wires up real async
-        streams/subscriptions on the SDK transport — those need to stay
-        bound to a single loop.
+        Also starts this client's `_AsyncWorker` (one daemon thread + one
+        event loop for the client's lifetime), so every `_call_tool` bridge
+        runs on the same loop instead of spinning up a fresh Task per call.
+        That matters once Task 2 wires up the real async session/transport
+        on the SDK — those need to stay bound to a single loop (see
+        `_AsyncWorker`'s module note).
         """
         token = _read_token(self._token_path)
         if token is None:
             token = self._run_oauth_browser_flow()
             _write_token(self._token_path, token)
-        if self._loop is None:
-            self._loop = asyncio.new_event_loop()
+        if self._worker is None:
+            self._worker = _AsyncWorker()
+            self._worker.start()
         # Establishing self._session requires entering the mcp SDK's async
         # transport/session context managers (streamablehttp_client +
         # ClientSession), which is out of scope for this task — see the
-        # class docstring. Left as None; wired in Task 12.
+        # class docstring. Left as None; wired in Task 2.
 
     def close(self) -> None:
-        """Close this client's owned event loop, if one was created."""
-        if self._loop is not None:
-            self._loop.close()
-            self._loop = None
+        """Stop this client's owned worker thread/loop, if one was started."""
+        if self._worker is not None:
+            self._worker.stop()
+            self._worker = None
 
     def _run_oauth_browser_flow(self) -> dict:
         raise NotImplementedError(
@@ -174,16 +275,18 @@ class RealRobinhoodMCPClient:
             "(mcp.client.auth) as part of Task 12's opt-in live tests."
         )
 
-    def _call_tool(self, name: str, arguments: dict) -> dict:
+    def _call_tool(self, name: str, arguments: dict, *, timeout: float = 30.0) -> dict:
         """Sync bridge to the SDK's async `ClientSession.call_tool`.
 
-        Runs the coroutine to completion on this client's own event loop
-        (created in `connect()`, or lazily here if a test/caller set
-        `_session` without going through `connect()` first — matching the
-        existing `if self._session is None: self.connect()` lazy pattern
-        used by every Protocol method) and unpacks the real SDK response
-        shape (`mcp.types.CallToolResult`), preferring `structuredContent`
-        when the server provides it.
+        Submits the coroutine to this client's `_AsyncWorker` (started in
+        `connect()`, or lazily here if a test/caller set `_session` without
+        going through `connect()` first — matching the existing
+        `if self._session is None: self.connect()` lazy pattern used by
+        every Protocol method), which runs it on the worker thread's single
+        long-lived event loop and blocks this calling thread for the
+        result. Unpacks the real SDK response shape
+        (`mcp.types.CallToolResult`), preferring `structuredContent` when
+        the server provides it.
         """
         async def _call() -> dict:
             result = await self._session.call_tool(name, arguments)
@@ -193,9 +296,10 @@ class RealRobinhoodMCPClient:
                 return result.structuredContent
             return {"content": result.content}
 
-        if self._loop is None:
-            self._loop = asyncio.new_event_loop()
-        return self._loop.run_until_complete(_call())
+        if self._worker is None:
+            self._worker = _AsyncWorker()
+            self._worker.start()
+        return self._worker.submit(_call(), timeout=timeout)
 
     # Protocol methods delegate to the MCP session with narrow try/except
     # wrapping to MCPUnavailable.
