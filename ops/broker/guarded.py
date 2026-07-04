@@ -129,34 +129,55 @@ class GuardedBroker(Broker):
             existing = next((p for p in positions if p.symbol == symbol), None)
             if existing is None:
                 raise NoSuchPosition(f"no position in {symbol}")
-            price = self.__inner.get_quote(symbol)
-            notional = existing.quantity * price
-            close_order = Order(
-                client_order_id=f"close-{symbol}-{uuid.uuid4().hex[:8]}",
-                symbol=symbol,
-                side=Side.SELL,
-                notional_dollars=notional,
-                order_type=OrderType.MARKET,
-            )
-            ctx = RuleContext(order=close_order, broker=self.__inner, config=self._config)
-            result = self._engine.evaluate(ctx)
-            if not result.allowed:
-                self._journal.record_event(
-                    "order_rejected",
-                    {
-                        "rule": result.failed_rule_name,
-                        "reason": result.reason,
-                        "client_order_id": close_order.client_order_id,
-                        "symbol": symbol,
-                        "side": "SELL",
-                        "notional_dollars": str(notional),
-                        "context": "close_position",
-                    },
+            client_order_id = f"close-{symbol}-{uuid.uuid4().hex[:8]}"
+            # Dry-run the rule chain against sellable_quantity (NOT
+            # existing.quantity) — post-T5, RobinhoodBroker.close_position
+            # actually sells shares_available_for_sells, and LongOnlyRule
+            # bounds a SELL against sellable_quantity too. Sizing the
+            # synthetic order off the full quantity here made the dry-run
+            # reject closes on positions with held/unsettled shares even
+            # though the real close would have succeeded (MCP-T5 bug).
+            # PaperBroker never sets shares_available_for_sells, so
+            # sellable_quantity == quantity there and this is a no-op for
+            # paper — same synthetic order as before.
+            notional = Decimal("0")
+            sellable = existing.sellable_quantity
+            if sellable > 0:
+                price = self.__inner.get_quote(symbol)
+                notional = sellable * price
+                close_order = Order(
+                    client_order_id=client_order_id,
+                    symbol=symbol,
+                    side=Side.SELL,
+                    notional_dollars=notional,
+                    order_type=OrderType.MARKET,
                 )
-                raise OrderRejected(result.failed_rule_name, result.reason)
+                ctx = RuleContext(order=close_order, broker=self.__inner, config=self._config)
+                result = self._engine.evaluate(ctx)
+                if not result.allowed:
+                    self._journal.record_event(
+                        "order_rejected",
+                        {
+                            "rule": result.failed_rule_name,
+                            "reason": result.reason,
+                            "client_order_id": client_order_id,
+                            "symbol": symbol,
+                            "side": "SELL",
+                            "notional_dollars": str(notional),
+                            "context": "close_position",
+                        },
+                    )
+                    raise OrderRejected(result.failed_rule_name, result.reason)
+            # sellable <= 0: nothing to dry-run (a zero/negative-notional
+            # synthetic Order is invalid and, more to the point, there's no
+            # rule question to ask — there's nothing sellable). Skip the
+            # rule chain and let the inner broker's close_position raise;
+            # RobinhoodBroker already does this post-T5, and the except
+            # branch below journals it exactly like any other broker-layer
+            # rejection.
             try:
                 fill = self.__inner.close_position(
-                    symbol, client_order_id=close_order.client_order_id,
+                    symbol, client_order_id=client_order_id,
                 )
                 self._journal_fill_event(fill, "close")
                 return fill
@@ -166,7 +187,7 @@ class GuardedBroker(Broker):
                     {
                         "rule": "broker",
                         "reason": f"{type(exc).__name__}: {exc}",
-                        "client_order_id": close_order.client_order_id,
+                        "client_order_id": client_order_id,
                         "symbol": symbol,
                         "side": "SELL",
                         "notional_dollars": str(notional),

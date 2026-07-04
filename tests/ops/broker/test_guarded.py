@@ -1,7 +1,8 @@
 import re
 from decimal import Decimal
 import pytest
-from ops.broker.base import OrderRejected
+from ops import build_guarded_robinhood_broker
+from ops.broker.base import BrokerError, NoSuchPosition, OrderRejected
 from ops.broker.guarded import GuardedBroker
 from ops.broker.paper import PaperBroker
 from ops.broker.types import Order, Side, OrderType, Position
@@ -10,6 +11,7 @@ from ops.guardrails.base import Rule, RuleContext, RuleResult
 from ops.guardrails.engine import RuleEngine
 from ops.guardrails.static_rules import DenyListRule
 from ops.journal import Journal
+from tests.ops.broker.fakes import FakeMCPClient
 
 
 class _RejectSymbol(Rule):
@@ -238,6 +240,58 @@ def test_guarded_emits_fill_event_on_place(tmp_path):
     p = fills[0]["payload"]
     assert p["symbol"] == "AAPL" and p["side"] == "BUY" and p["context"] == "place"
     assert Decimal(p["price"]) == Decimal("200")
+
+
+# --- MCP-T5 regression: GuardedBroker.close_position must dry-run against
+# sellable_quantity, not full quantity, or a stop-loss close on a position
+# with unsettled shares is wrongly rejected by LongOnlyRule. ---
+
+
+def _robinhood_stack(tmp_path, *, quote: Decimal = Decimal("8")):
+    """Real production wiring (build_guarded_robinhood_broker) over a
+    FakeMCPClient — the pattern used to reproduce the bug against the
+    actual rule chain (LongOnlyRule et al.), not a hand-rolled test engine."""
+    journal = Journal(str(tmp_path / "j.sqlite"))
+    config = OpsConfig()
+    client = FakeMCPClient()
+    client.set_quote("AAPL", quote)
+    guarded = build_guarded_robinhood_broker(
+        config=config, journal=journal, mcp_client=client,
+        start_of_day_equity=lambda: Decimal("1000"),
+        start_of_week_equity=lambda: Decimal("1000"),
+    )
+    return journal, client, guarded
+
+
+def test_guarded_close_position_sells_sellable_amount_when_shares_unsettled(tmp_path):
+    """CONFIRMED T5 regression repro: quantity=5, only 3 shares are
+    currently sellable (T+1 unsettled). The pre-T5-fix code sized the
+    synthetic dry-run SELL off the full quantity (5), which LongOnlyRule
+    now rejects since the rule bounds against sellable_quantity (3). The
+    dry-run must agree with what the inner broker will actually sell."""
+    journal, client, guarded = _robinhood_stack(tmp_path)
+    client.seed_position(
+        "AAPL", Decimal("5"), Decimal("8"),
+        shares_available_for_sells=Decimal("3"),
+    )
+    fill = guarded.close_position("AAPL")
+    assert fill.quantity == Decimal("3")
+    ack = client.placed[-1]
+    assert ack.quantity == Decimal("3")
+    rejections = [
+        e for e in journal.read_events() if e["kind"] == "order_rejected"
+    ]
+    assert rejections == []
+
+
+def test_guarded_close_position_fully_settled_position_still_closes(tmp_path):
+    """Control: sellable == quantity (fully settled, paper-style) closes
+    normally and is unaffected by the sellable-quantity dry-run change."""
+    _journal, client, guarded = _robinhood_stack(tmp_path)
+    client.seed_position("AAPL", Decimal("5"), Decimal("8"))
+    fill = guarded.close_position("AAPL")
+    assert fill.quantity == Decimal("5")
+    assert client.placed[-1].quantity == Decimal("5")
 
 
 def test_guarded_no_fill_event_on_rejection(tmp_path):
