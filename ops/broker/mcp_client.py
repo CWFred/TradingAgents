@@ -753,27 +753,21 @@ class RealRobinhoodMCPClient:
 
     @staticmethod
     def _pick_quote_price(symbol: str, quote: dict) -> str:
-        """Pick the more recent of `last_trade_price`/`last_non_reg_trade_price`.
+        """Pick `last_trade_price`, falling back to `last_non_reg_trade_price`.
 
-        Compares venue timestamps when both prices AND both timestamps are
-        present. No live fixture captured so far carries a per-price
-        timestamp (only `last_trade_price`/`last_non_reg_trade_price`
-        themselves) — this branch is forward-looking per the design doc's
-        "compare their venue timestamps if both present". When only one
-        price is present, use it. When both are present but neither
-        timestamp is, default to `last_trade_price` (the standard "current"
-        trade price) — this matches every live fixture captured to date.
+        The real captured quote schema (design doc, "Ground truth captured
+        live" § Quotes) carries exactly one venue timestamp —
+        `venue_last_trade_time` — and it is paired with `last_trade_price`;
+        there is no separate timestamp for `last_non_reg_trade_price` to
+        compare against. So `last_non_reg_trade_price` is used only as a
+        fallback when `last_trade_price` is absent (e.g. before any
+        regular-hours trade has occurred yet today), never as a "more
+        recent" override.
         """
         last = quote.get("last_trade_price")
-        non_reg = quote.get("last_non_reg_trade_price")
-        last_ts = quote.get("last_trade_price_time") or quote.get("venue_last_trade_time")
-        non_reg_ts = quote.get("last_non_reg_trade_price_time")
-        if last is not None and non_reg is not None:
-            if last_ts is not None and non_reg_ts is not None:
-                return non_reg if str(non_reg_ts) > str(last_ts) else last
-            return last
         if last is not None:
             return last
+        non_reg = quote.get("last_non_reg_trade_price")
         if non_reg is not None:
             return non_reg
         raise MCPProtocolError(

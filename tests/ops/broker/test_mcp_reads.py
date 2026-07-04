@@ -104,6 +104,7 @@ def _quote_fixture(**overrides) -> dict:
         "symbol": "AAPL",
         "last_trade_price": "308.240000",
         "last_non_reg_trade_price": "308.450000",
+        "venue_last_trade_time": "2026-07-04T20:00:00Z",
         "bid_price": "304.01",
         "ask_price": "317.00",
         "previous_close": "294.38",
@@ -227,7 +228,7 @@ def test_get_positions_row_missing_field_raises_protocol_error():
 # --- get_quote → picks price, rejects unreliable quotes ---------------------
 
 
-def test_get_quote_picks_last_trade_price_when_no_timestamps():
+def test_get_quote_picks_last_trade_price_when_present():
     client, session = _client_with(get_equity_quotes=QUOTE_FIXTURE)
     price = client.get_quote("AAPL")
     assert price == Decimal("308.240000")
@@ -235,22 +236,13 @@ def test_get_quote_picks_last_trade_price_when_no_timestamps():
     assert quote_calls == [("get_equity_quotes", {"symbols": ["AAPL"]})]
 
 
-def test_get_quote_uses_non_reg_price_when_more_recent_timestamp():
-    fixture = _quote_fixture(
-        last_trade_price_time="2026-07-04T13:00:00Z",
-        last_non_reg_trade_price_time="2026-07-04T20:00:00Z",
-    )
+def test_get_quote_falls_back_to_non_reg_price_when_last_trade_price_missing():
+    # Real schema (design doc, "Ground truth captured live" § Quotes) has no
+    # per-price timestamp to compare — last_non_reg_trade_price is only ever
+    # used when last_trade_price itself is absent.
+    fixture = _quote_fixture(last_trade_price=None)
     client, _ = _client_with(get_equity_quotes=fixture)
     assert client.get_quote("AAPL") == Decimal("308.450000")
-
-
-def test_get_quote_uses_regular_price_when_more_recent_timestamp():
-    fixture = _quote_fixture(
-        last_trade_price_time="2026-07-04T20:00:00Z",
-        last_non_reg_trade_price_time="2026-07-04T13:00:00Z",
-    )
-    client, _ = _client_with(get_equity_quotes=fixture)
-    assert client.get_quote("AAPL") == Decimal("308.240000")
 
 
 def test_get_quote_rejects_when_has_traded_false():
