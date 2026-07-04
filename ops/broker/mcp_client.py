@@ -938,12 +938,13 @@ class RealRobinhoodMCPClient:
 
         `cumulative_quantity`/`average_price` are the fields that actually
         populate on fill (a fresh dollar-amount order's plain `quantity` is
-        `null` until then) — falls back to `quantity` only if
-        `cumulative_quantity` is absent. Missing either on a `state=="filled"`
-        order is a shape mismatch against a server that DID respond, so it
-        raises `MCPProtocolError` (fail loud), not `MCPUnavailable`.
+        `null` until then) — falls back to `quantity` if `cumulative_quantity`
+        is present-but-null or absent (falsy-fallback, not `dict.get`'s
+        absent-only default). Missing either on a `state=="filled"` order is
+        a shape mismatch against a server that DID respond, so it raises
+        `MCPProtocolError` (fail loud), not `MCPUnavailable`.
         """
-        cumulative_qty = order.get("cumulative_quantity", order.get("quantity"))
+        cumulative_qty = order.get("cumulative_quantity") or order.get("quantity")
         avg_price = order.get("average_price")
         if cumulative_qty is None or avg_price is None:
             raise MCPProtocolError(

@@ -69,6 +69,20 @@ FILLED_ORDER_MISSING_AVG_PRICE = {
     # no "average_price" at all — shape mismatch
 }
 
+FILLED_ORDER_NULL_CUMULATIVE_QTY = {
+    "id": ORDER_ID, "symbol": "MU", "side": "sell", "type": "market",
+    "state": "filled", "quantity": "10", "cumulative_quantity": None,
+    # present-but-null cumulative_quantity on a filled, share-count SELL —
+    # captured shape variant; must fall back to "quantity".
+    "average_price": "1080.000000",
+}
+
+FILLED_ORDER_MISSING_QTY_AND_CUMULATIVE = {
+    "id": ORDER_ID, "symbol": "MU", "side": "buy", "type": "market",
+    "state": "filled", "quantity": None, "cumulative_quantity": None,
+    "average_price": "1080.000000",
+}
+
 
 def _orders_response(order: dict) -> dict:
     return {"data": {"orders": [order]}, "guide": "ignored prose"}
@@ -255,6 +269,40 @@ def test_place_equity_order_filled_missing_average_price_raises_protocol_error()
     client, _ = _client_with(
         place_equity_order=_place_response(ORDER_ID, "queued"),
         get_equity_orders=_orders_response(FILLED_ORDER_MISSING_AVG_PRICE),
+    )
+    with pytest.raises(MCPProtocolError):
+        client.place_equity_order(
+            symbol="MU", side=Side.BUY,
+            notional=Decimal("150"), quantity=None,
+            order_type=OrderType.MARKET, limit_price=None,
+            client_order_id="pem-1",
+        )
+
+
+def test_place_equity_order_filled_null_cumulative_quantity_falls_back_to_quantity():
+    """Present-but-null `cumulative_quantity` (real captured shape on some
+    filled share-count orders) must fall back to `quantity`, not raise —
+    `dict.get(key, default)` only falls back when the key is ABSENT, so a
+    present `None` needs falsy-fallback (`or`) semantics instead."""
+    client, _ = _client_with(
+        place_equity_order=_place_response(ORDER_ID, "queued"),
+        get_equity_orders=_orders_response(FILLED_ORDER_NULL_CUMULATIVE_QTY),
+    )
+    ack = client.place_equity_order(
+        symbol="MU", side=Side.SELL,
+        notional=None, quantity=Decimal("10"),
+        order_type=OrderType.MARKET, limit_price=None,
+        client_order_id="close-MU-null-cumqty",
+    )
+    assert ack.status == "filled"
+    assert ack.quantity == Decimal("10")
+    assert ack.fill_price == Decimal("1080.000000")
+
+
+def test_place_equity_order_filled_missing_quantity_and_cumulative_quantity_raises_protocol_error():
+    client, _ = _client_with(
+        place_equity_order=_place_response(ORDER_ID, "queued"),
+        get_equity_orders=_orders_response(FILLED_ORDER_MISSING_QTY_AND_CUMULATIVE),
     )
     with pytest.raises(MCPProtocolError):
         client.place_equity_order(
