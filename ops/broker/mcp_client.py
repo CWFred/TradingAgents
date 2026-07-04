@@ -53,6 +53,7 @@ class MCPPosition:
     symbol: str
     quantity: Decimal
     avg_price: Decimal
+    shares_available_for_sells: Decimal
 
 
 @dataclass(frozen=True)
@@ -456,6 +457,7 @@ class RealRobinhoodMCPClient:
         self._ready: threading.Event | None = None  # signalled by _serve() once live or failed
         self._shutdown_event: asyncio.Event | None = None  # created by _serve(); set by close()
         self._connect_error: BaseException | None = None  # set by _serve() on failure
+        self._account_number: str | None = None  # resolved lazily; see _resolve_account()
 
     async def _serve(self) -> None:
         """Own the MCP session's entire lifetime on a single asyncio Task.
@@ -617,19 +619,82 @@ class RealRobinhoodMCPClient:
             self._worker.start()
         return self._worker.submit(_call(), timeout=timeout)
 
-    # Protocol methods delegate to the MCP session with narrow try/except
-    # wrapping to MCPUnavailable.
+    # Protocol methods delegate to the MCP session. Each wraps narrowly:
+    # `MCPProtocolError`/`MCPUnavailable` raised deliberately below (shape
+    # mismatch vs. resolution refusal) propagate unchanged; anything else
+    # (session/transport errors) is wrapped as MCPUnavailable. This is the
+    # split the design doc calls out: a renamed field must not read as an
+    # outage, and an outage must not read as "the client is broken."
+    def _resolve_account(self) -> str:
+        """Resolve and memoize the single agentic-allowed account number.
+
+        Defense-in-depth beneath the GuardedBroker rule chain and the SPOT
+        hard-check: an account this agent cannot actually trade
+        (`agentic_allowed=False`) must never be silently used just because
+        it happened to be first in `get_accounts`' list. An `OPS_RH_ACCOUNT`
+        override is honored ONLY if that account exists and is
+        `agentic_allowed`; otherwise it's refused outright rather than
+        silently falling back to another account.
+        """
+        if self._account_number is not None:
+            return self._account_number
+
+        result = self._call_tool("get_accounts", {})
+        data = result.get("data")
+        if not isinstance(data, dict) or "accounts" not in data:
+            raise MCPProtocolError("get_accounts response missing 'data.accounts'")
+        accounts = data["accounts"]
+        if not isinstance(accounts, list):
+            raise MCPProtocolError("get_accounts response 'data.accounts' is not a list")
+
+        override = os.environ.get("OPS_RH_ACCOUNT")
+        if override:
+            match = next((a for a in accounts if a.get("account_number") == override), None)
+            if match is None or not match.get("agentic_allowed"):
+                raise MCPUnavailable(
+                    f"OPS_RH_ACCOUNT={override!r} is not an agentic-allowed Robinhood account"
+                )
+            self._account_number = override
+            return self._account_number
+
+        agentic = [a for a in accounts if a.get("agentic_allowed") is True]
+        if not agentic:
+            raise MCPUnavailable("no agentic-allowed Robinhood account available to this agent")
+        account_number = agentic[0].get("account_number")
+        if not account_number:
+            raise MCPProtocolError("get_accounts agentic account missing 'account_number'")
+        self._account_number = account_number
+        return self._account_number
+
     def get_account(self) -> AccountInfo:
         if self._session is None:
             self.connect()
         try:
-            result = self._call_tool("get_accounts", {})
-            row = result["accounts"][0]
+            account_number = self._resolve_account()
+            result = self._call_tool("get_portfolio", {"account_number": account_number})
+            data = result.get("data")
+            if not isinstance(data, dict):
+                raise MCPProtocolError("get_portfolio response missing 'data'")
+            equity_raw = data.get("equity_value", data.get("total_value"))
+            if equity_raw is None:
+                raise MCPProtocolError(
+                    "get_portfolio response missing 'equity_value'/'total_value'"
+                )
+            cash_raw = data.get("cash")
+            if cash_raw is None:
+                raise MCPProtocolError("get_portfolio response missing 'cash'")
+            buying_power_raw = data.get("buying_power")
+            if not isinstance(buying_power_raw, dict) or "buying_power" not in buying_power_raw:
+                raise MCPProtocolError(
+                    "get_portfolio response missing 'buying_power.buying_power'"
+                )
             return AccountInfo(
-                cash=Decimal(str(row["cash"])),
-                equity=Decimal(str(row["equity"])),
-                buying_power=Decimal(str(row.get("buying_power", row["cash"]))),
+                cash=Decimal(str(cash_raw)),
+                equity=Decimal(str(equity_raw)),
+                buying_power=Decimal(str(buying_power_raw["buying_power"])),
             )
+        except (MCPUnavailable, MCPProtocolError):
+            raise
         except Exception as exc:
             raise MCPUnavailable(f"get_account failed: {exc}") from exc
 
@@ -637,25 +702,94 @@ class RealRobinhoodMCPClient:
         if self._session is None:
             self.connect()
         try:
-            result = self._call_tool("get_equity_positions", {})
-            return [
-                MCPPosition(
+            account_number = self._resolve_account()
+            result = self._call_tool("get_equity_positions", {"account_number": account_number})
+            data = result.get("data")
+            if not isinstance(data, dict) or "positions" not in data:
+                raise MCPProtocolError("get_equity_positions response missing 'data.positions'")
+            positions_raw = data["positions"]
+            if not isinstance(positions_raw, list):
+                raise MCPProtocolError(
+                    "get_equity_positions response 'data.positions' is not a list"
+                )
+            # NOTE (follow-up): pagination (`cursor`/`next`) is not handled
+            # here — the agentic account holds few positions today. If a
+            # `next` cursor ever appears in a response, this must page
+            # through results rather than silently truncating.
+            positions: list[MCPPosition] = []
+            for row in positions_raw:
+                for key in (
+                    "symbol", "quantity", "average_buy_price", "shares_available_for_sells",
+                ):
+                    if key not in row:
+                        raise MCPProtocolError(
+                            f"get_equity_positions row missing {key!r}: {row!r}"
+                        )
+                positions.append(MCPPosition(
                     symbol=row["symbol"],
                     quantity=Decimal(str(row["quantity"])),
-                    avg_price=Decimal(str(row["average_price"])),
-                )
-                for row in result.get("positions", [])
-            ]
+                    avg_price=Decimal(str(row["average_buy_price"])),
+                    shares_available_for_sells=Decimal(str(row["shares_available_for_sells"])),
+                ))
+            return positions
+        except (MCPUnavailable, MCPProtocolError):
+            raise
         except Exception as exc:
             raise MCPUnavailable(f"get_positions failed: {exc}") from exc
+
+    @staticmethod
+    def _pick_quote_price(symbol: str, quote: dict) -> str:
+        """Pick the more recent of `last_trade_price`/`last_non_reg_trade_price`.
+
+        Compares venue timestamps when both prices AND both timestamps are
+        present. No live fixture captured so far carries a per-price
+        timestamp (only `last_trade_price`/`last_non_reg_trade_price`
+        themselves) — this branch is forward-looking per the design doc's
+        "compare their venue timestamps if both present". When only one
+        price is present, use it. When both are present but neither
+        timestamp is, default to `last_trade_price` (the standard "current"
+        trade price) — this matches every live fixture captured to date.
+        """
+        last = quote.get("last_trade_price")
+        non_reg = quote.get("last_non_reg_trade_price")
+        last_ts = quote.get("last_trade_price_time") or quote.get("venue_last_trade_time")
+        non_reg_ts = quote.get("last_non_reg_trade_price_time")
+        if last is not None and non_reg is not None:
+            if last_ts is not None and non_reg_ts is not None:
+                return non_reg if str(non_reg_ts) > str(last_ts) else last
+            return last
+        if last is not None:
+            return last
+        if non_reg is not None:
+            return non_reg
+        raise MCPProtocolError(
+            f"get_equity_quotes quote for {symbol!r} has neither "
+            "'last_trade_price' nor 'last_non_reg_trade_price'"
+        )
 
     def get_quote(self, symbol: str) -> Decimal:
         if self._session is None:
             self.connect()
         try:
             result = self._call_tool("get_equity_quotes", {"symbols": [symbol]})
-            row = result["quotes"][0]
-            return Decimal(str(row["last_trade_price"]))
+            data = result.get("data")
+            if not isinstance(data, dict) or "results" not in data:
+                raise MCPProtocolError("get_equity_quotes response missing 'data.results'")
+            results = data["results"]
+            if not isinstance(results, list) or not results:
+                raise MCPProtocolError(f"get_equity_quotes returned no results for {symbol!r}")
+            quote = results[0].get("quote")
+            if not isinstance(quote, dict):
+                raise MCPProtocolError("get_equity_quotes result missing 'quote'")
+            if not quote.get("has_traded", False) or quote.get("state") != "active":
+                raise MCPUnavailable(
+                    f"no reliable price for {symbol}: "
+                    f"has_traded={quote.get('has_traded')!r}, state={quote.get('state')!r}"
+                )
+            price = self._pick_quote_price(symbol, quote)
+            return Decimal(str(price))
+        except (MCPUnavailable, MCPProtocolError):
+            raise
         except Exception as exc:
             raise MCPUnavailable(f"get_quote failed: {exc}") from exc
 

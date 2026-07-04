@@ -469,7 +469,10 @@ def test_close_position_queued_ack_raises_and_journals_no_fill(journal):
     from ops.broker.mcp_client import MCPPosition
     client = _CannedAckClient(
         _ack("queued"),
-        positions=[MCPPosition(symbol="AAPL", quantity=Decimal("5"), avg_price=Decimal("10"))],
+        positions=[MCPPosition(
+            symbol="AAPL", quantity=Decimal("5"), avg_price=Decimal("10"),
+            shares_available_for_sells=Decimal("5"),
+        )],
     )
     broker = RobinhoodBroker(client=client, journal=journal)
     with pytest.raises(BrokerError):

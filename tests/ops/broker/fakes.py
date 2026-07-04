@@ -24,8 +24,16 @@ class FakeMCPClient:
     def set_quote(self, symbol: str, price: Decimal) -> None:
         self._quotes[symbol] = price
 
-    def seed_position(self, symbol: str, quantity: Decimal, avg_price: Decimal) -> None:
-        self._positions[symbol] = MCPPosition(symbol=symbol, quantity=quantity, avg_price=avg_price)
+    def seed_position(
+        self, symbol: str, quantity: Decimal, avg_price: Decimal,
+        shares_available_for_sells: Decimal | None = None,
+    ) -> None:
+        self._positions[symbol] = MCPPosition(
+            symbol=symbol, quantity=quantity, avg_price=avg_price,
+            shares_available_for_sells=(
+                shares_available_for_sells if shares_available_for_sells is not None else quantity
+            ),
+        )
 
     def fail_next(self, exc: Exception) -> None:
         self._raise_on_next_call = exc
@@ -69,11 +77,17 @@ class FakeMCPClient:
             self._cash -= notional
             existing = self._positions.get(symbol)
             if existing is None:
-                self._positions[symbol] = MCPPosition(symbol=symbol, quantity=qty, avg_price=price)
+                self._positions[symbol] = MCPPosition(
+                    symbol=symbol, quantity=qty, avg_price=price,
+                    shares_available_for_sells=qty,
+                )
             else:
                 new_qty = existing.quantity + qty
                 new_avg = (existing.avg_price * existing.quantity + price * qty) / new_qty
-                self._positions[symbol] = MCPPosition(symbol=symbol, quantity=new_qty, avg_price=new_avg)
+                self._positions[symbol] = MCPPosition(
+                    symbol=symbol, quantity=new_qty, avg_price=new_avg,
+                    shares_available_for_sells=new_qty,
+                )
             ack_qty = qty
         else:  # SELL
             existing = self._positions.get(symbol)
@@ -87,7 +101,10 @@ class FakeMCPClient:
             self._cash += ack_qty * price
             remaining = existing.quantity - ack_qty
             if remaining > Decimal("1e-9"):
-                self._positions[symbol] = MCPPosition(symbol=symbol, quantity=remaining, avg_price=existing.avg_price)
+                self._positions[symbol] = MCPPosition(
+                    symbol=symbol, quantity=remaining, avg_price=existing.avg_price,
+                    shares_available_for_sells=remaining,
+                )
             else:
                 del self._positions[symbol]
         ack = MCPOrderAck(
