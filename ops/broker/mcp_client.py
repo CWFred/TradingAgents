@@ -12,6 +12,8 @@ import json
 import os
 import socket
 import threading
+import time
+import uuid
 import webbrowser
 from dataclasses import dataclass
 from decimal import Decimal
@@ -385,6 +387,18 @@ class _AsyncWorker:
 # --- RealRobinhoodMCPClient --------------------------------------------------
 
 _RH_MCP_ENDPOINT = "https://agent.robinhood.com/mcp/trading"
+
+# Fixed, arbitrary namespace UUID (generated once for this codebase) used to
+# derive a stable `ref_id` (the MCP's idempotency key) from our own
+# `client_order_id` via uuid5 — same client_order_id always resolves to the
+# same ref_id (so a transient-retry re-send is deduplicated by Robinhood),
+# and the result is always syntactically a valid UUID even though our own
+# client_order_id values (e.g. "pem-2026-...-ab12cd34") are not.
+_REF_ID_NAMESPACE = uuid.UUID("2e6f9a8c-7b1d-4f5e-9c3a-1d8e6f2b4a90")
+
+# get_equity_orders / place_equity_order `state` values that will never
+# transition to "filled" — polling must stop immediately on any of these.
+_ORDER_TERMINAL_FAILURE_STATES = frozenset({"rejected", "failed", "voided", "cancelled"})
 
 
 class RealRobinhoodMCPClient:
@@ -799,37 +813,167 @@ class RealRobinhoodMCPClient:
         order_type: OrderType, limit_price: Decimal | None,
         client_order_id: str,
     ) -> MCPOrderAck:
+        """Place an order, then poll it to a terminal fill (or raise).
+
+        Real `place_equity_order` acks in a non-terminal state and settles
+        asynchronously — this method never returns a non-terminal
+        `MCPOrderAck`; it either returns one confirmed `status="filled"`
+        (satisfying `RobinhoodBroker._require_filled`) or raises.
+
+        Notional (dollar-amount) orders require `type="market"` on the real
+        endpoint — fractional shares are market-only — so `order_type` is
+        ignored whenever `notional` is given; it only governs `type`/
+        `limit_price` for the `quantity` path. Exactly one of
+        `notional`/`quantity` must be given (mirrors the two order-placement
+        call sites in `RobinhoodBroker`, which never send both).
+
+        `ref_id` (the MCP's idempotency key, must be a UUID — unlike our own
+        `client_order_id`) is derived deterministically from
+        `client_order_id` via `uuid5`, so re-sending the same logical order
+        (e.g. after a transient failure) reuses the same `ref_id`.
+        """
         if self._session is None:
             self.connect()
-        params: dict = {
-            "symbol": symbol,
-            "side": side.value.lower(),
-            "type": order_type.value.lower(),
-            "client_order_id": client_order_id,
-        }
-        if notional is not None:
-            params["notional"] = str(notional)
-        if quantity is not None:
-            params["quantity"] = str(quantity)
-        if limit_price is not None:
-            params["limit_price"] = str(limit_price)
+        if (notional is None) == (quantity is None):
+            raise ValueError("place_equity_order requires exactly one of notional/quantity")
+
         try:
+            account_number = self._resolve_account()
+            ref_id = str(uuid.uuid5(_REF_ID_NAMESPACE, client_order_id))
+            params: dict = {
+                "account_number": account_number,
+                "symbol": symbol,
+                "side": side.value.lower(),
+                "time_in_force": "gfd",
+                "market_hours": "regular_hours",
+                "ref_id": ref_id,
+            }
+            if notional is not None:
+                params["dollar_amount"] = str(notional)
+                params["type"] = "market"
+            else:
+                params["quantity"] = str(quantity)
+                params["type"] = order_type.value.lower()
+                if limit_price is not None:
+                    params["limit_price"] = str(limit_price)
+
             result = self._call_tool("place_equity_order", params)
-            return MCPOrderAck(
-                order_id=result["id"], client_order_id=client_order_id,
+            data = result.get("data")
+            if not isinstance(data, dict) or "id" not in data:
+                raise MCPProtocolError("place_equity_order response missing 'data.id'")
+            order_id = data["id"]
+            if data.get("state") in _ORDER_TERMINAL_FAILURE_STATES:
+                raise MCPUnavailable(
+                    f"order {order_id} was {data.get('state')!r} on placement"
+                )
+
+            order = self._await_fill(order_id, account_number=account_number)
+            return self._order_to_ack(
+                order, order_id=order_id, client_order_id=client_order_id,
                 symbol=symbol, side=side,
-                quantity=Decimal(str(result["quantity"])) if result.get("quantity") is not None else None,
-                notional=Decimal(str(result["notional"])) if result.get("notional") is not None else None,
-                status=result["status"],
-                fill_price=Decimal(str(result["fill_price"])) if result.get("fill_price") is not None else None,
             )
+        except (MCPUnavailable, MCPProtocolError):
+            raise
         except Exception as exc:
             raise MCPUnavailable(f"place_equity_order failed: {exc}") from exc
+
+    def _await_fill(
+        self, order_id: str, *, account_number: str,
+        window_s: float = 30.0, poll_interval_s: float = 1.5,
+        sleep_fn=time.sleep, clock_fn=time.monotonic,
+    ) -> dict:
+        """Poll `get_equity_orders(order_id)` until a terminal state.
+
+        Real orders ack non-terminal (`new`/`queued`/`confirmed`/
+        `unconfirmed`) and settle asynchronously; `partially_filled` is also
+        non-terminal here — keep polling until it either completes to
+        `filled` or the window elapses. On `filled`, returns the raw order
+        dict (the caller builds the `MCPOrderAck`). On any of
+        `_ORDER_TERMINAL_FAILURE_STATES`, raises `MCPUnavailable` — no
+        retrying a rejected/failed/voided/cancelled order.
+
+        On window timeout with no terminal fill, best-effort cancels the
+        order (this is the home for the spec's "cancel pending orders"
+        behavior) and raises `MCPUnavailable`, cancel outcome notwithstanding
+        (a cancel that itself fails must not mask the original timeout).
+
+        `sleep_fn`/`clock_fn` are injected (default `time.sleep`/
+        `time.monotonic`) so unit tests drive the state machine with a fake
+        clock — no real wall-clock waiting in the test suite.
+        """
+        deadline = clock_fn() + window_s
+        while True:
+            result = self._call_tool(
+                "get_equity_orders", {"account_number": account_number, "order_id": order_id},
+            )
+            data = result.get("data")
+            if not isinstance(data, dict) or "orders" not in data:
+                raise MCPProtocolError("get_equity_orders response missing 'data.orders'")
+            orders = data["orders"]
+            if not isinstance(orders, list) or not orders:
+                raise MCPProtocolError(f"get_equity_orders returned no orders for {order_id!r}")
+            order = orders[0]
+            state = order.get("state")
+            if state == "filled":
+                return order
+            if state in _ORDER_TERMINAL_FAILURE_STATES:
+                raise MCPUnavailable(f"order {order_id} did not fill: state={state!r}")
+            if clock_fn() >= deadline:
+                break
+            sleep_fn(poll_interval_s)
+
+        try:
+            self.cancel_equity_order(order_id)
+        except MCPUnavailable:
+            pass  # best-effort; the timeout below is the primary signal
+        raise MCPUnavailable(
+            f"order {order_id} did not fill within {window_s}s; cancel requested"
+        )
+
+    @staticmethod
+    def _order_to_ack(
+        order: dict, *, order_id: str, client_order_id: str, symbol: str, side: Side,
+    ) -> MCPOrderAck:
+        """Build a terminal, filled `MCPOrderAck` from a `filled` order dict.
+
+        `cumulative_quantity`/`average_price` are the fields that actually
+        populate on fill (a fresh dollar-amount order's plain `quantity` is
+        `null` until then) — falls back to `quantity` only if
+        `cumulative_quantity` is absent. Missing either on a `state=="filled"`
+        order is a shape mismatch against a server that DID respond, so it
+        raises `MCPProtocolError` (fail loud), not `MCPUnavailable`.
+        """
+        cumulative_qty = order.get("cumulative_quantity", order.get("quantity"))
+        avg_price = order.get("average_price")
+        if cumulative_qty is None or avg_price is None:
+            raise MCPProtocolError(
+                f"filled order {order_id!r} missing 'cumulative_quantity'/'average_price': "
+                f"{order!r}"
+            )
+        dollar_amount = order.get("dollar_based_amount")
+        notional_val = (
+            Decimal(str(dollar_amount["amount"]))
+            if isinstance(dollar_amount, dict) and dollar_amount.get("amount") is not None
+            else None
+        )
+        return MCPOrderAck(
+            order_id=order_id, client_order_id=client_order_id,
+            symbol=symbol, side=side,
+            quantity=Decimal(str(cumulative_qty)),
+            notional=notional_val,
+            status="filled",
+            fill_price=Decimal(str(avg_price)),
+        )
 
     def cancel_equity_order(self, order_id: str) -> None:
         if self._session is None:
             self.connect()
         try:
-            self._call_tool("cancel_equity_order", {"id": order_id})
+            account_number = self._resolve_account()
+            self._call_tool(
+                "cancel_equity_order", {"account_number": account_number, "order_id": order_id},
+            )
+        except (MCPUnavailable, MCPProtocolError):
+            raise
         except Exception as exc:
             raise MCPUnavailable(f"cancel_equity_order failed: {exc}") from exc
