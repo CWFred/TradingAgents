@@ -22,7 +22,8 @@ from ops.pipeline_adapter import (
 from ops.position_guardian import PositionGuardian
 from ops.quotes import make_yfinance_quote_source
 from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
-from ops.universe import build_universe
+from ops.universe import Candidate, build_universe
+from ops.universe.earnings import EarningsHit
 
 
 @click.group()
@@ -68,12 +69,18 @@ def notify_once(journal_path: str | None) -> None:
               help="Use a stub pipeline (no LLM calls) — defaults to HOLD")
 @click.option("--stub-pipeline-buy", multiple=True,
               help="Symbol(s) the stub pipeline should label BUY. Implies --stub-pipeline.")
+@click.option("--force-candidate", "force_candidates", multiple=True,
+              help="Smoke-testing only: inject SYMBOL into the candidate list at its "
+                   "real quote, bypassing the earnings/liquidity universe filters. "
+                   "Guardrails still apply — a deny-listed symbol is REJECTED at the "
+                   "broker boundary, which is the point of forcing it.")
 def decide_once(
     as_of: datetime,
     journal_path: str | None,
     starting_cash: str,
     stub_pipeline: bool,
     stub_pipeline_buy: tuple[str, ...],
+    force_candidates: tuple[str, ...],
 ) -> None:
     """Run a single decision/fill/stop-check pass."""
     asof_date = as_of.date()
@@ -99,6 +106,31 @@ def decide_once(
                    f"{c.earnings.eps_estimate})")
     click.echo("")
 
+    # Quote source — uses yfinance with 60s TTL
+    quote_source = make_yfinance_quote_source()
+
+    # Forced candidates (smoke testing): bypass the universe filters, never
+    # the guardrails — a deny-listed forced symbol must be REJECTED below.
+    present = {c.symbol for c in candidates}
+    for sym in force_candidates:
+        sym = sym.upper()
+        if sym in present:
+            continue
+        price = quote_source(sym)
+        candidates.append(Candidate(
+            symbol=sym,
+            earnings=EarningsHit(
+                symbol=sym, report_date=asof_date,
+                eps_actual=Decimal("0"), eps_estimate=Decimal("0"),
+                revenue_actual=None, revenue_estimate=None,
+                eps_beat=False, revenue_beat=None,
+            ),
+            last_price=price,
+            avg_dollar_volume_20d=Decimal("0"),
+        ))
+        present.add(sym)
+        click.echo(f"## Forced candidate (smoke): {sym} @ ${price}")
+
     if not candidates:
         click.echo("0 candidates → 0 BUY orders. Guardian: skipped.")
         return
@@ -109,9 +141,6 @@ def decide_once(
         pipeline = StubPipelineAdapter(decisions)
     else:
         pipeline = TradingAgentsPipelineAdapter()
-
-    # Quote source — uses yfinance with 60s TTL
-    quote_source = make_yfinance_quote_source()
 
     # Broker
     guarded = build_guarded_paper_broker(

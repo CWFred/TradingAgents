@@ -43,6 +43,62 @@ def test_decide_once_happy_path(tmp_path):
     assert fills[0]["symbol"] == "AAPL"
 
 
+def test_force_candidate_injects_past_empty_universe(tmp_path):
+    """--force-candidate makes a symbol tradeable for the smoke test even when
+    the real universe (earnings filter) is empty."""
+    journal_path = str(tmp_path / "j.sqlite")
+    runner = CliRunner()
+    with patch("ops.cli.build_universe", return_value=[]), \
+         patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
+        result = runner.invoke(cli, [
+            "decide-once", "--date", "2026-06-30",
+            "--journal", journal_path,
+            "--force-candidate", "AAPL", "--stub-pipeline-buy", "AAPL",
+        ])
+    assert result.exit_code == 0, result.output
+    assert "FILLED" in result.output
+    from ops.journal import Journal
+    fills = Journal(journal_path).read_fills()
+    assert len(fills) == 1
+    assert fills[0]["symbol"] == "AAPL"
+
+
+def test_force_candidate_does_not_bypass_deny_list_rule(tmp_path):
+    """A forced deny-listed symbol reaches GuardedBroker and is REJECTED by
+    DenyListRule — the guardrail demo. No fill may be journaled."""
+    journal_path = str(tmp_path / "j.sqlite")
+    runner = CliRunner()
+    for sym in ("SPOT", "TQQQ"):
+        with patch("ops.cli.build_universe", return_value=[]), \
+             patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
+            result = runner.invoke(cli, [
+                "decide-once", "--date", "2026-06-30",
+                "--journal", journal_path,
+                "--force-candidate", sym, "--stub-pipeline-buy", sym,
+            ])
+        assert result.exit_code == 0, result.output
+        assert "REJECTED" in result.output, result.output
+        assert "DenyListRule" in result.output, result.output
+    from ops.journal import Journal
+    assert Journal(journal_path).read_fills() == []
+
+
+def test_force_candidate_ignored_when_already_in_universe(tmp_path):
+    """Forcing a symbol the universe already produced must not duplicate it."""
+    journal_path = str(tmp_path / "j.sqlite")
+    runner = CliRunner()
+    with patch("ops.cli.build_universe", return_value=[_candidate("AAPL")]), \
+         patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
+        result = runner.invoke(cli, [
+            "decide-once", "--date", "2026-06-30",
+            "--journal", journal_path,
+            "--force-candidate", "AAPL", "--stub-pipeline-buy", "AAPL",
+        ])
+    assert result.exit_code == 0, result.output
+    from ops.journal import Journal
+    assert len(Journal(journal_path).read_fills()) == 1
+
+
 def test_decide_once_with_no_candidates(tmp_path):
     runner = CliRunner()
     with patch("ops.cli.build_universe", return_value=[]):
