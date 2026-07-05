@@ -5,15 +5,18 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from ops import events
 from ops.journal import Journal
 
-MARKER_KIND = "broker_mode_live"
+# Kept as a module alias for existing importers; the canonical constant
+# lives in ops.events with the other kind contracts.
+MARKER_KIND = events.KIND_BROKER_MODE_LIVE
 
 
 def record_flip_marker(journal: Journal) -> bool:
     if journal.first_event_at(MARKER_KIND) is not None:
         return False
-    journal.record_event(MARKER_KIND, {"note": "paper->robinhood flip"})
+    journal.record_event(MARKER_KIND, events.broker_mode_live_payload())
     return True
 
 
@@ -34,6 +37,6 @@ def count_live_buy_fills(journal: Journal) -> int:
     if epoch is None:
         return 0
     return journal.count_events(
-        "fill", since=epoch,
+        events.KIND_FILL, since=epoch,
         payload_equals={"side": "BUY", "broker_mode": "robinhood"},
     )

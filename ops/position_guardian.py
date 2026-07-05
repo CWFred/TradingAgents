@@ -5,10 +5,12 @@ if the position is at or past the per_position_stop_pct threshold. This is
 the single-pass variant; Plan 3 will wrap it in a background-thread loop."""
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
+from ops import events
 from ops.broker.base import BrokerError, QuoteUnavailable
 from ops.broker.guarded import GuardedBroker
 from ops.config import OpsConfig
@@ -55,18 +57,29 @@ class PositionGuardian:
         # _wire and check_stops_once is called every 60s by the scheduler.
         self._consecutive_blind_passes = 0
         self._blind_alarm_active = False
+        # Liveness signal for the dead-man's switch (A1.3): monotonic time
+        # of the most recent pass START. None until the first pass, so a
+        # never-scheduled guardian correctly looks dead to the heartbeat.
+        self.last_pass_started_at: float | None = None
 
     def check_stops_once(self) -> list[StopAction]:
         """Scheduler-safe wrapper: any unexpected exception is journaled
         as guardian_check_error and swallowed, so the APScheduler job
         keeps running. The guardian is the last line of defence on real
         money — a silent crash here would leave positions unprotected."""
+        # FIRST statement, before the try and before the market-hours gate:
+        # the heartbeat's liveness question is "is this loop being
+        # scheduled?", which overnight/weekend and even crashing passes
+        # still answer yes to — only a wedged or dead loop must look dead.
+        self.last_pass_started_at = time.monotonic()
         try:
             return self._check_stops_once_impl()
         except Exception as exc:
             self._journal.record_event(
-                "guardian_check_error",
-                {"error": f"{type(exc).__name__}: {exc}"},
+                events.KIND_GUARDIAN_CHECK_ERROR,
+                events.guardian_check_error_payload(
+                    error=f"{type(exc).__name__}: {exc}",
+                ),
             )
             return []
 
@@ -88,12 +101,12 @@ class PositionGuardian:
                 # minute).
                 quote_failures += 1
                 self._broker.journal.record_event(
-                    "quote_unavailable",
-                    {
-                        "symbol": pos.symbol,
-                        "context": "guardian_stop_check",
-                        "error": str(exc),
-                    },
+                    events.KIND_QUOTE_UNAVAILABLE,
+                    events.quote_unavailable_payload(
+                        symbol=pos.symbol,
+                        context="guardian_stop_check",
+                        error=str(exc),
+                    ),
                 )
                 actions.append(StopAction(
                     symbol=pos.symbol,
@@ -128,13 +141,13 @@ class PositionGuardian:
                 self._broker.close_position(pos.symbol)
             except BrokerError as exc:
                 self._broker.journal.record_event(
-                    "stop_failed",
-                    {
-                        "symbol": pos.symbol, "entry": str(pos.avg_entry_price),
-                        "current": str(current), "pct": str(pct),
-                        "mode": mode, "threshold_repr": threshold_repr,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    },
+                    events.KIND_STOP_FAILED,
+                    events.stop_failed_payload(
+                        symbol=pos.symbol, entry=pos.avg_entry_price,
+                        current=current, pct=pct,
+                        mode=mode, threshold_repr=threshold_repr,
+                        error=f"{type(exc).__name__}: {exc}",
+                    ),
                 )
                 actions.append(StopAction(
                     symbol=pos.symbol, entry=pos.avg_entry_price,
@@ -144,12 +157,12 @@ class PositionGuardian:
                 continue
 
             self._broker.journal.record_event(
-                "stop_hit",
-                {
-                    "symbol": pos.symbol, "entry": str(pos.avg_entry_price),
-                    "current": str(current), "pct": str(pct),
-                    "mode": mode, "threshold_repr": threshold_repr,
-                },
+                events.KIND_STOP_HIT,
+                events.stop_hit_payload(
+                    symbol=pos.symbol, entry=pos.avg_entry_price,
+                    current=current, pct=pct,
+                    mode=mode, threshold_repr=threshold_repr,
+                ),
             )
             actions.append(StopAction(
                 symbol=pos.symbol, entry=pos.avg_entry_price,
@@ -185,8 +198,10 @@ class PositionGuardian:
             ):
                 self._blind_alarm_active = True
                 self._journal.record_event(
-                    "guardian_blind",
-                    {"consecutive_failed_passes": self._consecutive_blind_passes},
+                    events.KIND_GUARDIAN_BLIND,
+                    events.guardian_blind_payload(
+                        consecutive_failed_passes=self._consecutive_blind_passes,
+                    ),
                 )
         else:
             self._consecutive_blind_passes = 0
@@ -197,7 +212,7 @@ class PositionGuardian:
 
         from ops.trading_time import trading_week_start
 
-        tripped = self._journal.has_event_since_last_monday("kill_switch")
+        tripped = self._journal.has_event_since_last_monday(events.KIND_KILL_SWITCH)
         if not tripped:
             # Baseline must be from THIS week. A stale snapshot (guardian-only
             # mode after a reconcile halt, or a long-idle restart) would
@@ -223,14 +238,14 @@ class PositionGuardian:
             if weekly_pct > self._cfg.weekly_drawdown_pct:
                 return
             self._journal.record_event(
-                "kill_switch",
-                {
-                    "mode": self._broker_mode,
-                    "equity_now": str(equity_now),
-                    "equity_open_week": str(snap.equity),
-                    "pct": str(weekly_pct),
-                    "threshold": str(self._cfg.weekly_drawdown_pct),
-                },
+                events.KIND_KILL_SWITCH,
+                events.kill_switch_payload(
+                    mode=self._broker_mode,
+                    equity_now=equity_now,
+                    equity_open_week=snap.equity,
+                    pct=weekly_pct,
+                    threshold=self._cfg.weekly_drawdown_pct,
+                ),
             )
         # Tripped this week — now or on an earlier pass. Paper mode sweeps
         # any positions still open, so an auto-close interrupted by a crash
@@ -242,8 +257,11 @@ class PositionGuardian:
                     self._broker.close_position(pos.symbol)
                 except Exception as exc:
                     self._journal.record_event(
-                        "kill_switch_close_failed",
-                        {"symbol": pos.symbol, "error": f"{type(exc).__name__}: {exc}"},
+                        events.KIND_KILL_SWITCH_CLOSE_FAILED,
+                        events.kill_switch_close_failed_payload(
+                            symbol=pos.symbol,
+                            error=f"{type(exc).__name__}: {exc}",
+                        ),
                     )
 
     def _maybe_trip_daily_halt(self) -> None:
@@ -257,7 +275,7 @@ class PositionGuardian:
 
         from ops.trading_time import trading_day_start
 
-        if self._journal.has_event_today("daily_halt"):
+        if self._journal.has_event_today(events.KIND_DAILY_HALT):
             return
         now = datetime.now(timezone.utc)
         start_of_day = trading_day_start(now)
@@ -279,12 +297,12 @@ class PositionGuardian:
         if daily_pct > self._cfg.daily_drawdown_pct:
             return
         self._journal.record_event(
-            "daily_halt",
-            {
-                "mode": self._broker_mode,
-                "equity_now": str(equity_now),
-                "equity_open_day": str(snap.equity),
-                "pct": str(daily_pct),
-                "threshold": str(self._cfg.daily_drawdown_pct),
-            },
+            events.KIND_DAILY_HALT,
+            events.daily_halt_payload(
+                mode=self._broker_mode,
+                equity_now=equity_now,
+                equity_open_day=snap.equity,
+                pct=daily_pct,
+                threshold=self._cfg.daily_drawdown_pct,
+            ),
         )

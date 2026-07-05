@@ -388,3 +388,28 @@ def test_count_events_rejects_unsafe_payload_keys(tmp_path):
     j = Journal(str(tmp_path / "j.sqlite"))
     with pytest.raises(ValueError):
         j.count_events("fill", payload_equals={"side') OR 1=1 --": "BUY"})
+
+
+def test_last_event_returns_most_recent_of_kind(tmp_path):
+    """`ops status` (A4) reports the last service_started/service_stopping
+    and the last anomaly of each kind — a single-row indexed query, not a
+    Python-side scan of read_events()."""
+    j = Journal(str(tmp_path / "j.sqlite"))
+    assert j.last_event("service_started") is None
+    j.record_event("service_started", {"pid": 1})
+    j.record_event("other_kind", {"x": 1})
+    j.record_event("service_started", {"pid": 2})
+    last = j.last_event("service_started")
+    assert last is not None
+    assert last["kind"] == "service_started"
+    assert last["payload"] == {"pid": 2}
+    assert isinstance(last["at"], datetime) and last["at"].tzinfo is not None
+
+
+def test_journal_path_property(tmp_path):
+    """`ops status` prints the journal it actually opened (which may be a
+    --journal override, not config.journal_path), so the path must be
+    readable off the Journal itself."""
+    p = str(tmp_path / "j.sqlite")
+    j = Journal(p)
+    assert j.path == p

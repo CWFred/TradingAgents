@@ -17,6 +17,11 @@ class NotifyConfig:
     smtp_password: str | None = None
     smtp_from: str | None = None
     smtp_to: str | None = None
+    # Dead-man's switch (A1.3): a healthchecks.io-style URL pinged while
+    # the guardian loop is alive, so the EXTERNAL service alerts when pings
+    # stop. None = feature off. Lives here (not OpsConfig) because it is
+    # delivery configuration, not a risk parameter.
+    heartbeat_url: str | None = None
 
 
 def _env_bool(name: str) -> bool:
@@ -47,4 +52,5 @@ def load_notify_config() -> NotifyConfig:
         smtp_password=os.environ.get("OPS_SMTP_PASSWORD"),
         smtp_from=os.environ.get("OPS_SMTP_FROM"),
         smtp_to=os.environ.get("OPS_SMTP_TO"),
+        heartbeat_url=os.environ.get("OPS_HEARTBEAT_URL"),
     )

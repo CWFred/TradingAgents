@@ -5,8 +5,8 @@ supported by this implementation.
 """
 from __future__ import annotations
 
-import ssl
 import smtplib
+import ssl
 from email.message import EmailMessage
 
 from ops.notify.config import NotifyConfig

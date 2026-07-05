@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from ops import events
 from ops.trading_time import TRADING_TZ, trading_day_start
 
 
@@ -16,7 +17,7 @@ def emit_daily_summary(journal, broker, calendar=None, *, now: datetime | None =
         when.astimezone(TRADING_TZ).date()
     ):
         return False
-    if journal.has_event_today("daily_summary", now=when):
+    if journal.has_event_today(events.KIND_DAILY_SUMMARY, now=when):
         return False
 
     equity = broker.get_equity()
@@ -42,11 +43,13 @@ def emit_daily_summary(journal, broker, calendar=None, *, now: datetime | None =
         *[f"  {p.symbol}: qty {p.quantity} entry ${p.avg_entry_price}"
           for p in positions],
     ]
-    payload = {
-        "headline": headline,
-        "body": "\n".join(lines),
-        "equity": str(equity),
-        "n_fills_today": len(fills_today),
-    }
-    journal.record_event("daily_summary", payload)
+    journal.record_event(
+        events.KIND_DAILY_SUMMARY,
+        events.daily_summary_payload(
+            headline=headline,
+            body="\n".join(lines),
+            equity=equity,
+            n_fills_today=len(fills_today),
+        ),
+    )
     return True

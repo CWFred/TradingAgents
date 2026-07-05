@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tradingagents.ops</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{{VENV_PYTHON}}</string>
+		<string>-m</string>
+		<string>ops.cli</string>
+		<string>run</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>{{REPO_ROOT}}</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- Add OPS_* configuration here (OPS_JOURNAL_PATH, OPS_NOTIFY_*,
+		     OPS_HEARTBEAT_URL, ...). OPS_BROKER_MODE is deliberately NOT
+		     set: paper is the default, and the first live flip must go
+		     through the interactive ritual (`ops run` at a real terminal),
+		     never through a supervisor. -->
+		<key>OPS_NOTIFY_ENABLED</key>
+		<string>0</string>
+	</dict>
+	<!-- Restart on crash or nonzero exit; ThrottleInterval keeps exit
+	     code 3 (broker unreachable) from hot-looping. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>Crashed</key>
+		<true/>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>{{LOG_DIR}}/ops.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>{{LOG_DIR}}/ops.err.log</string>
+</dict>
+</plist>

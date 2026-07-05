@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from ops import events
 from ops.broker.base import (
     Broker,
     BrokerError,
@@ -144,16 +145,16 @@ class RobinhoodBroker(Broker):
         if ack.status == "filled" and ack.quantity is not None and ack.fill_price is not None:
             return
         self._journal.record_event(
-            "order_not_filled",
-            {
-                "order_id": ack.order_id,
-                "client_order_id": ack.client_order_id,
-                "symbol": ack.symbol,
-                "side": ack.side.value,
-                "status": ack.status,
-                "quantity": str(ack.quantity) if ack.quantity is not None else None,
-                "fill_price": str(ack.fill_price) if ack.fill_price is not None else None,
-            },
+            events.KIND_ORDER_NOT_FILLED,
+            events.order_not_filled_payload(
+                order_id=ack.order_id,
+                client_order_id=ack.client_order_id,
+                symbol=ack.symbol,
+                side=ack.side.value,
+                status=ack.status,
+                quantity=ack.quantity,
+                fill_price=ack.fill_price,
+            ),
         )
         raise BrokerError(
             f"order {ack.order_id} not confirmed filled "

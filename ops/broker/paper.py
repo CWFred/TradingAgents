@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
+from ops import events
 from ops.broker.base import Broker, InsufficientFunds, NoSuchPosition
 from ops.broker.types import Fill, Order, Position, Side
 from ops.journal import Journal
@@ -65,13 +66,13 @@ class PaperBroker(Broker):
             else:
                 notional = qty * price
                 journal.record_event(
-                    "journal_replay_fallback",
-                    {
-                        "client_order_id": f["client_order_id"],
-                        "symbol": symbol,
-                        "side": side,
-                        "reason": "no matching order row; falling back to qty*price",
-                    },
+                    events.KIND_JOURNAL_REPLAY_FALLBACK,
+                    events.journal_replay_fallback_payload(
+                        client_order_id=f["client_order_id"],
+                        symbol=symbol,
+                        side=side,
+                        reason="no matching order row; falling back to qty*price",
+                    ),
                 )
             if side == Side.BUY.value:
                 cost = notional
@@ -100,14 +101,14 @@ class PaperBroker(Broker):
                     # cash effect cannot be reconstructed without a position
                     # to sell from. In production this triggers reconciliation.
                     journal.record_event(
-                        "journal_replay_orphan_sell",
-                        {
-                            "client_order_id": f["client_order_id"],
-                            "symbol": symbol,
-                            "quantity": str(qty),
-                            "price": str(price),
-                            "reason": "SELL replayed with no matching prior BUY position",
-                        },
+                        events.KIND_JOURNAL_REPLAY_ORPHAN_SELL,
+                        events.journal_replay_orphan_sell_payload(
+                            client_order_id=f["client_order_id"],
+                            symbol=symbol,
+                            quantity=qty,
+                            price=price,
+                            reason="SELL replayed with no matching prior BUY position",
+                        ),
                     )
                     continue
                 proceeds = notional

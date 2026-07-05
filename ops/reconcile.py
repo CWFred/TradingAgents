@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from ops import events
 from ops.journal import Journal
 
 
@@ -90,9 +91,9 @@ def reconcile(*, journal: Journal, broker: Any, broker_mode: str) -> ReconcileRe
 def emit_reconcile_events(journal: Journal, result: ReconcileResult) -> None:
     if result.diffs:
         journal.record_event(
-            "inconsistency",
-            {
-                "diffs": [
+            events.KIND_INCONSISTENCY,
+            events.inconsistency_payload(
+                diffs=[
                     {
                         "symbol": d.symbol,
                         "journal_qty": str(d.journal_qty) if d.journal_qty is not None else None,
@@ -101,13 +102,15 @@ def emit_reconcile_events(journal: Journal, result: ReconcileResult) -> None:
                     }
                     for d in result.diffs
                 ],
-                "cash_journal": str(result.cash_journal),
-                "cash_broker": str(result.cash_broker),
-                "cash_diff": str(result.cash_diff),
-            },
+                cash_journal=result.cash_journal,
+                cash_broker=result.cash_broker,
+                cash_diff=result.cash_diff,
+            ),
         )
     if result.positions_recovered_without_stops:
         journal.record_event(
-            "positions_recovered_without_stops",
-            {"symbols": result.positions_recovered_without_stops},
+            events.KIND_POSITIONS_RECOVERED_WITHOUT_STOPS,
+            events.positions_recovered_without_stops_payload(
+                symbols=result.positions_recovered_without_stops,
+            ),
         )

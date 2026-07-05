@@ -1,9 +1,7 @@
-from decimal import Decimal
 
-from ops.config import OpsConfig
 from ops.journal import Journal
 from ops.live_gate import MARKER_KIND, record_flip_marker
-from ops.main import _build_dispatcher, _notify_tick, _daily_summary_tick
+from ops.main import _build_dispatcher, _daily_summary_tick, _notify_tick
 
 
 def test_build_dispatcher_returns_dispatcher(tmp_path, monkeypatch):

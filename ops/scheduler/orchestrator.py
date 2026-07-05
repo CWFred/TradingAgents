@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from ops import events
 from ops.broker.base import BrokerError, OrderRejected
 from ops.live_gate import count_live_buy_fills
 from ops.trading_time import trading_day_start, trading_week_start
@@ -27,8 +28,10 @@ class Orchestrator:
             self._tick_impl()
         except Exception as exc:
             self._journal.record_event(
-                "orchestrator_tick_error",
-                {"error": f"{type(exc).__name__}: {exc}"},
+                events.KIND_ORCHESTRATOR_TICK_ERROR,
+                events.orchestrator_tick_error_payload(
+                    error=f"{type(exc).__name__}: {exc}",
+                ),
             )
 
     def _tick_impl(self) -> None:
@@ -98,7 +101,7 @@ class Orchestrator:
             )
 
     def _is_daily_halted(self) -> bool:
-        return self._journal.has_event_today("daily_halt")
+        return self._journal.has_event_today(events.KIND_DAILY_HALT)
 
     def _is_weekly_halted(self) -> bool:
-        return self._journal.has_event_since_last_monday("kill_switch")
+        return self._journal.has_event_since_last_monday(events.KIND_KILL_SWITCH)

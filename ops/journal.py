@@ -147,6 +147,14 @@ class Journal:
             if "stop_loss_price" not in cols:
                 self._conn.execute("ALTER TABLE fills ADD COLUMN stop_loss_price TEXT")
 
+    @property
+    def path(self) -> str:
+        """The path this journal was opened with. `ops status` reports the
+        journal it actually opened (a --journal override may differ from
+        config.journal_path), so the path must be readable off the
+        instance."""
+        return self._path
+
     def record_event(self, kind: str, payload: dict[str, Any]) -> None:
         with self._lock:
             self._conn.execute(
@@ -207,6 +215,25 @@ class Journal:
                 (kind,),
             ).fetchone()
         return _from_iso(row[0]) if row is not None else None
+
+    def last_event(self, kind: str) -> dict[str, Any] | None:
+        """Most recent event of `kind` (by insertion id), or None.
+
+        Single indexed row lookup — `ops status` calls this per section
+        (service lifecycle, anomaly kinds) and must not scan the whole
+        events table Python-side."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT at, kind, payload FROM events WHERE kind = ?"
+                " ORDER BY id DESC LIMIT 1",
+                (kind,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "at": _from_iso(row[0]), "kind": row[1],
+            "payload": json.loads(row[2]),
+        }
 
     def count_events(
         self, kind: str, *, since: datetime | None = None,

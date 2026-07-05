@@ -8,6 +8,7 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
+from ops import events
 from ops.journal import Journal
 from ops.notify.policy import POLICY, PolicyEntry, render
 from ops.notify.transport import Transport
@@ -66,8 +67,10 @@ class NotifyDispatcher:
             if stale_id is not None and stale_id > cursor:
                 self._journal.set_cursor(self._consumer, stale_id)
                 self._journal.record_event(
-                    "notify_cursor_initialized",
-                    {"consumer": self._consumer, "skipped_through": stale_id},
+                    events.KIND_NOTIFY_CURSOR_INITIALIZED,
+                    events.notify_cursor_initialized_payload(
+                        consumer=self._consumer, skipped_through=stale_id,
+                    ),
                 )
                 cursor = stale_id
         sent = 0
@@ -79,9 +82,11 @@ class NotifyDispatcher:
                 # original exception rides on __cause__ (see _handle).
                 cause_name = type(exc.__cause__).__name__ if exc.__cause__ else "unknown"
                 self._journal.record_event(
-                    "notify_render_error",
-                    {"event_id": ev["id"], "kind": ev["kind"],
-                     "error_type": cause_name},
+                    events.KIND_NOTIFY_RENDER_ERROR,
+                    events.notify_render_error_payload(
+                        event_id=ev["id"], kind=ev["kind"],
+                        error_type=cause_name,
+                    ),
                 )
                 logger.warning(
                     "notify render error at event %s (%s): %s",
@@ -90,9 +95,11 @@ class NotifyDispatcher:
                 self._journal.set_cursor(self._consumer, ev["id"])
             except Exception as exc:  # transport failure — hold the cursor
                 self._journal.record_event(
-                    "notify_dispatch_error",
-                    {"event_id": ev["id"], "kind": ev["kind"],
-                     "error_type": type(exc).__name__},
+                    events.KIND_NOTIFY_DISPATCH_ERROR,
+                    events.notify_dispatch_error_payload(
+                        event_id=ev["id"], kind=ev["kind"],
+                        error_type=type(exc).__name__,
+                    ),
                 )
                 logger.warning(
                     "notify dispatch failed at event %s (%s): %s",
@@ -102,9 +109,11 @@ class NotifyDispatcher:
                 self._fail_counts[ev["id"]] = self._fail_counts.get(ev["id"], 0) + 1
                 if self._fail_counts[ev["id"]] >= _MAX_TRANSPORT_RETRIES:
                     self._journal.record_event(
-                        "notify_event_skipped",
-                        {"event_id": ev["id"], "kind": ev["kind"],
-                         "consecutive_failures": self._fail_counts[ev["id"]]},
+                        events.KIND_NOTIFY_EVENT_SKIPPED,
+                        events.notify_event_skipped_payload(
+                            event_id=ev["id"], kind=ev["kind"],
+                            consecutive_failures=self._fail_counts[ev["id"]],
+                        ),
                     )
                     logger.warning(
                         "notify event %s (%s) skipped after %d consecutive failures",

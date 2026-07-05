@@ -35,3 +35,15 @@ def test_non_numeric_smtp_port_raises_with_var_name(monkeypatch):
     monkeypatch.setenv("OPS_SMTP_PORT", "not-a-port")
     with pytest.raises(ValueError, match="OPS_SMTP_PORT"):
         load_notify_config()
+
+
+def test_heartbeat_url_default_none(monkeypatch):
+    """A1.3: the dead-man's switch is off unless OPS_HEARTBEAT_URL is set."""
+    monkeypatch.delenv("OPS_HEARTBEAT_URL", raising=False)
+    assert NotifyConfig().heartbeat_url is None
+    assert load_notify_config().heartbeat_url is None
+
+
+def test_heartbeat_url_from_env(monkeypatch):
+    monkeypatch.setenv("OPS_HEARTBEAT_URL", "https://hc-ping.com/abc123")
+    assert load_notify_config().heartbeat_url == "https://hc-ping.com/abc123"

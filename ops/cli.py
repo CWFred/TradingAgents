@@ -39,6 +39,50 @@ def run():
     sys.exit(_run())
 
 
+@cli.command("install-service")
+@click.option("--output", "output_path",
+              default="~/Library/LaunchAgents/com.tradingagents.ops.plist",
+              show_default=True, type=click.Path(dir_okay=False),
+              help="Where to write the rendered launchd plist")
+@click.option("--log-dir", "log_dir",
+              default="~/.local/state/tradingagents/logs", show_default=True,
+              help="Directory for the service's stdout/stderr logs")
+def install_service(output_path: str, log_dir: str) -> None:
+    """Render the launchd agent plist and print the load command.
+
+    Writes the file only — never invokes launchctl. Loading the agent
+    stays an explicit user action, so a supervisor is never installed as
+    a side effect of running a command."""
+    import os
+    import sys
+    from pathlib import Path
+
+    from ops.deploy import render_launchd_plist
+
+    repo_root = str(Path(__file__).resolve().parents[1])
+    log_dir = os.path.abspath(os.path.expanduser(log_dir))
+    rendered = render_launchd_plist(
+        repo_root=repo_root,
+        venv_python=sys.executable,
+        log_dir=log_dir,
+    )
+    output = Path(os.path.abspath(os.path.expanduser(output_path)))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    output.write_text(rendered)
+    click.echo(f"Wrote {output}")
+    click.echo(f"Logs will go to {log_dir}/")
+    click.echo("To load the service (not done automatically), run:")
+    click.echo(f"  launchctl bootstrap gui/$(id -u) {output}")
+    click.echo("To unload it later:")
+    click.echo(f"  launchctl bootout gui/$(id -u) {output}")
+    click.echo(
+        "NOTE: launchd cannot start jobs on a sleeping laptop. Consider a "
+        "wake schedule (your call to apply):\n"
+        "  sudo pmset repeat wakeorpoweron MTWRF 09:20:00"
+    )
+
+
 @cli.command("notify-once")
 @click.option("--journal", "journal_path", default=None,
               type=click.Path(dir_okay=False),
@@ -52,6 +96,28 @@ def notify_once(journal_path: str | None) -> None:
     try:
         n = _build_dispatcher(journal).dispatch_once()
         click.echo(f"dispatched {n} message(s)")
+    finally:
+        journal.close()
+
+
+@cli.command("status")
+@click.option("--journal", "journal_path", default=None,
+              type=click.Path(dir_okay=False),
+              help="SQLite journal path (default: the configured ops journal path)")
+def status(journal_path: str | None) -> None:
+    """Print a journal-only snapshot of the trading system.
+
+    Reads ONLY the journal (WAL concurrent reads) — no broker, no MCP,
+    no quotes — so it is always safe to run beside the live service and
+    works when the broker is unreachable. Positions/cash are the journal
+    replay ("journal view"); reconciliation is what compares that to
+    live truth."""
+    from ops.status import build_status, format_status
+
+    journal_path = journal_path or load_config().journal_path
+    journal = Journal(journal_path)
+    try:
+        click.echo(format_status(build_status(journal, load_config())))
     finally:
         journal.close()
 

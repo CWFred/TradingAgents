@@ -6,13 +6,22 @@ scheduler drains in-flight jobs, journal closes cleanly. Exit codes:
 - 2: reconciliation-halted shutdown (journal has inconsistency events)
 - 3: startup-halted — broker unreachable while building/reconciling
      (journal has broker_unreachable + startup_halted events)
+- 4: live-flip ritual refused — first robinhood start without a TTY, or
+     the typed equity confirmation did not match (journal has a
+     live_flip_refused event); nothing was scheduled
+
+Every session brackets itself with service_started / service_stopping
+journal events (the uptime record used by the graduation evaluation);
+service_stopping carries the exit code.
 """
 from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -23,17 +32,18 @@ from apscheduler.triggers.interval import IntervalTrigger
 from ops import (
     build_guarded_paper_broker_from_journal,
     build_guarded_robinhood_broker,
+    events,
 )
 from ops.broker.base import BrokerError
 from ops.config import OpsConfig, load_config
 from ops.journal import Journal
-from ops.live_gate import record_flip_marker
+from ops.live_gate import flip_epoch, record_flip_marker
 from ops.notify.config import load_notify_config
 from ops.notify.dispatcher import NotifyDispatcher
 from ops.notify.email import build_email_transport
 from ops.notify.push import build_push_transport
-from ops.notify.transport import DisabledTransport
 from ops.notify.summary import emit_daily_summary
+from ops.notify.transport import DisabledTransport
 from ops.position_guardian import PositionGuardian
 from ops.reconcile import ReconcileResult, emit_reconcile_events, reconcile
 from ops.scheduler.market_calendar import MarketCalendar
@@ -64,6 +74,25 @@ def _resolve_and_announce_journal_path(config: OpsConfig) -> str:
             file=sys.stderr,
         )
     return resolved
+
+
+def _git_sha() -> str | None:
+    """Short git sha of the running checkout, or None.
+
+    Best-effort provenance for the service_started uptime record. Any
+    failure (no git, not a checkout, slow disk) is swallowed — startup
+    must never depend on git being present or fast."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            capture_output=True, text=True, timeout=2,
+        )
+    except Exception:  # noqa: BLE001 - provenance is strictly optional
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
 
 
 def _start_of_day_equity(journal: Journal) -> Decimal:
@@ -148,10 +177,9 @@ def _build_broker(config: OpsConfig, journal: Journal):
             start_of_day_equity=_sod, start_of_week_equity=_sow,
         )
         _ensure_live_baseline(journal, broker)
-        # Startup is single-threaded here, so recording the flip marker
-        # right after the live baseline (and before any scheduled job can
-        # run) is race-free.
-        record_flip_marker(journal)
+        # The flip marker is deliberately NOT recorded here: it must mean
+        # "the live-flip ritual passed" (A5), and _build_broker also runs
+        # on attempts the ritual goes on to refuse. See _live_flip_ritual.
         return broker
     _ensure_paper_seed(journal, config)
     return build_guarded_paper_broker_from_journal(
@@ -160,6 +188,61 @@ def _build_broker(config: OpsConfig, journal: Journal):
         starting_cash=Decimal("0"),
         start_of_day_equity=_sod, start_of_week_equity=_sow,
     )
+
+
+class LiveFlipRefused(Exception):
+    """First live start was not confirmed — see _live_flip_ritual."""
+
+
+def _live_flip_ritual(journal: Journal, broker, config: OpsConfig) -> None:
+    """First-live confirmation gate (A5, graduation criterion #4).
+
+    OPS_BROKER_MODE=robinhood is one stale shell export away from live
+    trading, so the FIRST live start requires a human at a terminal to
+    type the account equity back verbatim. Once the flip marker exists the
+    ritual is skipped entirely — restarts must be unattended (launchd) —
+    and the marker is recorded HERE, only after the ritual passes, so a
+    refused attempt can never satisfy "marker exists" later.
+
+    Raises LiveFlipRefused (caller exits 4, schedules nothing) on: non-TTY
+    stdin (a supervisor must never perform the first flip), EOF, or a typed
+    figure that does not exactly match the printed Decimal. Startup is
+    single-threaded here, so recording the marker before any scheduled job
+    can run is race-free."""
+    if flip_epoch(journal) is not None:
+        return
+    if not sys.stdin.isatty():
+        journal.record_event(
+            events.KIND_LIVE_FLIP_REFUSED,
+            events.live_flip_refused_payload(reason="non_tty"),
+        )
+        raise LiveFlipRefused(
+            "first live start requires an interactive terminal; "
+            "run `ops run` by hand once — restarts are then unattended"
+        )
+    equity = broker.get_equity()
+    expected = str(equity)
+    print("FIRST LIVE START — broker mode is 'robinhood' (real money).")
+    print(f"Account equity: {expected}")
+    print(
+        f"Live gate: max ${config.live_max_position} per position for the "
+        f"first {config.live_fill_gate_count} live BUY fills."
+    )
+    try:
+        typed = input("Type the account equity exactly as printed to proceed: ")
+    except EOFError:
+        journal.record_event(
+            events.KIND_LIVE_FLIP_REFUSED,
+            events.live_flip_refused_payload(reason="eof"),
+        )
+        raise LiveFlipRefused("stdin closed before confirmation") from None
+    if typed.strip() != expected:
+        journal.record_event(
+            events.KIND_LIVE_FLIP_REFUSED,
+            events.live_flip_refused_payload(reason="equity_mismatch"),
+        )
+        raise LiveFlipRefused("typed equity did not match the printed figure")
+    record_flip_marker(journal)
 
 
 def _wire(broker, journal: Journal, config: OpsConfig):
@@ -186,7 +269,10 @@ def _wire(broker, journal: Journal, config: OpsConfig):
 
 def _emit_halt_events(journal: Journal, result: ReconcileResult) -> None:
     emit_reconcile_events(journal, result)
-    journal.record_event("startup_halted", {"reason": "reconciliation"})
+    journal.record_event(
+        events.KIND_STARTUP_HALTED,
+        events.startup_halted_payload(reason="reconciliation"),
+    )
 
 
 def _startup(config: OpsConfig, journal: Journal):
@@ -199,6 +285,10 @@ def _startup(config: OpsConfig, journal: Journal):
     BrokerError when it's unreachable; callers handle that distinctly
     from a reconciliation diff (see M6)."""
     broker = _build_broker(config, journal)
+    if config.broker_mode == "robinhood":
+        # Before reconcile/scheduling: nothing live may proceed until the
+        # first flip is confirmed (or the marker already exists).
+        _live_flip_ritual(journal, broker, config)
     orchestrator, guardian, calendar = _wire(broker, journal, config)
     result = reconcile(journal=journal, broker=broker, broker_mode=config.broker_mode)
     return broker, orchestrator, guardian, calendar, result
@@ -241,13 +331,81 @@ def _daily_summary_tick(journal: Journal, broker, calendar=None) -> None:
         emit_daily_summary(journal, broker, calendar=calendar)
     except Exception as exc:  # noqa: BLE001 - deliberately broad, see above
         journal.record_event(
-            "daily_summary_error", {"error": f"{type(exc).__name__}: {exc}"},
+            events.KIND_DAILY_SUMMARY_ERROR,
+            events.daily_summary_error_payload(
+                error=f"{type(exc).__name__}: {exc}",
+            ),
         )
+
+
+# Dead-man's switch tuning (A1.3). Staleness is 3x the guardian poll
+# interval: one slow pass must not flap the external check, but a loop
+# that has missed three consecutive polls is wedged and must look dead.
+_HEARTBEAT_STALENESS_S = 180.0
+_HEARTBEAT_ERROR_COOLDOWN_S = 600.0
+
+
+def _make_heartbeat_job(
+    *, guardian, journal: Journal, url: str,
+    http_get=None, clock=time.monotonic,
+):
+    """Build the heartbeat job: ping `url` only while the guardian loop is
+    demonstrably alive (last pass started < 180s ago on the monotonic
+    clock). The intended target is a healthchecks.io-style check that
+    alerts when pings STOP — the one alarm that fires when this process
+    cannot speak for itself.
+
+    Ping failures are swallowed (a monitoring outage must never disturb
+    trading) and journaled as heartbeat_error at most once per 10 minutes;
+    only the exception TYPE is journaled, since requests exception text
+    embeds the ping URL (a secret-bearing token). `http_get`/`clock` are
+    injected for tests, following the sleep_fn/clock_fn pattern from
+    ops.broker.mcp_client._await_fill."""
+    if http_get is None:
+        import requests
+
+        def http_get(u: str) -> None:
+            requests.get(u, timeout=5)
+
+    last_error_at: float | None = None
+
+    def _heartbeat() -> None:
+        nonlocal last_error_at
+        last_pass = guardian.last_pass_started_at
+        if last_pass is None or clock() - last_pass >= _HEARTBEAT_STALENESS_S:
+            return
+        try:
+            http_get(url)
+        except Exception as exc:  # noqa: BLE001 - monitoring must not disturb trading
+            now = clock()
+            if (last_error_at is None
+                    or now - last_error_at >= _HEARTBEAT_ERROR_COOLDOWN_S):
+                last_error_at = now
+                journal.record_event(
+                    events.KIND_HEARTBEAT_ERROR,
+                    events.heartbeat_error_payload(
+                        error_type=type(exc).__name__,
+                    ),
+                )
+
+    return _heartbeat
+
+
+def _build_heartbeat_job(guardian, journal: Journal):
+    """Heartbeat job per env config, or None when OPS_HEARTBEAT_URL is
+    unset (feature off — no job is ever registered)."""
+    cfg = load_notify_config()
+    if not cfg.heartbeat_url:
+        return None
+    return _make_heartbeat_job(
+        guardian=guardian, journal=journal, url=cfg.heartbeat_url,
+    )
 
 
 def _start_full_scheduler(
     orchestrator: Orchestrator, guardian: PositionGuardian,
     dispatcher: NotifyDispatcher, journal: Journal, broker,
+    calendar=None, heartbeat_job=None,
 ) -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone="America/New_York")
     sched.add_job(
@@ -270,12 +428,19 @@ def _start_full_scheduler(
         CronTrigger(hour=16, minute=5, day_of_week="mon-fri"),
         id="daily_summary", max_instances=1, misfire_grace_time=300,
     )
+    if heartbeat_job is not None:
+        sched.add_job(
+            heartbeat_job,
+            IntervalTrigger(seconds=60),
+            id="heartbeat", max_instances=1, misfire_grace_time=15,
+        )
     sched.start()
     return sched
 
 
 def _start_guardian_only(
     guardian: PositionGuardian, dispatcher: NotifyDispatcher,
+    heartbeat_job=None,
 ) -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone="America/New_York")
     sched.add_job(
@@ -288,6 +453,12 @@ def _start_guardian_only(
         IntervalTrigger(seconds=20),
         id="notify_poll", max_instances=1, misfire_grace_time=15,
     )
+    if heartbeat_job is not None:
+        sched.add_job(
+            heartbeat_job,
+            IntervalTrigger(seconds=60),
+            id="heartbeat", max_instances=1, misfire_grace_time=15,
+        )
     sched.start()
     return sched
 
@@ -302,9 +473,28 @@ def run() -> int:
     config = load_config()
     journal_path = _resolve_and_announce_journal_path(config)
     journal = Journal(journal_path)
+    # Every graceful return path below assigns exit_code before returning;
+    # 1 therefore means "crashed out through an unhandled exception" in the
+    # service_stopping uptime record (A1.2).
+    exit_code = 1
     try:
+        journal.record_event(
+            events.KIND_SERVICE_STARTED,
+            events.service_started_payload(
+                broker_mode=config.broker_mode,
+                journal_path=journal_path,
+                pid=os.getpid(),
+                git_sha=_git_sha(),
+            ),
+        )
         try:
             broker, orchestrator, guardian, calendar, result = _startup(config, journal)
+        except LiveFlipRefused as exc:
+            # live_flip_refused is already journaled (audit-only) by the
+            # ritual; nothing was scheduled.
+            print(f"Startup refused: {exc}", file=sys.stderr)
+            exit_code = 4
+            return exit_code
         except BrokerError as exc:
             # Do NOT journal str(exc): broker-connectivity exceptions can
             # embed credentials/hostnames. Only the exception type name is
@@ -312,15 +502,20 @@ def run() -> int:
             # same rationale as NotifyDispatcher.dispatch_once's
             # notify_dispatch_error sanitization.
             journal.record_event(
-                "broker_unreachable", {"error_type": type(exc).__name__},
+                events.KIND_BROKER_UNREACHABLE,
+                events.broker_unreachable_payload(error_type=type(exc).__name__),
             )
-            journal.record_event("startup_halted", {"reason": "broker_unreachable"})
+            journal.record_event(
+                events.KIND_STARTUP_HALTED,
+                events.startup_halted_payload(reason="broker_unreachable"),
+            )
             print(
                 f"Startup halted: broker unreachable ({exc}). "
                 "Check connectivity/credentials and restart.",
                 file=sys.stderr,
             )
-            return 3
+            exit_code = 3
+            return exit_code
         if result.positions_recovered_without_stops:
             print(
                 "WARNING: "
@@ -330,6 +525,7 @@ def run() -> int:
                 file=sys.stderr,
             )
         dispatcher = _build_dispatcher(journal)
+        heartbeat_job = _build_heartbeat_job(guardian, journal)
         if result.diffs:
             _emit_halt_events(journal, result)
             print(
@@ -337,13 +533,24 @@ def run() -> int:
                 "Guardian continues. Investigate journal 'inconsistency' events.",
                 file=sys.stderr,
             )
-            sched = _start_guardian_only(guardian, dispatcher)
+            sched = _start_guardian_only(
+                guardian, dispatcher, heartbeat_job=heartbeat_job,
+            )
             _run_until_signal()
             sched.shutdown(wait=True)
-            return 2
-        sched = _start_full_scheduler(orchestrator, guardian, dispatcher, journal, broker)
+            exit_code = 2
+            return exit_code
+        sched = _start_full_scheduler(
+            orchestrator, guardian, dispatcher, journal, broker,
+            calendar=calendar, heartbeat_job=heartbeat_job,
+        )
         _run_until_signal()
         sched.shutdown(wait=True)
-        return 0
+        exit_code = 0
+        return exit_code
     finally:
+        journal.record_event(
+            events.KIND_SERVICE_STOPPING,
+            events.service_stopping_payload(exit_code=exit_code),
+        )
         journal.close()

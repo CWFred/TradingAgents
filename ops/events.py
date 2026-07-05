@@ -1,0 +1,407 @@
+"""Typed journal-event contracts (A3).
+
+Event kinds and payload shapes used to be stringly-typed and agreed on by
+vibes between ~25 record_event call sites, the notify POLICY table, and
+the renderers — which shipped three real bugs (daily_halt consumed but
+never produced, a kill-switch notification with an empty body, fills
+lacking broker_mode). This module is the single contract:
+
+- one KIND_* constant per event kind. The string VALUES are frozen: the
+  journal already contains them, and replay/queries compare raw strings.
+- one <kind>_payload() builder per kind, taking typed kwargs and returning
+  the exact payload dict producers must journal. Builders stringify
+  Decimals at this boundary (the journal's storage convention); ints and
+  lists pass through as-is because json.dumps handles them and existing
+  rows already store them that way.
+- AUDIT_ONLY: kinds deliberately NOT notified. Every kind in BUILDERS
+  must be in the notify POLICY or in AUDIT_ONLY — the enforcement test in
+  tests/ops/notify/test_policy.py fails otherwise, so a new event kind
+  forces a conscious notify decision instead of silently defaulting to
+  "dropped by the dispatcher".
+
+Journal.record_event itself stays generic: the journal must not import
+event semantics, so producers call journal.record_event(KIND_X,
+x_payload(...)).
+
+Payload-key stability is load-bearing beyond rendering: the fill payload's
+side/broker_mode keys are filtered via SQL json_extract by
+ops.live_gate.count_live_buy_fills, and the dispatcher's error events
+carry event_id for cursor forensics. Do not rename keys.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
+# --- Kind constants (string values frozen — already in journals) --------
+
+# Trading / broker boundary
+KIND_FILL = "fill"
+KIND_ORDER_REJECTED = "order_rejected"
+KIND_ORDER_NOT_FILLED = "order_not_filled"
+
+# Guardian
+KIND_STOP_HIT = "stop_hit"
+KIND_STOP_FAILED = "stop_failed"
+KIND_QUOTE_UNAVAILABLE = "quote_unavailable"
+KIND_GUARDIAN_BLIND = "guardian_blind"
+KIND_GUARDIAN_CHECK_ERROR = "guardian_check_error"
+KIND_KILL_SWITCH = "kill_switch"
+KIND_KILL_SWITCH_CLOSE_FAILED = "kill_switch_close_failed"
+KIND_DAILY_HALT = "daily_halt"
+
+# Orchestrator / service lifecycle
+KIND_ORCHESTRATOR_TICK_ERROR = "orchestrator_tick_error"
+KIND_SERVICE_STARTED = "service_started"
+KIND_SERVICE_STOPPING = "service_stopping"
+KIND_STARTUP_HALTED = "startup_halted"
+KIND_BROKER_UNREACHABLE = "broker_unreachable"
+KIND_HEARTBEAT_ERROR = "heartbeat_error"
+
+# Reconciliation / replay
+KIND_INCONSISTENCY = "inconsistency"
+KIND_POSITIONS_RECOVERED_WITHOUT_STOPS = "positions_recovered_without_stops"
+KIND_JOURNAL_REPLAY_FALLBACK = "journal_replay_fallback"
+KIND_JOURNAL_REPLAY_ORPHAN_SELL = "journal_replay_orphan_sell"
+
+# Live gate / flip ritual
+KIND_BROKER_MODE_LIVE = "broker_mode_live"
+KIND_LIVE_FLIP_REFUSED = "live_flip_refused"
+
+# Notify subsystem
+KIND_DAILY_SUMMARY = "daily_summary"
+KIND_DAILY_SUMMARY_ERROR = "daily_summary_error"
+KIND_NOTIFY_CURSOR_INITIALIZED = "notify_cursor_initialized"
+KIND_NOTIFY_RENDER_ERROR = "notify_render_error"
+KIND_NOTIFY_DISPATCH_ERROR = "notify_dispatch_error"
+KIND_NOTIFY_EVENT_SKIPPED = "notify_event_skipped"
+
+# Kinds deliberately NOT notified. Everything here is an audit trail the
+# operator reads via `ops status` or sqlite, not a push/email — either
+# because it fires during normal operation (service lifecycle, replay
+# bookkeeping), because notifying it would recurse through the notify
+# subsystem's own error events, or because the surrounding flow already
+# surfaces it (order_rejected raises OrderRejected at the caller;
+# live_flip_refused prints and exits 4 at an interactive terminal).
+AUDIT_ONLY: frozenset[str] = frozenset({
+    KIND_ORDER_REJECTED,
+    KIND_SERVICE_STARTED,
+    KIND_SERVICE_STOPPING,
+    KIND_JOURNAL_REPLAY_FALLBACK,
+    KIND_JOURNAL_REPLAY_ORPHAN_SELL,
+    KIND_BROKER_MODE_LIVE,
+    KIND_LIVE_FLIP_REFUSED,
+    KIND_DAILY_SUMMARY_ERROR,
+    KIND_NOTIFY_CURSOR_INITIALIZED,
+    KIND_NOTIFY_RENDER_ERROR,
+    KIND_NOTIFY_DISPATCH_ERROR,
+    KIND_NOTIFY_EVENT_SKIPPED,
+})
+
+
+# --- Payload builders ----------------------------------------------------
+# Decimal arguments are stringified here (journal storage convention);
+# datetime arguments become ISO strings. Optional keys that today's
+# producers omit entirely when absent (fill-less context, missing git sha)
+# are omitted by the builders too, so stored payloads are byte-identical
+# to the pre-A3 shapes.
+
+
+def fill_payload(
+    *, client_order_id: str, order_id: str, symbol: str, side: str,
+    quantity: Decimal, price: Decimal, filled_at: datetime, context: str,
+    broker_mode: str,
+) -> dict[str, Any]:
+    """side/broker_mode are filtered by SQL json_extract in
+    ops.live_gate.count_live_buy_fills — keys and string values frozen."""
+    return {
+        "client_order_id": client_order_id,
+        "order_id": order_id,
+        "symbol": symbol,
+        "side": side,
+        "quantity": str(quantity),
+        "price": str(price),
+        "filled_at": filled_at.isoformat(),
+        "context": context,
+        "broker_mode": broker_mode,
+    }
+
+
+def order_rejected_payload(
+    *, rule: str, reason: str, client_order_id: str, symbol: str,
+    side: str, notional_dollars: Decimal, context: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "rule": rule,
+        "reason": reason,
+        "client_order_id": client_order_id,
+        "symbol": symbol,
+        "side": side,
+        "notional_dollars": str(notional_dollars),
+    }
+    # The place_order path has no context key; close_position adds one.
+    if context is not None:
+        payload["context"] = context
+    return payload
+
+
+def order_not_filled_payload(
+    *, order_id: str, client_order_id: str, symbol: str, side: str,
+    status: str, quantity: Decimal | None, fill_price: Decimal | None,
+) -> dict[str, Any]:
+    return {
+        "order_id": order_id,
+        "client_order_id": client_order_id,
+        "symbol": symbol,
+        "side": side,
+        "status": status,
+        "quantity": str(quantity) if quantity is not None else None,
+        "fill_price": str(fill_price) if fill_price is not None else None,
+    }
+
+
+def stop_hit_payload(
+    *, symbol: str, entry: Decimal, current: Decimal, pct: Decimal,
+    mode: str, threshold_repr: str,
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "entry": str(entry),
+        "current": str(current),
+        "pct": str(pct),
+        "mode": mode,
+        "threshold_repr": threshold_repr,
+    }
+
+
+def stop_failed_payload(
+    *, symbol: str, entry: Decimal, current: Decimal, pct: Decimal,
+    mode: str, threshold_repr: str, error: str,
+) -> dict[str, Any]:
+    payload = stop_hit_payload(
+        symbol=symbol, entry=entry, current=current, pct=pct,
+        mode=mode, threshold_repr=threshold_repr,
+    )
+    payload["error"] = error
+    return payload
+
+
+def quote_unavailable_payload(
+    *, symbol: str, context: str, error: str,
+) -> dict[str, Any]:
+    return {"symbol": symbol, "context": context, "error": error}
+
+
+def guardian_blind_payload(*, consecutive_failed_passes: int) -> dict[str, Any]:
+    return {"consecutive_failed_passes": consecutive_failed_passes}
+
+
+def guardian_check_error_payload(*, error: str) -> dict[str, Any]:
+    """`error` is inherently dynamic ("<ExcType>: <message>") — the
+    guardian's catch-all cannot know shapes in advance."""
+    return {"error": error}
+
+
+def kill_switch_payload(
+    *, mode: str, equity_now: Decimal, equity_open_week: Decimal,
+    pct: Decimal, threshold: Decimal,
+) -> dict[str, Any]:
+    """pct/threshold/equity_now/equity_open_week/mode are read by the
+    kill-switch renderer — keys frozen (the empty-body bug class)."""
+    return {
+        "mode": mode,
+        "equity_now": str(equity_now),
+        "equity_open_week": str(equity_open_week),
+        "pct": str(pct),
+        "threshold": str(threshold),
+    }
+
+
+def kill_switch_close_failed_payload(*, symbol: str, error: str) -> dict[str, Any]:
+    return {"symbol": symbol, "error": error}
+
+
+def daily_halt_payload(
+    *, mode: str, equity_now: Decimal, equity_open_day: Decimal,
+    pct: Decimal, threshold: Decimal,
+) -> dict[str, Any]:
+    return {
+        "mode": mode,
+        "equity_now": str(equity_now),
+        "equity_open_day": str(equity_open_day),
+        "pct": str(pct),
+        "threshold": str(threshold),
+    }
+
+
+def orchestrator_tick_error_payload(*, error: str) -> dict[str, Any]:
+    return {"error": error}
+
+
+def service_started_payload(
+    *, broker_mode: str, journal_path: str, pid: int,
+    git_sha: str | None = None,
+) -> dict[str, Any]:
+    """Uptime record (A1.2). git_sha is omitted (not None) when provenance
+    is unavailable — matching the pre-A3 conditional-key behavior."""
+    payload: dict[str, Any] = {
+        "broker_mode": broker_mode,
+        "journal_path": journal_path,
+        "pid": pid,
+    }
+    if git_sha is not None:
+        payload["git_sha"] = git_sha
+    return payload
+
+
+def service_stopping_payload(*, exit_code: int) -> dict[str, Any]:
+    return {"exit_code": exit_code}
+
+
+def startup_halted_payload(*, reason: str) -> dict[str, Any]:
+    return {"reason": reason}
+
+
+def broker_unreachable_payload(*, error_type: str) -> dict[str, Any]:
+    """Only the exception TYPE — broker-connectivity exception text can
+    embed credentials/hostnames and the journal is durable."""
+    return {"error_type": error_type}
+
+
+def heartbeat_error_payload(*, error_type: str) -> dict[str, Any]:
+    """Only the exception TYPE — requests exception text embeds the ping
+    URL, a secret-bearing token."""
+    return {"error_type": error_type}
+
+
+def inconsistency_payload(
+    *, diffs: list[dict[str, Any]], cash_journal: Decimal,
+    cash_broker: Decimal, cash_diff: Decimal,
+) -> dict[str, Any]:
+    """`diffs` is inherently dynamic (one dict per PositionDiff, already
+    stringified by the reconciler); the cash keys are the fixed part."""
+    return {
+        "diffs": diffs,
+        "cash_journal": str(cash_journal),
+        "cash_broker": str(cash_broker),
+        "cash_diff": str(cash_diff),
+    }
+
+
+def positions_recovered_without_stops_payload(
+    *, symbols: list[str],
+) -> dict[str, Any]:
+    return {"symbols": symbols}
+
+
+def journal_replay_fallback_payload(
+    *, client_order_id: str, symbol: str, side: str, reason: str,
+) -> dict[str, Any]:
+    return {
+        "client_order_id": client_order_id,
+        "symbol": symbol,
+        "side": side,
+        "reason": reason,
+    }
+
+
+def journal_replay_orphan_sell_payload(
+    *, client_order_id: str, symbol: str, quantity: Decimal,
+    price: Decimal, reason: str,
+) -> dict[str, Any]:
+    return {
+        "client_order_id": client_order_id,
+        "symbol": symbol,
+        "quantity": str(quantity),
+        "price": str(price),
+        "reason": reason,
+    }
+
+
+def broker_mode_live_payload() -> dict[str, Any]:
+    return {"note": "paper->robinhood flip"}
+
+
+def live_flip_refused_payload(*, reason: str) -> dict[str, Any]:
+    return {"reason": reason}
+
+
+def daily_summary_payload(
+    *, headline: str, body: str, equity: Decimal, n_fills_today: int,
+) -> dict[str, Any]:
+    return {
+        "headline": headline,
+        "body": body,
+        "equity": str(equity),
+        "n_fills_today": n_fills_today,
+    }
+
+
+def daily_summary_error_payload(*, error: str) -> dict[str, Any]:
+    return {"error": error}
+
+
+def notify_cursor_initialized_payload(
+    *, consumer: str, skipped_through: int,
+) -> dict[str, Any]:
+    return {"consumer": consumer, "skipped_through": skipped_through}
+
+
+def notify_render_error_payload(
+    *, event_id: int, kind: str, error_type: str,
+) -> dict[str, Any]:
+    return {"event_id": event_id, "kind": kind, "error_type": error_type}
+
+
+def notify_dispatch_error_payload(
+    *, event_id: int, kind: str, error_type: str,
+) -> dict[str, Any]:
+    return {"event_id": event_id, "kind": kind, "error_type": error_type}
+
+
+def notify_event_skipped_payload(
+    *, event_id: int, kind: str, consecutive_failures: int,
+) -> dict[str, Any]:
+    return {
+        "event_id": event_id,
+        "kind": kind,
+        "consecutive_failures": consecutive_failures,
+    }
+
+
+# Kind -> builder registry: the enforcement test walks this to prove every
+# POLICY kind has a builder and every builder's kind has been classified
+# (POLICY or AUDIT_ONLY). Register every new builder here.
+BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
+    KIND_FILL: fill_payload,
+    KIND_ORDER_REJECTED: order_rejected_payload,
+    KIND_ORDER_NOT_FILLED: order_not_filled_payload,
+    KIND_STOP_HIT: stop_hit_payload,
+    KIND_STOP_FAILED: stop_failed_payload,
+    KIND_QUOTE_UNAVAILABLE: quote_unavailable_payload,
+    KIND_GUARDIAN_BLIND: guardian_blind_payload,
+    KIND_GUARDIAN_CHECK_ERROR: guardian_check_error_payload,
+    KIND_KILL_SWITCH: kill_switch_payload,
+    KIND_KILL_SWITCH_CLOSE_FAILED: kill_switch_close_failed_payload,
+    KIND_DAILY_HALT: daily_halt_payload,
+    KIND_ORCHESTRATOR_TICK_ERROR: orchestrator_tick_error_payload,
+    KIND_SERVICE_STARTED: service_started_payload,
+    KIND_SERVICE_STOPPING: service_stopping_payload,
+    KIND_STARTUP_HALTED: startup_halted_payload,
+    KIND_BROKER_UNREACHABLE: broker_unreachable_payload,
+    KIND_HEARTBEAT_ERROR: heartbeat_error_payload,
+    KIND_INCONSISTENCY: inconsistency_payload,
+    KIND_POSITIONS_RECOVERED_WITHOUT_STOPS: positions_recovered_without_stops_payload,
+    KIND_JOURNAL_REPLAY_FALLBACK: journal_replay_fallback_payload,
+    KIND_JOURNAL_REPLAY_ORPHAN_SELL: journal_replay_orphan_sell_payload,
+    KIND_BROKER_MODE_LIVE: broker_mode_live_payload,
+    KIND_LIVE_FLIP_REFUSED: live_flip_refused_payload,
+    KIND_DAILY_SUMMARY: daily_summary_payload,
+    KIND_DAILY_SUMMARY_ERROR: daily_summary_error_payload,
+    KIND_NOTIFY_CURSOR_INITIALIZED: notify_cursor_initialized_payload,
+    KIND_NOTIFY_RENDER_ERROR: notify_render_error_payload,
+    KIND_NOTIFY_DISPATCH_ERROR: notify_dispatch_error_payload,
+    KIND_NOTIFY_EVENT_SKIPPED: notify_event_skipped_payload,
+}

@@ -1,7 +1,8 @@
 from unittest.mock import MagicMock
+
 from ops.notify.config import NotifyConfig
+from ops.notify.push import PushoverTransport, build_push_transport
 from ops.notify.transport import NotifyMessage
-from ops.notify.push import build_push_transport, PushoverTransport
 
 
 def test_disabled_without_creds():

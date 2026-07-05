@@ -4,8 +4,8 @@ Verifies that after a restart (new Journal + dispatcher over the same sqlite pat
 already-acked events are NOT resent, and new events ARE.
 """
 from ops.journal import Journal
-from ops.notify.transport import NotifyMessage
 from ops.notify.dispatcher import NotifyDispatcher
+from ops.notify.transport import NotifyMessage
 
 
 class FakeTransport:

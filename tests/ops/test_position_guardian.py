@@ -797,3 +797,50 @@ def test_daily_halt_idempotent_within_day(tmp_path):
     events = j.read_events()
     halts = [e for e in events if e["kind"] == "daily_halt"]
     assert len(halts) == 1
+
+
+def test_last_pass_started_at_none_before_first_pass(tmp_path):
+    """A1.3: a guardian that has never run must not look alive — the
+    heartbeat job treats None as 'no liveness signal yet'."""
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    guardian = PositionGuardian(broker=guarded, quote_source=quotes.__getitem__, config=cfg)
+    assert guardian.last_pass_started_at is None
+
+
+def test_last_pass_started_at_set_even_when_market_closed(tmp_path):
+    """A1.3: liveness is recorded BEFORE the market-hours gate — overnight
+    and weekend passes must still count as 'the safety loop is running',
+    since the loop itself runs 24/7 even though it only trades in RTH."""
+    import time
+
+    j, guarded, cfg, quotes = _stack(tmp_path)
+    guardian = PositionGuardian(
+        broker=guarded, quote_source=quotes.__getitem__, config=cfg,
+        market_open_fn=lambda: False,
+    )
+    before = time.monotonic()
+    guardian.check_stops_once()
+    after = time.monotonic()
+    assert guardian.last_pass_started_at is not None
+    assert before <= guardian.last_pass_started_at <= after
+
+
+def test_last_pass_started_at_set_even_when_pass_raises(tmp_path):
+    """A1.3: liveness is recorded before the try — a pass that blows up
+    (and is swallowed as guardian_check_error) still proves the loop is
+    being scheduled. A wedged/never-scheduled loop is what must look dead."""
+    j = Journal(str(tmp_path / "j.sqlite"))
+
+    class _BoomBroker:
+        journal = j
+        def get_positions(self):
+            raise RuntimeError("boom")
+
+    guardian = PositionGuardian(
+        broker=_BoomBroker(), quote_source=lambda s: Decimal("1"),
+        config=OpsConfig(), journal=j,
+    )
+    guardian.check_stops_once()
+    assert guardian.last_pass_started_at is not None
+    kinds = [e["kind"] for e in j.read_events()]
+    assert "guardian_check_error" in kinds

@@ -4,6 +4,7 @@ Gated on OPS_NOTIFY_LIVE_TESTS=1. Requires transport config (OPS_PUSHOVER_*,
 OPS_SMTP_*). Skipped by default to avoid network calls in the default test suite.
 """
 import os
+
 import pytest
 
 pytestmark = pytest.mark.skipif(

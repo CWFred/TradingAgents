@@ -1,9 +1,22 @@
+import os
 from decimal import Decimal
+
+import pytest
 
 from ops.config import OpsConfig
 from ops.journal import Journal
 from ops.main import _build_broker, _emit_halt_events, _wire
 from ops.reconcile import PositionDiff, ReconcileResult
+
+
+@pytest.fixture
+def preset_shutdown():
+    """Pre-set the module-level shutdown event so run() falls straight
+    through _run_until_signal instead of blocking the test forever."""
+    import ops.main as ops_main
+    ops_main._shutdown_event.set()
+    yield
+    ops_main._shutdown_event.clear()
 
 
 def test_build_broker_paper(tmp_path):
@@ -291,3 +304,105 @@ def test_run_exits_3_and_journals_on_broker_unreachable(monkeypatch, tmp_path, c
     captured = capsys.readouterr()
     assert "unreachable" in captured.err.lower()
     assert "Traceback" not in captured.err
+
+    # A1.2: even a startup-halted run must leave an uptime record —
+    # service_started before the failure, service_stopping with the exit code.
+    j = Journal(journal_path)
+    events = j.read_events()
+    started = [e for e in events if e["kind"] == "service_started"]
+    stopping = [e for e in events if e["kind"] == "service_stopping"]
+    assert len(started) == 1 and len(stopping) == 1
+    assert stopping[0]["payload"]["exit_code"] == 3
+    j.close()
+
+
+def test_run_journals_service_started_and_stopping_on_clean_run(
+    monkeypatch, tmp_path, preset_shutdown, capsys,
+):
+    """A1.2: a normal paper-mode run records service_started (broker_mode,
+    journal path, pid) right after the journal opens and service_stopping
+    (exit code 0) before it closes — the uptime record the graduation
+    evaluation reads back."""
+    from ops.main import run
+
+    journal_path = str(tmp_path / "j.sqlite")
+    monkeypatch.delenv("OPS_BROKER_MODE", raising=False)
+    monkeypatch.setenv("OPS_JOURNAL_PATH", journal_path)
+
+    exit_code = run()
+    assert exit_code == 0
+
+    j = Journal(journal_path)
+    events = j.read_events()
+    started = [e for e in events if e["kind"] == "service_started"]
+    stopping = [e for e in events if e["kind"] == "service_stopping"]
+    assert len(started) == 1
+    assert started[0]["payload"]["broker_mode"] == "paper"
+    assert started[0]["payload"]["journal_path"] == journal_path
+    assert started[0]["payload"]["pid"] == os.getpid()
+    assert len(stopping) == 1
+    assert stopping[0]["payload"]["exit_code"] == 0
+    # service_started must come first (it is the session-open marker).
+    kinds = [e["kind"] for e in events]
+    assert kinds.index("service_started") < kinds.index("service_stopping")
+    j.close()
+
+
+def test_run_service_stopping_carries_exit_code_2_on_reconcile_halt(
+    monkeypatch, tmp_path, preset_shutdown, capsys,
+):
+    """A1.2: the reconcile-halt path (guardian-only, exit 2) must record
+    its exit code in service_stopping."""
+    from ops.main import run
+
+    journal_path = str(tmp_path / "j.sqlite")
+    monkeypatch.delenv("OPS_BROKER_MODE", raising=False)
+    monkeypatch.setenv("OPS_JOURNAL_PATH", journal_path)
+    diffy = ReconcileResult(
+        diffs=[PositionDiff(symbol="AAPL", journal_qty=Decimal("5"),
+                            broker_qty=Decimal("3"), kind="qty_mismatch")],
+        cash_journal=Decimal("100"), cash_broker=Decimal("100"),
+        cash_diff=Decimal("0"),
+    )
+    monkeypatch.setattr("ops.main.reconcile", lambda **kwargs: diffy)
+
+    exit_code = run()
+    assert exit_code == 2
+
+    j = Journal(journal_path)
+    stopping = [e for e in j.read_events() if e["kind"] == "service_stopping"]
+    assert len(stopping) == 1
+    assert stopping[0]["payload"]["exit_code"] == 2
+    j.close()
+
+
+def test_service_lifecycle_events_are_audit_only():
+    """A1.2: service_started/service_stopping are uptime bookkeeping, not
+    alerts — they must never enter the notify POLICY."""
+    from ops.notify.policy import POLICY
+
+    assert "service_started" not in POLICY
+    assert "service_stopping" not in POLICY
+
+
+def test_daily_summary_job_callable_does_not_name_error(tmp_path):
+    """Regression: _start_full_scheduler's daily_summary lambda referenced a
+    `calendar` name that was not in scope — every 16:05 firing raised
+    NameError inside APScheduler and the summary never ran, silently. The
+    registered job callable must be invokable with only the arguments the
+    scheduler gives it (none)."""
+    from unittest.mock import MagicMock
+    from ops.main import _start_full_scheduler
+
+    orchestrator = MagicMock()
+    guardian = MagicMock()
+    dispatcher = MagicMock()
+    journal = MagicMock()
+    journal.has_event_today.return_value = True  # summary idempotent no-op
+    broker = MagicMock()
+    sched = _start_full_scheduler(orchestrator, guardian, dispatcher, journal, broker)
+    try:
+        job = sched.get_job("daily_summary")
+        job.func()  # must not raise NameError
+    finally:
+        sched.shutdown(wait=False)

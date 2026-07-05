@@ -1,4 +1,4 @@
-from ops.notify.transport import NotifyMessage, DisabledTransport
+from ops.notify.transport import DisabledTransport, NotifyMessage
 
 
 def test_notify_message_defaults():

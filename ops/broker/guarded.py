@@ -37,6 +37,7 @@ import threading
 import uuid
 from decimal import Decimal
 
+from ops import events
 from ops.broker.base import Broker, BrokerError, NoSuchPosition, OrderRejected
 from ops.broker.types import Fill, Order, OrderType, Position, Side
 from ops.config import OpsConfig
@@ -59,18 +60,18 @@ class GuardedBroker(Broker):
 
     def _journal_fill_event(self, fill: Fill, context: str) -> None:
         self._journal.record_event(
-            "fill",
-            {
-                "client_order_id": fill.client_order_id,
-                "order_id": fill.order_id,
-                "symbol": fill.symbol,
-                "side": fill.side.value,
-                "quantity": str(fill.quantity),
-                "price": str(fill.price),
-                "filled_at": fill.filled_at.isoformat(),
-                "context": context,
-                "broker_mode": self._config.broker_mode,
-            },
+            events.KIND_FILL,
+            events.fill_payload(
+                client_order_id=fill.client_order_id,
+                order_id=fill.order_id,
+                symbol=fill.symbol,
+                side=fill.side.value,
+                quantity=fill.quantity,
+                price=fill.price,
+                filled_at=fill.filled_at,
+                context=context,
+                broker_mode=self._config.broker_mode,
+            ),
         )
 
     def get_cash(self) -> Decimal:
@@ -94,15 +95,15 @@ class GuardedBroker(Broker):
             result = self._engine.evaluate(ctx)
             if not result.allowed:
                 self._journal.record_event(
-                    "order_rejected",
-                    {
-                        "rule": result.failed_rule_name,
-                        "reason": result.reason,
-                        "client_order_id": order.client_order_id,
-                        "symbol": order.symbol,
-                        "side": order.side.value,
-                        "notional_dollars": str(order.notional_dollars),
-                    },
+                    events.KIND_ORDER_REJECTED,
+                    events.order_rejected_payload(
+                        rule=result.failed_rule_name,
+                        reason=result.reason,
+                        client_order_id=order.client_order_id,
+                        symbol=order.symbol,
+                        side=order.side.value,
+                        notional_dollars=order.notional_dollars,
+                    ),
                 )
                 raise OrderRejected(result.failed_rule_name, result.reason)
             try:
@@ -111,15 +112,15 @@ class GuardedBroker(Broker):
                 return fill
             except BrokerError as exc:
                 self._journal.record_event(
-                    "order_rejected",
-                    {
-                        "rule": "broker",
-                        "reason": f"{type(exc).__name__}: {exc}",
-                        "client_order_id": order.client_order_id,
-                        "symbol": order.symbol,
-                        "side": order.side.value,
-                        "notional_dollars": str(order.notional_dollars),
-                    },
+                    events.KIND_ORDER_REJECTED,
+                    events.order_rejected_payload(
+                        rule="broker",
+                        reason=f"{type(exc).__name__}: {exc}",
+                        client_order_id=order.client_order_id,
+                        symbol=order.symbol,
+                        side=order.side.value,
+                        notional_dollars=order.notional_dollars,
+                    ),
                 )
                 raise
 
@@ -164,16 +165,16 @@ class GuardedBroker(Broker):
                 result = self._engine.evaluate(ctx)
                 if not result.allowed:
                     self._journal.record_event(
-                        "order_rejected",
-                        {
-                            "rule": result.failed_rule_name,
-                            "reason": result.reason,
-                            "client_order_id": client_order_id,
-                            "symbol": symbol,
-                            "side": "SELL",
-                            "notional_dollars": str(notional),
-                            "context": "close_position",
-                        },
+                        events.KIND_ORDER_REJECTED,
+                        events.order_rejected_payload(
+                            rule=result.failed_rule_name,
+                            reason=result.reason,
+                            client_order_id=client_order_id,
+                            symbol=symbol,
+                            side="SELL",
+                            notional_dollars=notional,
+                            context="close_position",
+                        ),
                     )
                     raise OrderRejected(result.failed_rule_name, result.reason)
             # sellable <= 0: nothing to dry-run (a zero/negative-notional
@@ -191,15 +192,15 @@ class GuardedBroker(Broker):
                 return fill
             except BrokerError as exc:
                 self._journal.record_event(
-                    "order_rejected",
-                    {
-                        "rule": "broker",
-                        "reason": f"{type(exc).__name__}: {exc}",
-                        "client_order_id": client_order_id,
-                        "symbol": symbol,
-                        "side": "SELL",
-                        "notional_dollars": str(notional),
-                        "context": "close_position",
-                    },
+                    events.KIND_ORDER_REJECTED,
+                    events.order_rejected_payload(
+                        rule="broker",
+                        reason=f"{type(exc).__name__}: {exc}",
+                        client_order_id=client_order_id,
+                        symbol=symbol,
+                        side="SELL",
+                        notional_dollars=notional,
+                        context="close_position",
+                    ),
                 )
                 raise

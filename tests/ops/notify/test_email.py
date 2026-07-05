@@ -1,8 +1,9 @@
 import ssl
 from unittest.mock import MagicMock
+
 from ops.notify.config import NotifyConfig
+from ops.notify.email import EmailTransport, build_email_transport
 from ops.notify.transport import NotifyMessage
-from ops.notify.email import build_email_transport, EmailTransport
 
 
 def test_disabled_without_host():
