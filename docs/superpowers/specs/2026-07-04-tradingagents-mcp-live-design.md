@@ -43,7 +43,7 @@ data.results[] : { quote: { symbol, last_trade_price, last_non_reg_trade_price,
   venue_last_trade_time, adjusted_previous_close, previous_close, bid_price,
   ask_price, has_traded, state }, close: { price, date } }
 ```
-- Current price: pick the more recent of `last_trade_price` / `last_non_reg_trade_price` by timestamp; check `has_traded` and `state == "active"`.
+- Current price: use `last_trade_price`, falling back to `last_non_reg_trade_price` only when the former is absent; check `has_traded` and `state == "active"`. (The captured schema carries exactly ONE venue timestamp — `venue_last_trade_time`, paired with `last_trade_price` — so there is nothing to compare recency against; a "more recent by timestamp" pick is not implementable and `_pick_quote_price` deliberately does fallback-only.)
 - For a marketable BUY, `ask_price` is the price-protective reference.
 
 ### Orders — `place_equity_order` / `review_equity_order` / `get_equity_orders` / `cancel_equity_order`
@@ -75,6 +75,8 @@ data.results[] : { quote: { symbol, last_trade_price, last_non_reg_trade_price,
 3. **Agentic account resolution.** On connect, `get_accounts` → select the single `agentic_allowed=true` account; store its `account_number`; refuse to operate if zero or if a configured `OPS_RH_ACCOUNT` override isn't `agentic_allowed`. This is defense-in-depth beneath the SPOT/guardrail layers — a non-agentic account is structurally unusable.
 4. **Protocol + DTOs.** `RobinhoodMCPClient` account-scoped methods drop the caller-supplied account (the client owns its resolved agentic account). DTOs remap to the real `data.…` shapes. `MCPPosition` gains `shares_available_for_sells`. `AccountInfo` sourced from `get_accounts` (flags) + `get_portfolio` (cash/equity/buying_power).
 5. **Order lifecycle.** `place_equity_order` maps notional→`dollar_amount`+`type=market`, `client_order_id`→`ref_id`. After the ack, poll `get_equity_orders(order_id)` for a bounded window (market orders, RTH); on `filled`/`partially_filled` build the `MCPOrderAck` with the real fill price; on timeout call `cancel_equity_order` and journal the outcome; map `rejected`/`failed` to a clear error. This is also where the spec's kill-switch "cancel pending orders" behavior finally has a home.
+
+   **Lock-scope decision (M6, 2026-07-05):** `GuardedBroker.place_order` holds its lock through the entire inner place — including this fill poll — so a concurrent guardian pass cannot read positions while an order settles. The full submit/await split (release the lock during the poll) was judged too invasive for now: it reopens the double-BUY sizing race unless in-flight notional is tracked in the rule context. Instead the poll window is **bounded at 30s** (`_await_fill` `window_s` default, pinned by `test_await_fill_window_stays_inside_guardian_cycle`) so the guardian is never starved longer than half its 60s cycle. Revisit the split if the orchestrator ever proposes more than a handful of orders per tick.
 6. **Error taxonomy.** `MCPUnavailable` for transport/timeout/auth; new `MCPProtocolError` for shape/parse mismatches (a renamed field must not read as an outage). Catch transport errors narrowly.
 
 ## Testing & the live boundary
