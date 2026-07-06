@@ -48,6 +48,10 @@ at its last journaled fill price so the control keeps accruing instead of
 crashing; it requires manual resolution until the monitoring loop
 (build-order step 6) lands.
 
+## Data notes
+
+P/E-history prices are split-unadjusted (as-traded) to match as-reported XBRL EPS; Yahoo's split-adjusted closes are corrected using the split actions from the same history call.
+
 ## Form 4 note
 
 Insider-cluster triggers are deferred to build-order step 4 (needs the Form 4

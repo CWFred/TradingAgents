@@ -185,3 +185,20 @@ def test_silent_none_names_are_promoted_to_errors(config):
     symbols = [n.member.symbol for n in universe]
     for symbol in symbols:
         assert any(e.startswith(f"{symbol}: skipped") for e in summary.errors)
+
+
+def test_year_end_prices_are_split_unadjusted(config):
+    from ops.research.run import _name_inputs
+
+    ctx = _price_ctx()
+    # Rebuild with a 10:1 forward split newer than every fiscal year end.
+    ctx = PriceContext(closes=ctx.closes, splits={ASOF: Decimal("10")})
+    ni = _name_inputs(
+        _name("GOOD"), asof=ASOF,
+        facts_fetcher=lambda t: _facts_for_passer(),
+        triggers_finder=lambda t, *, asof, lookback_days=90, list_filings=None: [],
+        price_context_fetcher=lambda s: ctx,
+    )
+    assert ni is not None
+    # Every year-end price is 10x the adjusted 20 -> 200.
+    assert all(px == Decimal("200") for px in ni.year_end_prices.values())

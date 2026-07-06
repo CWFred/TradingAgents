@@ -70,7 +70,7 @@ def _name_inputs(
     year_end_prices = {
         yv.fiscal_year_end: px
         for yv in fundamentals.eps_history
-        if (px := ctx.close_on_or_before(yv.fiscal_year_end)) is not None
+        if (px := ctx.unadjusted_close_on_or_before(yv.fiscal_year_end)) is not None
     }
     return NameInputs(
         symbol=symbol,
