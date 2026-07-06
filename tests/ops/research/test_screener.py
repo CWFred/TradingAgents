@@ -112,6 +112,20 @@ def test_small_sector_falls_back_to_universe_median():
     assert v1.passed
 
 
+def test_sector_with_only_four_real_peers_falls_back_to_universe_median():
+    # "Small" sector: candidate + 4 expensive same-sector peers = 4 REAL peers,
+    # below MIN_SECTOR_PEERS once self is excluded -> universe median governs.
+    universe = [
+        _inputs("EDGE", sector="Small", triggers=[_trigger()]),
+        *[_inputs(f"SM{i}", sector="Small", market_cap=D("5000")) for i in range(4)],
+        *[_expensive_peer(f"PEER{i}") for i in range(5)],
+    ]
+    edge = {r.symbol: r for r in screen_universe(universe, asof=ASOF)}["EDGE"]
+    v1 = edge.valuation_bars[0]
+    assert v1.passed
+    assert "universe" in v1.detail
+
+
 def test_high_leverage_fails_quality_bar():
     fund = _fund("LEVD", total_debt=D("500"), ebitda=D("100"))
     universe = [

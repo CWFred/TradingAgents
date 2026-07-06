@@ -147,18 +147,23 @@ def screen_universe(inputs: list[NameInputs], *, asof: date) -> list[ScreenResul
         for n, v in zip(inputs, ev_ebit_by_symbol.values(), strict=True)
         if v is not None
     ]
-    universe_median = median([v for _, v in valid]) if valid else None
     by_sector: dict[str, list[Decimal]] = {}
     for sector, v in valid:
         by_sector.setdefault(sector, []).append(v)
 
     results: list[ScreenResult] = []
     for n in inputs:
-        peers = by_sector.get(n.sector, [])
+        own = ev_ebit_by_symbol[n.symbol]
+        # Identity (not equality) removal: drops exactly the candidate's own
+        # entry, never an equal-valued peer. `own is None` drops nothing (None
+        # values were never added to by_sector/valid), which is correct.
+        peers = [v for v in by_sector.get(n.sector, []) if v is not own]
         if len(peers) >= MIN_SECTOR_PEERS:
             benchmark, label = median(peers), n.sector
         else:
-            benchmark, label = universe_median, "universe"
+            universe_peers = [v for _, v in valid if v is not own]
+            benchmark = median(universe_peers) if universe_peers else None
+            label = "universe"
         valuation = (
             _ev_ebit_bar(ev_ebit_by_symbol[n.symbol], benchmark, label),
             _fcf_yield_bar(n),
