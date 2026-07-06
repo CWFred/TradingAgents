@@ -122,6 +122,34 @@ def status(journal_path: str | None) -> None:
         journal.close()
 
 
+@cli.command()
+@click.option("--asof", default=None, help="Screen as of this date (YYYY-MM-DD); default today.")
+@click.option("--dry-run", is_flag=True,
+              help="Screen and print only — no store writes, no baseline trades.")
+@click.option("--limit", default=None, type=int,
+              help="Screen only the first N universe names (smoke runs).")
+def screen(asof: str | None, dry_run: bool, limit: int | None) -> None:
+    """Run the small/mid-cap fundamental screen + null-baseline portfolio."""
+    from ops.research.run import run_screen
+
+    config = load_config()
+    asof_date = date_cls.fromisoformat(asof) if asof else datetime.now().date()
+    summary = run_screen(config=config, asof=asof_date, dry_run=dry_run, limit=limit)
+    click.echo(f"screen run {summary.run_id or '(dry-run)'} asof {summary.asof}")
+    click.echo(
+        f"universe {summary.universe_size}, screened {summary.screened}, "
+        f"passed {len(summary.passed)}, errors {len(summary.errors)}"
+    )
+    for symbol in summary.passed:
+        click.echo(f"  PASS {symbol}")
+    if summary.baseline is not None:
+        click.echo(
+            f"baseline: {len(summary.baseline['buys'])} buys, "
+            f"{len(summary.baseline['exits'])} exits, "
+            f"{len(summary.baseline['skipped'])} skipped"
+        )
+
+
 @cli.command("decide-once")
 @click.option("--date", "as_of", required=True,
               type=click.DateTime(formats=["%Y-%m-%d"]),

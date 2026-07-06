@@ -137,8 +137,9 @@ alongside post-earnings momentum).
 
 1. ✅ Memo schema + store (`tradingagents/memos/`) — everything imports from it
 2. ✅ EDGAR client (`tradingagents/dataflows/edgar.py`) — list/fetch/search + trigger classification
-3. Small/mid-cap universe module + point-in-time screener; **screen-only
-   paper portfolio starts accruing track record the day this lands**
+3. ✅ Small/mid-cap universe + point-in-time screener + null-baseline
+   portfolio (`ops/universe/smallcap.py`, `ops/research/`, `ops screen` —
+   see docs/research_screener.md)
 4. Filing-reader agent tools (`read_filing_section`, `diff_filing_sections`,
    `get_insider_transactions`, `get_past_memos`)
 5. Thesis-type-aware graph config: memo-emitting trader/PM node (via the
