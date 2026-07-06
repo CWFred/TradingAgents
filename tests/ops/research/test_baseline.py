@@ -116,6 +116,49 @@ def test_quote_failure_skips_name_and_continues(journal):
     assert summary["skipped"] == ["BAD"]
 
 
+def test_baseline_survives_unquotable_held_position(journal):
+    """A delisted holding must not wedge the control (final-review Fix 1).
+
+    AAA is bought with a working quote, then goes unquotable (delisted).
+    A later run for a new passer BBB must not raise, must still buy BBB,
+    and must mark AAA at its last journaled fill price when computing
+    equity for sizing/reporting instead of calling the (raising) live quote.
+    """
+    from ops.broker.base import QuoteUnavailable
+
+    aaa_quotable = {"ok": True}
+
+    def quotes(symbol):
+        if symbol == "AAA" and not aaa_quotable["ok"]:
+            raise QuoteUnavailable("delisted")
+        return Decimal("20")
+
+    broker = PaperBroker(
+        journal=journal, quote_source=quotes, starting_cash=Decimal("100000"),
+    )
+    update_baseline_portfolio(
+        broker=broker, journal=journal, passers=["AAA"], asof=ASOF, now=NOW,
+    )
+    aaa_fill = journal.last_buy_fill_for("AAA")
+    aaa_quotable["ok"] = False  # AAA is now delisted / unquotable
+
+    summary = update_baseline_portfolio(
+        broker=broker, journal=journal, passers=["BBB"], asof=ASOF, now=NOW,
+    )
+
+    assert summary["buys"] == ["BBB"]
+
+    positions = {p.symbol: p for p in broker.get_positions()}
+    expected_equity = (
+        broker.get_cash()
+        + positions["AAA"].quantity * aaa_fill["price"]
+        + positions["BBB"].quantity * Decimal("20")
+    )
+    snapshot = journal.get_latest_equity_snapshot(kind="baseline_run")
+    assert snapshot is not None
+    assert snapshot.equity == expected_equity
+
+
 def test_same_day_retry_after_quote_failure_does_not_collide(journal):
     from ops.broker.base import QuoteUnavailable
 

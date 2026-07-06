@@ -35,6 +35,19 @@ monitoring loop is build-order step 6.
 | `OPS_BASELINE_JOURNAL_PATH` | `~/.local/state/tradingagents/baseline_journal.sqlite` | baseline portfolio journal |
 | `OPS_BASELINE_STARTING_CASH` | `100000` | baseline paper cash |
 
+## Backdated runs
+
+`--asof` is a debug knob, not a backtest: it re-dates the point-in-time
+fundamentals lookup, but the universe membership and the baseline's fill
+prices are still TODAY's. Backdating changes what the screen *sees*, not
+what it *trades against*. Running `--asof` earlier than today without
+`--dry-run` prints a warning to say so.
+
+A delisted baseline position (tender, acquisition — no live quote) is marked
+at its last journaled fill price so the control keeps accruing instead of
+crashing; it requires manual resolution until the monitoring loop
+(build-order step 6) lands.
+
 ## Form 4 note
 
 Insider-cluster triggers are deferred to build-order step 4 (needs the Form 4

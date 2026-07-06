@@ -128,3 +128,60 @@ def test_per_name_errors_are_skipped_not_fatal(config):
     summary = _run(config, facts=exploding_facts)
     assert summary.screened == 5
     assert any("GOOD" in e for e in summary.errors)
+
+
+def test_default_facts_fetcher_fails_fast_without_edgar_user_agent(config, monkeypatch):
+    """Fix 2: a missing SEC_EDGAR_USER_AGENT must blow up BEFORE the sweep,
+    not get swallowed ~1500 times by the per-name catch."""
+    from tradingagents.dataflows.edgar import EdgarNotConfiguredError
+
+    monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
+
+    with pytest.raises(EdgarNotConfiguredError):
+        run_mod.run_screen(
+            config=config, asof=ASOF,
+            universe_builder=lambda: [],
+            triggers_finder=lambda ticker, *, asof, lookback_days=90, list_filings=None: [],
+            price_context_fetcher=lambda s: _price_ctx(),
+            quote_source=lambda s: D("20"),
+        )
+
+
+def test_baseline_failure_is_non_fatal(config, tmp_path):
+    """Fix 3: a broken baseline journal must not take down the screen run —
+    the store write and screen results must survive it."""
+    broken_config = OpsConfig(
+        journal_path=config.journal_path,
+        baseline_journal_path=str(tmp_path),  # a directory, not a DB file
+        screen_store_path=config.screen_store_path,
+        baseline_starting_cash=config.baseline_starting_cash,
+    )
+    summary = _run(broken_config)
+    assert summary.passed  # screen results survive
+    assert ScreenStore(broken_config.screen_store_path).last_run() is not None
+    assert summary.baseline is None
+    assert any(e.startswith("baseline:") for e in summary.errors)
+
+
+def test_silent_none_names_are_promoted_to_errors(config):
+    """Fix 4: a name_inputs None (no price context / no close at asof) must
+    not vanish silently — it must show up in errors, not just be absent
+    from screened."""
+    universe = [_name("GOOD")] + [_name(f"PEER{i}") for i in range(5)]
+    trigger = Trigger(kind="activist_stake", description="SC 13D", date=ASOF, source="a1")
+
+    def fake_triggers(ticker, *, asof, lookback_days=90, list_filings=None):
+        return [trigger] if ticker == "GOOD" else []
+
+    summary = run_mod.run_screen(
+        config=config, asof=ASOF,
+        universe_builder=lambda: universe,
+        facts_fetcher=lambda t: _facts_for_passer(),
+        triggers_finder=fake_triggers,
+        price_context_fetcher=lambda s: None,
+        quote_source=lambda s: D("20"),
+    )
+    assert summary.screened == 0
+    symbols = [n.member.symbol for n in universe]
+    for symbol in symbols:
+        assert any(e.startswith(f"{symbol}: skipped") for e in summary.errors)

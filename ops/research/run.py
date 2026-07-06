@@ -96,7 +96,14 @@ def run_screen(
     quote_source=None,
 ) -> ScreenRunSummary:
     universe_builder = universe_builder or build_smallcap_universe
-    facts_fetcher = facts_fetcher or get_company_facts
+    if facts_fetcher is None:
+        # Fail fast: without the SEC user agent every name in the sweep
+        # would raise EdgarNotConfiguredError individually and be swallowed
+        # by the per-name skip, recording a junk all-errors run.
+        from tradingagents.dataflows import edgar
+
+        edgar.get_user_agent()
+        facts_fetcher = get_company_facts
     triggers_finder = triggers_finder or find_edgar_triggers
     price_context_fetcher = price_context_fetcher or fetch_price_context
 
@@ -121,6 +128,10 @@ def run_screen(
             continue
         if ni is not None:
             inputs.append(ni)
+        else:
+            msg = f"{symbol}: skipped (no price history or no close at asof)"
+            print(f"[screen] skipped {msg}", file=sys.stderr)
+            errors.append(msg)
 
     results = screen_universe(inputs, asof=asof)
     passed = tuple(r.symbol for r in results if r.passed)
@@ -132,16 +143,22 @@ def run_screen(
         run_id = store.record_run(
             asof=asof, universe_size=len(universe), results=results,
         )
-        with Journal(config.baseline_journal_path) as baseline_journal:
-            broker = PaperBroker.from_journal(
-                journal=baseline_journal,
-                quote_source=quote_source or make_yfinance_quote_source(),
-                starting_cash=config.baseline_starting_cash,
-            )
-            baseline_summary = update_baseline_portfolio(
-                broker=broker, journal=baseline_journal,
-                passers=list(passed), asof=asof,
-            )
+        try:
+            with Journal(config.baseline_journal_path) as baseline_journal:
+                broker = PaperBroker.from_journal(
+                    journal=baseline_journal,
+                    quote_source=quote_source or make_yfinance_quote_source(),
+                    starting_cash=config.baseline_starting_cash,
+                )
+                baseline_summary = update_baseline_portfolio(
+                    broker=broker, journal=baseline_journal,
+                    passers=list(passed), asof=asof,
+                )
+        except Exception as exc:  # the control must never take down a screen run
+            msg = f"baseline: {type(exc).__name__}: {exc}"
+            print(f"[screen] {msg}", file=sys.stderr)
+            errors.append(msg)
+            baseline_summary = None
 
     return ScreenRunSummary(
         run_id=run_id,

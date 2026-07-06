@@ -32,6 +32,25 @@ BASELINE_MAX_HOLD_DAYS = 365
 _MIN_ORDER_DOLLARS = Decimal("100")
 
 
+def _equity_with_fallback(broker: Broker, journal: Journal) -> Decimal:
+    """Equity for sizing/reporting, resilient to unquotable positions.
+
+    A delisted name (tender, acquisition) has no live quote; PaperBroker's
+    get_equity would raise and wedge the control forever. Mark such a
+    position at its last journaled BUY fill price instead — stale, but the
+    baseline keeps accruing, which is the whole point of a control.
+    """
+    total = broker.get_cash()
+    for pos in broker.get_positions():
+        try:
+            price = broker.get_quote(pos.symbol)
+        except QuoteUnavailable:
+            last_buy = journal.last_buy_fill_for(pos.symbol)
+            price = last_buy["price"] if last_buy is not None else pos.avg_entry_price
+        total += pos.market_value(price)
+    return total
+
+
 def update_baseline_portfolio(
     *,
     broker: Broker,
@@ -45,6 +64,10 @@ def update_baseline_portfolio(
     for pos in list(broker.get_positions()):
         last_buy = journal.last_buy_fill_for(pos.symbol)
         if last_buy is None:
+            # No journaled BUY fill for a held position has no hold clock.
+            # Replay can't produce this from normal operation — if it shows
+            # up, don't guess at a hold age; leave it for manual resolution
+            # (the monitoring loop, build-order step 6).
             continue
         held_days = (now - last_buy["filled_at"]).days
         if held_days < BASELINE_MAX_HOLD_DAYS:
@@ -61,7 +84,7 @@ def update_baseline_portfolio(
         exits.append(pos.symbol)
 
     held = {p.symbol for p in broker.get_positions()}
-    slice_dollars = broker.get_equity() * BASELINE_SLICE_PCT
+    slice_dollars = _equity_with_fallback(broker, journal) * BASELINE_SLICE_PCT
     buys: list[str] = []
     skipped: list[str] = []
     for symbol in sorted(dict.fromkeys(passers)):
@@ -92,14 +115,15 @@ def update_baseline_portfolio(
             break
         buys.append(symbol)
 
+    equity = _equity_with_fallback(broker, journal)
     journal.record_event(
         events.KIND_BASELINE_SCREEN_RUN,
         events.baseline_screen_run_payload(
             asof=asof.isoformat(), passers=len(passers),
-            buys=buys, exits=exits, skipped=skipped, equity=broker.get_equity(),
+            buys=buys, exits=exits, skipped=skipped, equity=equity,
         ),
     )
     journal.record_equity_snapshot(
-        kind="baseline_run", equity=broker.get_equity(), cash=broker.get_cash(), at=now,
+        kind="baseline_run", equity=equity, cash=broker.get_cash(), at=now,
     )
     return {"buys": buys, "exits": exits, "skipped": skipped}
