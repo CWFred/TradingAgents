@@ -7,6 +7,7 @@ from ops.pipeline_adapter import PipelineDecision, StubPipelineAdapter
 from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
 from ops.universe import Candidate, CandidateSource
 from ops.universe.earnings import EarningsHit
+from ops.universe.momentum import MomentumHit
 
 
 def _candidate(sym, price="200"):
@@ -20,6 +21,19 @@ def _candidate(sym, price="200"):
         symbol=sym, source=CandidateSource.EARNINGS, earnings=hit,
         last_price=Decimal(price), avg_dollar_volume_20d=Decimal("100000000"),
     )
+
+
+def _mhit(sym):
+    return MomentumHit(
+        symbol=sym, asof_date=date(2026, 6, 30),
+        trailing_return_6m=Decimal("0.4"), close=Decimal("200"),
+        sma_200=Decimal("150"), avg_dollar_volume_20d=Decimal("100000000"),
+        rank=1,
+    )
+
+
+def _fake_pipeline_buy():
+    return StubPipelineAdapter({"NVDA": PipelineDecision.BUY})
 
 
 def test_emits_buy_order_for_pipeline_buy():
@@ -151,3 +165,19 @@ def test_live_max_position_cap_none_uses_normal_notional():
     )
     assert len(orders) == 1
     assert orders[0].order.notional_dollars == Decimal("25.00")
+
+
+def test_momentum_candidate_gets_momentum_reason():
+    cand = Candidate(
+        symbol="NVDA", source=CandidateSource.MOMENTUM,
+        last_price=Decimal("200"), avg_dollar_volume_20d=Decimal("100000000"),
+        momentum=_mhit("NVDA"),
+    )
+    strategy = PostEarningsMomentumStrategy(config=OpsConfig())
+    orders = strategy.propose_orders(
+        candidates=[cand], pipeline=_fake_pipeline_buy(),
+        current_equity=Decimal("1000"), asof_date=date(2026, 7, 2),
+    )
+    assert len(orders) == 1
+    assert "6-mo momentum leader" in orders[0].reason
+    assert "0.4" in orders[0].reason
