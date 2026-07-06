@@ -22,7 +22,8 @@ from ops.pipeline_adapter import (
 from ops.position_guardian import PositionGuardian
 from ops.quotes import make_yfinance_quote_source
 from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
-from ops.universe import Candidate, CandidateSource, build_universe
+from ops.universe import Candidate, CandidateSource
+from ops.universe.composite import build_composite_universe
 from ops.universe.earnings import EarningsHit
 
 
@@ -297,8 +298,25 @@ def decide_once(
                f"stop {cfg.per_position_stop_pct}")
     click.echo("")
 
-    # Universe
-    candidates = build_universe(asof_date=asof_date, config=cfg)
+    # Quote source — uses yfinance with 60s TTL
+    quote_source = make_yfinance_quote_source()
+
+    # Broker (needed before composite universe for held positions)
+    guarded = build_guarded_paper_broker(
+        config=cfg, journal=journal,
+        quote_source=quote_source,
+        starting_cash=cash,
+        start_of_day_equity=lambda: cash,    # naive — Plan 3 reads from journal
+        start_of_week_equity=lambda: cash,
+    )
+
+    # Universe — composite (both earnings and momentum sleeves)
+    held = {p.symbol for p in guarded.get_positions()}
+    candidates = build_composite_universe(
+        asof_date=asof_date, config=cfg,
+        held_symbols=frozenset(held),
+        free_slots=max(0, cfg.max_open_positions - len(held)),
+    )
     click.echo(f"## Universe ({len(candidates)})")
     if not candidates:
         click.echo("(no candidates — nothing to do today)")
@@ -307,9 +325,6 @@ def decide_once(
                    f"earnings beat (EPS {c.earnings.eps_actual}/"
                    f"{c.earnings.eps_estimate})")
     click.echo("")
-
-    # Quote source — uses yfinance with 60s TTL
-    quote_source = make_yfinance_quote_source()
 
     # Forced candidates (smoke testing): bypass the universe filters, never
     # the guardrails — a deny-listed forced symbol must be REJECTED below.
@@ -344,15 +359,6 @@ def decide_once(
         pipeline = StubPipelineAdapter(decisions)
     else:
         pipeline = TradingAgentsPipelineAdapter()
-
-    # Broker
-    guarded = build_guarded_paper_broker(
-        config=cfg, journal=journal,
-        quote_source=quote_source,
-        starting_cash=cash,
-        start_of_day_equity=lambda: cash,    # naive — Plan 3 reads from journal
-        start_of_week_equity=lambda: cash,
-    )
 
     # Strategy
     strategy = PostEarningsMomentumStrategy(config=cfg)

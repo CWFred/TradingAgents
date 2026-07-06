@@ -1,9 +1,7 @@
-import json
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch
 
-import pytest
 from click.testing import CliRunner
 
 from ops.cli import cli
@@ -26,7 +24,7 @@ def _candidate(sym, price="200"):
 def test_decide_once_happy_path(tmp_path):
     journal_path = str(tmp_path / "j.sqlite")
     runner = CliRunner()
-    with patch("ops.cli.build_universe", return_value=[_candidate("AAPL")]), \
+    with patch("ops.cli.build_composite_universe", return_value=[_candidate("AAPL")]), \
          patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
         result = runner.invoke(cli, [
             "decide-once", "--date", "2026-06-30",
@@ -48,7 +46,7 @@ def test_force_candidate_injects_past_empty_universe(tmp_path):
     the real universe (earnings filter) is empty."""
     journal_path = str(tmp_path / "j.sqlite")
     runner = CliRunner()
-    with patch("ops.cli.build_universe", return_value=[]), \
+    with patch("ops.cli.build_composite_universe", return_value=[]), \
          patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
         result = runner.invoke(cli, [
             "decide-once", "--date", "2026-06-30",
@@ -69,7 +67,7 @@ def test_force_candidate_does_not_bypass_deny_list_rule(tmp_path):
     journal_path = str(tmp_path / "j.sqlite")
     runner = CliRunner()
     for sym in ("SPOT", "TQQQ"):
-        with patch("ops.cli.build_universe", return_value=[]), \
+        with patch("ops.cli.build_composite_universe", return_value=[]), \
              patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
             result = runner.invoke(cli, [
                 "decide-once", "--date", "2026-06-30",
@@ -87,7 +85,7 @@ def test_force_candidate_ignored_when_already_in_universe(tmp_path):
     """Forcing a symbol the universe already produced must not duplicate it."""
     journal_path = str(tmp_path / "j.sqlite")
     runner = CliRunner()
-    with patch("ops.cli.build_universe", return_value=[_candidate("AAPL")]), \
+    with patch("ops.cli.build_composite_universe", return_value=[_candidate("AAPL")]), \
          patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
         result = runner.invoke(cli, [
             "decide-once", "--date", "2026-06-30",
@@ -101,7 +99,7 @@ def test_force_candidate_ignored_when_already_in_universe(tmp_path):
 
 def test_decide_once_with_no_candidates(tmp_path):
     runner = CliRunner()
-    with patch("ops.cli.build_universe", return_value=[]):
+    with patch("ops.cli.build_composite_universe", return_value=[]):
         result = runner.invoke(cli, [
             "decide-once", "--date", "2026-06-30",
             "--journal", str(tmp_path / "j.sqlite"),
@@ -112,7 +110,7 @@ def test_decide_once_with_no_candidates(tmp_path):
 
 def test_decide_once_skips_holds(tmp_path):
     runner = CliRunner()
-    with patch("ops.cli.build_universe", return_value=[_candidate("AAPL")]), \
+    with patch("ops.cli.build_composite_universe", return_value=[_candidate("AAPL")]), \
          patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
         # No --stub-pipeline-buy → stub defaults to HOLD
         result = runner.invoke(cli, [
@@ -133,7 +131,7 @@ def test_decide_once_runs_guardian_pass(tmp_path):
     journal_path = str(tmp_path / "j.sqlite")
 
     # First run: open AAPL at $200
-    with patch("ops.cli.build_universe", return_value=[_candidate("AAPL")]), \
+    with patch("ops.cli.build_composite_universe", return_value=[_candidate("AAPL")]), \
          patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
         r1 = runner.invoke(cli, [
             "decide-once", "--date", "2026-06-30",
@@ -141,7 +139,7 @@ def test_decide_once_runs_guardian_pass(tmp_path):
         ])
     assert r1.exit_code == 0
     # Second run: no new candidates, but quote dropped — guardian should fire
-    with patch("ops.cli.build_universe", return_value=[]), \
+    with patch("ops.cli.build_composite_universe", return_value=[]), \
          patch("ops.cli.make_yfinance_quote_source",
                return_value=lambda s: Decimal("180")):  # -10% vs 200
         r2 = runner.invoke(cli, [
@@ -157,3 +155,27 @@ def test_decide_once_runs_guardian_pass(tmp_path):
     # for THIS invocation, which is mostly useful when the same invocation
     # both opens and (in pathological cases) closes positions.
     assert "guardian" in r2.output.lower()
+
+
+def test_decide_once_uses_composite_universe(tmp_path):
+    """The non-forced path calls build_composite_universe with held_symbols
+    and free_slots, not the earnings-only build_universe."""
+    calls = []
+
+    def recording_builder(*, asof_date, config, held_symbols=frozenset(),
+                           free_slots=None, **kwargs):
+        calls.append({"held": held_symbols, "free_slots": free_slots})
+        return [_candidate("AAPL")]
+
+    runner = CliRunner()
+    with patch("ops.cli.build_composite_universe", recording_builder), \
+         patch("ops.cli.make_yfinance_quote_source", return_value=lambda s: Decimal("200")):
+        result = runner.invoke(cli, [
+            "decide-once", "--date", "2026-06-30",
+            "--journal", str(tmp_path / "j.sqlite"),
+            "--stub-pipeline-buy", "AAPL",
+        ])
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert isinstance(calls[0]["held"], frozenset)
+    assert calls[0]["free_slots"] is not None or calls[0]["free_slots"] >= 0
