@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS screen_runs (
     asof TEXT NOT NULL,
     created_at TEXT NOT NULL,
     universe_size INTEGER NOT NULL,
-    passed_count INTEGER NOT NULL
+    passed_count INTEGER NOT NULL,
+    coverage TEXT
 );
 CREATE TABLE IF NOT EXISTS screen_hits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

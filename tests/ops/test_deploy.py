@@ -138,6 +138,7 @@ def test_install_screen_service_writes_rendered_file_and_prints_bootstrap(tmp_pa
 
     monkeypatch.setattr(subprocess, "run", _no_subprocess)
     monkeypatch.setattr(subprocess, "Popen", _no_subprocess)
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "Test test@example.com")
 
     runner = CliRunner()
     result = runner.invoke(cli, ["install-screen-service", "--output", str(output)])
@@ -148,3 +149,34 @@ def test_install_screen_service_writes_rendered_file_and_prints_bootstrap(tmp_pa
     # Prints (never runs) the load command.
     assert "launchctl bootstrap" in result.output
     assert str(output) in result.output
+
+
+def test_install_screen_service_refuses_empty_user_agent(tmp_path, monkeypatch):
+    """Baking an empty SEC_EDGAR_USER_AGENT into the plist guarantees the
+    weekly job dies (EdgarNotConfiguredError) before every run — refuse at
+    install time instead."""
+    monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
+    output = tmp_path / "com.tradingagents.screen.plist"
+    result = CliRunner().invoke(
+        cli, ["install-screen-service", "--output", str(output)])
+    assert result.exit_code != 0
+    assert "SEC_EDGAR_USER_AGENT" in result.output
+    assert not output.exists()
+
+
+def test_screen_render_xml_escapes_substitutions():
+    """SEC fair-access user agents are 'Org contact@email' — an '&' or '<'
+    must render as valid plist XML, not a launchctl bootstrap failure."""
+    import plistlib
+
+    from ops.deploy import render_screen_plist
+
+    rendered = render_screen_plist(
+        python_path="/x/.venv/bin/python", repo_dir="/x",
+        log_dir="/x/logs",
+        sec_edgar_user_agent="Smith & Co <admin@smith.co>",
+    )
+    assert "Smith &amp; Co &lt;admin@smith.co&gt;" in rendered
+    parsed = plistlib.loads(rendered.encode())
+    env = parsed["EnvironmentVariables"]
+    assert env["SEC_EDGAR_USER_AGENT"] == "Smith & Co <admin@smith.co>"

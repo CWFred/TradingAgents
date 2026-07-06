@@ -127,6 +127,15 @@ def test_config_disabled_by_default(monkeypatch):
     assert cfg.kind == "none"
 
 
+def test_config_rejects_unrecognized_bool_value(monkeypatch):
+    """'maybe'/'disable'/typos must error, not silently parse as True (the
+    notify config's _env_bool allowlists — this one must not denylist)."""
+    monkeypatch.setenv("OPS_LLM_MANAGED_BACKEND", "ds4")
+    monkeypatch.setenv("DS4_BUILD_IF_MISSING", "disable")
+    with pytest.raises(ManagedBackendError):
+        load_managed_backend_config()
+
+
 def test_config_enabled_for_ds4_with_env_overrides(monkeypatch):
     monkeypatch.setenv("OPS_LLM_MANAGED_BACKEND", "ds4")
     monkeypatch.setenv("DS4_PORT", "9001")

@@ -7,6 +7,20 @@ from click.testing import CliRunner
 from ops.cli import cli
 from ops.universe import Candidate, CandidateSource
 from ops.universe.earnings import EarningsHit
+from ops.universe.momentum import MomentumHit
+
+
+def _momentum_candidate(sym, price="200"):
+    hit = MomentumHit(
+        symbol=sym, asof_date=date(2026, 6, 30),
+        trailing_return_6m=Decimal("0.4"), close=Decimal(price),
+        sma_200=Decimal("150"), avg_dollar_volume_20d=Decimal("100000000"),
+        rank=1,
+    )
+    return Candidate(symbol=sym, source=CandidateSource.MOMENTUM, earnings=None,
+                     last_price=Decimal(price),
+                     avg_dollar_volume_20d=Decimal("100000000"),
+                     momentum=hit)
 
 
 def _candidate(sym, price="200"):
@@ -178,4 +192,22 @@ def test_decide_once_uses_composite_universe(tmp_path):
     assert result.exit_code == 0
     assert len(calls) == 1
     assert isinstance(calls[0]["held"], frozenset)
-    assert calls[0]["free_slots"] is not None or calls[0]["free_slots"] >= 0
+    assert calls[0]["free_slots"] is not None and calls[0]["free_slots"] >= 0
+
+
+def test_decide_once_prints_momentum_candidates_without_earnings(tmp_path):
+    """Momentum-sleeve candidates carry earnings=None; the universe listing
+    must not dereference c.earnings (the daemon's composite universe emits
+    these on any day a momentum leader isn't also an earnings beat)."""
+    runner = CliRunner()
+    with patch("ops.cli.build_composite_universe",
+               return_value=[_momentum_candidate("NVDA")]), \
+         patch("ops.cli.make_yfinance_quote_source",
+               return_value=lambda s: Decimal("200")):
+        result = runner.invoke(cli, [
+            "decide-once", "--date", "2026-06-30",
+            "--journal", str(tmp_path / "j.sqlite"), "--stub-pipeline",
+        ])
+    assert result.exit_code == 0, result.output
+    assert "NVDA" in result.output
+    assert "momentum" in result.output.lower()

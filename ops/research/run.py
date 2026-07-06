@@ -58,10 +58,25 @@ def _name_inputs(
         return None
     # Rescale the snapshot market cap to the as-of price: shares from the
     # snapshot, price from now — keeps cheapness bars honest between the
-    # quarterly universe refresh and a weekly screen run.
-    market_cap = name.member.market_cap * price / name.member.last_price
+    # quarterly universe refresh and a weekly screen run. Both legs must be
+    # in the snapshot's share basis (era_end) or a split in between scales
+    # the cap by the split ratio.
+    asof_price_snapshot_era = ctx.unadjusted_close_on_or_before(
+        asof, era_end=name.snapshot_at,
+    )
+    market_cap = (
+        name.member.market_cap * asof_price_snapshot_era / name.member.last_price
+    )
     facts = facts_fetcher(symbol)
     fundamentals = compute_fundamentals(symbol, facts, asof=asof)
+    # The current-P/E leg divides by as-reported EPS (the latest fiscal
+    # year's share basis), so its price must be in that era too — a split
+    # after the fiscal year end otherwise understates current P/E by the
+    # split ratio while the historical median stays correct.
+    if fundamentals.eps_history:
+        price = ctx.unadjusted_close_on_or_before(
+            asof, era_end=fundamentals.eps_history[-1].fiscal_year_end,
+        )
     triggers = list(triggers_finder(symbol, asof=asof))
     selloff = find_selloff_trigger(
         symbol, ctx.recent_closes(asof=asof, days=SELLOFF_LOOKBACK_DAYS), asof=asof,

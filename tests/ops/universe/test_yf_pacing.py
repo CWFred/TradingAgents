@@ -57,6 +57,59 @@ def test_snapshot_resets():
     assert yf_pacing.snapshot_and_reset() == {}
 
 
+def _dead():
+    raise KeyError("boom")
+
+
+def _trip_breaker(label="adv"):
+    for _ in range(yf_pacing.BREAKER_CONSECUTIVE_FAILURES):
+        with pytest.raises(KeyError):
+            yf_pacing.call_paced(
+                _dead, label=label, sleep=lambda s: None, monotonic=lambda: 0.0,
+            )
+
+
+def test_breaker_trips_after_consecutive_failures_and_stops_retrying():
+    """A systemic outage must fail fast after the first few names instead of
+    burning ~30s of backoff per name across a 500-1500 name sweep."""
+    _trip_breaker()
+    sleeps = []
+    with pytest.raises(KeyError):
+        yf_pacing.call_paced(
+            _dead, label="adv", sleep=sleeps.append, monotonic=lambda: 0.0,
+        )
+    assert not [s for s in sleeps if s in yf_pacing.BACKOFF_SECONDS]
+    # Failures are still counted while the breaker is open (the blind alarm
+    # feeds on these).
+    snap = yf_pacing.snapshot_and_reset()
+    assert snap["adv"]["failed"] == yf_pacing.BREAKER_CONSECUTIVE_FAILURES + 1
+
+
+def test_breaker_resets_on_success():
+    _trip_breaker()
+    yf_pacing.call_paced(lambda: 1, label="adv", sleep=lambda s: None,
+                         monotonic=lambda: 0.0)
+    sleeps = []
+    with pytest.raises(KeyError):
+        yf_pacing.call_paced(
+            _dead, label="adv", sleep=sleeps.append, monotonic=lambda: 0.0,
+        )
+    assert [s for s in sleeps if s in yf_pacing.BACKOFF_SECONDS] == list(yf_pacing.BACKOFF_SECONDS)
+
+
+def test_snapshot_and_reset_closes_the_breaker():
+    """Each cycle/sweep starts with fresh retries — yesterday's outage must
+    not disable today's backoff."""
+    _trip_breaker()
+    yf_pacing.snapshot_and_reset()
+    sleeps = []
+    with pytest.raises(KeyError):
+        yf_pacing.call_paced(
+            _dead, label="adv", sleep=sleeps.append, monotonic=lambda: 0.0,
+        )
+    assert [s for s in sleeps if s in yf_pacing.BACKOFF_SECONDS] == list(yf_pacing.BACKOFF_SECONDS)
+
+
 def test_earnings_fetcher_survives_one_transient_failure(monkeypatch):
     import pandas as pd
 

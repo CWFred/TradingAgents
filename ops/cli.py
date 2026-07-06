@@ -40,6 +40,23 @@ def run():
     sys.exit(_run())
 
 
+def _install_plist(rendered: str, output_path: str, log_dir: str) -> None:
+    """Write a rendered plist and print the (never-run) launchctl commands."""
+    import os
+    from pathlib import Path
+
+    output = Path(os.path.abspath(os.path.expanduser(output_path)))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    output.write_text(rendered)
+    click.echo(f"Wrote {output}")
+    click.echo(f"Logs will go to {log_dir}/")
+    click.echo("To load it (not done automatically), run:")
+    click.echo(f"  launchctl bootstrap gui/$(id -u) {output}")
+    click.echo("To unload it later:")
+    click.echo(f"  launchctl bootout gui/$(id -u) {output}")
+
+
 @cli.command("install-service")
 @click.option("--output", "output_path",
               default="~/Library/LaunchAgents/com.tradingagents.ops.plist",
@@ -67,16 +84,7 @@ def install_service(output_path: str, log_dir: str) -> None:
         venv_python=sys.executable,
         log_dir=log_dir,
     )
-    output = Path(os.path.abspath(os.path.expanduser(output_path)))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
-    output.write_text(rendered)
-    click.echo(f"Wrote {output}")
-    click.echo(f"Logs will go to {log_dir}/")
-    click.echo("To load the service (not done automatically), run:")
-    click.echo(f"  launchctl bootstrap gui/$(id -u) {output}")
-    click.echo("To unload it later:")
-    click.echo(f"  launchctl bootout gui/$(id -u) {output}")
+    _install_plist(rendered, output_path, log_dir)
     click.echo(
         "NOTE: launchd cannot start jobs on a sleeping laptop. Consider a "
         "wake schedule (your call to apply):\n"
@@ -102,25 +110,24 @@ def install_screen_service(output_path: str, log_dir: str) -> None:
 
     from ops.deploy import render_screen_plist
 
+    sec_edgar = os.environ.get("SEC_EDGAR_USER_AGENT", "").strip()
+    if not sec_edgar:
+        # An empty value baked into the plist makes every Saturday run die
+        # with EdgarNotConfiguredError before it can even notify.
+        raise click.ClickException(
+            "SEC_EDGAR_USER_AGENT is not set — the weekly screen would fail "
+            "on every run. Export it first (SEC fair-access format: "
+            "'Name email@example.com'), then re-run."
+        )
     repo_root = str(Path(__file__).resolve().parents[1])
     log_dir = os.path.abspath(os.path.expanduser(log_dir))
-    sec_edgar = os.environ.get("SEC_EDGAR_USER_AGENT", "")
     rendered = render_screen_plist(
         python_path=sys.executable,
         repo_dir=repo_root,
         log_dir=log_dir,
         sec_edgar_user_agent=sec_edgar,
     )
-    output = Path(os.path.abspath(os.path.expanduser(output_path)))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
-    output.write_text(rendered)
-    click.echo(f"Wrote {output}")
-    click.echo(f"Logs will go to {log_dir}/")
-    click.echo("To load the screen job (not done automatically), run:")
-    click.echo(f"  launchctl bootstrap gui/$(id -u) {output}")
-    click.echo("To unload it later:")
-    click.echo(f"  launchctl bootout gui/$(id -u) {output}")
+    _install_plist(rendered, output_path, log_dir)
 
 
 @cli.command("notify-once")
@@ -185,7 +192,23 @@ def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None, do_notify
             "uses TODAY's universe membership and TODAY's baseline fill prices "
             "— debug knob, not a backtest."
         )
-    summary = run_screen(config=config, asof=asof_date, dry_run=dry_run, limit=limit)
+    try:
+        summary = run_screen(config=config, asof=asof_date, dry_run=dry_run,
+                             limit=limit)
+    except Exception as exc:
+        # The unattended Saturday job's only signal is this push — a
+        # whole-run crash (Nasdaq 403, Edgar misconfig) must not be silent.
+        if do_notify:
+            from ops.notify.config import load_notify_config
+            from ops.notify.push import build_push_transport
+            from ops.notify.transport import NotifyMessage
+
+            build_push_transport(load_notify_config()).send(NotifyMessage(
+                title="screen FAILED",
+                body=f"{type(exc).__name__}: {exc}",
+                urgency="high",
+            ))
+        raise
     click.echo(f"screen run {summary.run_id or '(dry-run)'} asof {summary.asof}")
     click.echo(
         f"universe {summary.universe_size}, screened {summary.screened}, "
@@ -205,7 +228,10 @@ def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None, do_notify
         pct = (100 * counts["computed"] // total) if total else 0
         click.echo(f"  coverage {bar_name}: {counts['computed']}/{total} ({pct}%)")
 
-    blind = summary.universe_size > 0 and len(summary.errors) * 2 > summary.universe_size
+    # Blind = an empty universe (the 2026-07-06 incident mode: every fetch
+    # failed or the cache is poisoned) OR a majority of names erroring.
+    blind = (summary.universe_size == 0
+             or len(summary.errors) * 2 > summary.universe_size)
     if do_notify:
         from ops.notify.config import load_notify_config
         from ops.notify.push import build_push_transport
@@ -213,11 +239,13 @@ def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None, do_notify
 
         transport = build_push_transport(load_notify_config())
         if blind:
+            if summary.universe_size == 0:
+                body = "universe came back EMPTY (fetch failures?); results unusable"
+            else:
+                body = (f"{len(summary.errors)}/{summary.universe_size} names "
+                        "errored; results unusable")
             transport.send(NotifyMessage(
-                title="screen BLIND",
-                body=(f"{len(summary.errors)}/{summary.universe_size} names errored; "
-                      "results unusable"),
-                urgency="high",
+                title="screen BLIND", body=body, urgency="high",
             ))
         else:
             transport.send(NotifyMessage(
@@ -321,9 +349,13 @@ def decide_once(
     if not candidates:
         click.echo("(no candidates — nothing to do today)")
     for c in candidates:
-        click.echo(f"  - {c.symbol}: price=${c.last_price} "
-                   f"earnings beat (EPS {c.earnings.eps_actual}/"
+        if c.earnings is not None:
+            why = (f"earnings beat (EPS {c.earnings.eps_actual}/"
                    f"{c.earnings.eps_estimate})")
+        else:
+            why = (f"momentum leader (rank {c.momentum.rank}, "
+                   f"6m {c.momentum.trailing_return_6m:+.0%})")
+        click.echo(f"  - {c.symbol}: price=${c.last_price} {why}")
     click.echo("")
 
     # Forced candidates (smoke testing): bypass the universe filters, never

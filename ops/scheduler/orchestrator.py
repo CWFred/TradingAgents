@@ -219,13 +219,16 @@ class Orchestrator:
             ),
         )
         total = fetch_ok + fetch_failed
-        if candidate_count == 0 and total > 0 and fetch_failed * 2 > total:
+        # Majority fetch failures = a blind day even if a few candidates
+        # survived — a 96%-failed sweep with 2 survivors must still alarm.
+        if total > 0 and fetch_failed * 2 > total:
             self._journal.record_event(
                 events.KIND_UNIVERSE_BLIND,
                 events.universe_blind_payload(
                     asof_date=asof_date, fetch_ok=fetch_ok,
                     fetch_failed=fetch_failed,
-                    detail="empty universe with majority fetch failures",
+                    detail=(f"majority fetch failures "
+                            f"({candidate_count} candidate(s) survived)"),
                 ),
             )
 

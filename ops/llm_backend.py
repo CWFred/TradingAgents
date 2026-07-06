@@ -226,7 +226,16 @@ def _env_bool(name: str) -> bool | None:
     raw = os.environ.get(name)
     if raw is None or raw == "":
         return None
-    return raw.strip().lower() not in ("0", "false", "no", "off")
+    value = raw.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    # Never guess: a denylist would parse 'disable'/typos as True, the
+    # opposite of the notify config's allowlist semantics.
+    raise ManagedBackendError(
+        f"invalid bool for {name}: {raw!r} (use 1/0, true/false, yes/no, on/off)"
+    )
 
 
 def load_managed_backend_config() -> ManagedBackendConfig:

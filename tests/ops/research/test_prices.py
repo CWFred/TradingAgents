@@ -86,3 +86,17 @@ def test_multiple_future_splits_compound():
         splits={date(2025, 6, 1): Decimal("2"), date(2026, 6, 1): Decimal("3")},
     )
     assert ctx.unadjusted_close_on_or_before(date(2024, 12, 31)) == Decimal("30")
+
+
+def test_era_end_anchors_split_factor_to_that_era():
+    # 10:1 split on 2026-03-15, AFTER the fiscal year end 2025-12-31 but
+    # before asof: today's $50 close is worth $500 in FY-2025 share basis.
+    ctx = PriceContext(
+        closes={date(2026, 7, 3): Decimal("50")},
+        splits={date(2026, 3, 15): Decimal("10")},
+    )
+    assert ctx.unadjusted_close_on_or_before(
+        date(2026, 7, 3), era_end=date(2025, 12, 31)) == Decimal("500")
+    # An era ending after the split has nothing to undo.
+    assert ctx.unadjusted_close_on_or_before(
+        date(2026, 7, 3), era_end=date(2026, 4, 1)) == Decimal("50")

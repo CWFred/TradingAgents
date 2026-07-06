@@ -700,6 +700,22 @@ def test_daily_cycle_emits_universe_diagnostics(monkeypatch):
     assert events.KIND_UNIVERSE_BLIND in kinds  # 0 candidates, 100% failures
 
 
+def test_blind_alarm_fires_on_majority_failures_even_with_candidates():
+    """A 96%-failed sweep that still scrapes together 2 candidates is a blind
+    day: the alarm must not be gated on candidate_count == 0."""
+    from ops import events
+
+    journal = _make_journal()
+    orch = _make_orchestrator(journal=journal)
+    yf_pacing.snapshot_and_reset()  # clear leakage from other tests
+    _seed_pacing_failures(48)
+    yf_pacing._count("earnings", ok=True)
+    yf_pacing._count("earnings", ok=True)
+    orch._emit_universe_diagnostics(date(2026, 7, 6), candidate_count=2)
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert events.KIND_UNIVERSE_BLIND in kinds
+
+
 def test_no_blind_alarm_when_feed_healthy(monkeypatch):
     from ops import events
 
