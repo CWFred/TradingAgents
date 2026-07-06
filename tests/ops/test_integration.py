@@ -82,7 +82,7 @@ def test_happy_path_fills_and_journals(tmp_path):
     (_sell(), "LongOnlyRule"),  # no position held; any SELL over-sells
     (_buy(stop_pct=None), "StopAttachedRule"),
     (_buy(notional="4.99"), "PerTradeDollarFloorRule"),
-    (_buy(notional="25.01"), "PerPositionCapRule"),
+    (_buy(notional="30.01"), "PerPositionCapRule"),
 ])
 def test_rule_rejections(tmp_path, order, expected_rule):
     j, paper, guarded = _default_stack(tmp_path)
@@ -99,9 +99,10 @@ def test_rule_rejections(tmp_path, order, expected_rule):
 
 
 def test_max_open_positions_rejection(tmp_path):
-    # Fund the broker enough to hold 5 positions
+    # Fund the broker enough to hold 7 positions
     j = Journal(str(tmp_path / "j.sqlite"))
-    quotes = {s: Decimal("200") for s in ("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META")}
+    quotes = {s: Decimal("200") for s in
+              ("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "NFLX", "TSLA")}
     paper = PaperBroker(journal=j, quote_source=lambda s: quotes[s],
                        starting_cash=Decimal("10000"))
     cfg = OpsConfig()
@@ -114,12 +115,12 @@ def test_max_open_positions_rejection(tmp_path):
         WeeklyDrawdownRule(start_of_week_equity=lambda: Decimal("10000")),
     ]
     guarded = GuardedBroker(inner=paper, engine=RuleEngine(rules), journal=j, config=cfg)
-    # Buy 5 different positions at $25 each
-    for i, sym in enumerate(("AAPL", "MSFT", "NVDA", "GOOG", "AMZN")):
+    # Buy 7 different positions at $25 each
+    for i, sym in enumerate(("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "NFLX")):
         guarded.place_order(_buy(symbol=sym, notional="25", cid=f"c{i}"))
-    # 6th NEW symbol must be rejected
+    # 8th NEW symbol must be rejected
     with pytest.raises(OrderRejected) as exc:
-        guarded.place_order(_buy(symbol="META", notional="25", cid="c6"))
+        guarded.place_order(_buy(symbol="TSLA", notional="25", cid="c8"))
     assert exc.value.rule_name == "MaxOpenPositionsRule"
 
 
@@ -138,9 +139,9 @@ def test_cash_reserve_rejection(tmp_path):
         WeeklyDrawdownRule(start_of_week_equity=lambda: Decimal("60")),
     ]
     guarded = GuardedBroker(inner=paper, engine=RuleEngine(rules), journal=j, config=cfg)
-    # Buy $50 — post-cash $10, floor 20% of $60 = $12 → reject
+    # Buy $51 — post-cash $9, floor 16% of $60 = $9.60 → reject
     with pytest.raises(OrderRejected) as exc:
-        guarded.place_order(_buy(notional="50"))
+        guarded.place_order(_buy(notional="51"))
     assert exc.value.rule_name == "CashReserveRule"
 
 

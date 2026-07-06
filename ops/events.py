@@ -31,7 +31,7 @@ carry event_id for cursor forensics. Do not rename keys.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -78,6 +78,17 @@ KIND_NOTIFY_RENDER_ERROR = "notify_render_error"
 KIND_NOTIFY_DISPATCH_ERROR = "notify_dispatch_error"
 KIND_NOTIFY_EVENT_SKIPPED = "notify_event_skipped"
 
+# Position lifecycle / exit engine
+KIND_POSITION_OPENED = "position_opened"
+KIND_EXIT_DECISION = "exit_decision"
+KIND_EXIT_ORDER_PLACED = "exit_order_placed"
+KIND_EXIT_SKIPPED_MISSING_DATA = "exit_skipped_missing_data"
+KIND_EXIT_CHECK_ERROR = "exit_check_error"
+KIND_EXIT_UNKNOWN_PROVENANCE = "exit_unknown_provenance"
+
+# Scheduler / daily-cycle gate
+KIND_DAILY_CYCLE_RUN = "daily_cycle_run"
+
 # Kinds deliberately NOT notified. Everything here is an audit trail the
 # operator reads via `ops status` or sqlite, not a push/email — either
 # because it fires during normal operation (service lifecycle, replay
@@ -98,6 +109,16 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_NOTIFY_RENDER_ERROR,
     KIND_NOTIFY_DISPATCH_ERROR,
     KIND_NOTIFY_EVENT_SKIPPED,
+    # Exit lifecycle: the sell itself already notifies via KIND_FILL (push);
+    # these are audit breadcrumbs.
+    KIND_POSITION_OPENED,
+    KIND_EXIT_DECISION,
+    KIND_EXIT_ORDER_PLACED,
+    KIND_EXIT_SKIPPED_MISSING_DATA,
+    # Backward-compat audit trail — position predates position_opened events.
+    KIND_EXIT_UNKNOWN_PROVENANCE,
+    # Operational bookkeeping, gates the once-daily universe/exit cycle.
+    KIND_DAILY_CYCLE_RUN,
 })
 
 
@@ -371,6 +392,50 @@ def notify_event_skipped_payload(
     }
 
 
+def position_opened_payload(
+    *, symbol: str, source: str, entry_date: date,
+    client_order_id: str, entry_rank: int | None = None,
+) -> dict[str, Any]:
+    """symbol/source/entry_date are read back by the exit engine's
+    provenance loader (json_extract on symbol) — keys frozen."""
+    payload: dict[str, Any] = {
+        "symbol": symbol,
+        "source": source,
+        "entry_date": entry_date.isoformat(),
+        "client_order_id": client_order_id,
+    }
+    if entry_rank is not None:
+        payload["entry_rank"] = entry_rank
+    return payload
+
+
+def exit_decision_payload(*, symbol: str, rule: str, evidence: str) -> dict[str, Any]:
+    return {"symbol": symbol, "rule": rule, "evidence": evidence}
+
+
+def exit_order_placed_payload(
+    *, symbol: str, client_order_id: str, rule: str,
+) -> dict[str, Any]:
+    return {"symbol": symbol, "client_order_id": client_order_id, "rule": rule}
+
+
+def exit_skipped_missing_data_payload(*, symbol: str, reason: str) -> dict[str, Any]:
+    return {"symbol": symbol, "reason": reason}
+
+
+def exit_check_error_payload(*, error: str) -> dict[str, Any]:
+    """`error` is inherently dynamic — mirrors guardian_check_error."""
+    return {"error": error}
+
+
+def exit_unknown_provenance_payload(*, symbol: str) -> dict[str, Any]:
+    return {"symbol": symbol}
+
+
+def daily_cycle_run_payload(*, asof_date: date) -> dict[str, Any]:
+    return {"asof_date": asof_date.isoformat()}
+
+
 # Kind -> builder registry: the enforcement test walks this to prove every
 # POLICY kind has a builder and every builder's kind has been classified
 # (POLICY or AUDIT_ONLY). Register every new builder here.
@@ -404,4 +469,11 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_NOTIFY_RENDER_ERROR: notify_render_error_payload,
     KIND_NOTIFY_DISPATCH_ERROR: notify_dispatch_error_payload,
     KIND_NOTIFY_EVENT_SKIPPED: notify_event_skipped_payload,
+    KIND_POSITION_OPENED: position_opened_payload,
+    KIND_EXIT_DECISION: exit_decision_payload,
+    KIND_EXIT_ORDER_PLACED: exit_order_placed_payload,
+    KIND_EXIT_SKIPPED_MISSING_DATA: exit_skipped_missing_data_payload,
+    KIND_EXIT_CHECK_ERROR: exit_check_error_payload,
+    KIND_EXIT_UNKNOWN_PROVENANCE: exit_unknown_provenance_payload,
+    KIND_DAILY_CYCLE_RUN: daily_cycle_run_payload,
 }

@@ -46,6 +46,7 @@ POLICY: dict[str, PolicyEntry] = {
     events.KIND_BROKER_UNREACHABLE: _EMAIL_THROTTLED,
     events.KIND_ORCHESTRATOR_TICK_ERROR: _EMAIL_THROTTLED,
     events.KIND_GUARDIAN_CHECK_ERROR: _EMAIL_THROTTLED,
+    events.KIND_EXIT_CHECK_ERROR: _EMAIL_THROTTLED,
     events.KIND_QUOTE_UNAVAILABLE: _EMAIL_THROTTLED,
     # Dead-man's-switch ping failure (A1.3): worth knowing about, but a
     # monitoring outage is not a trading emergency — email, throttled.

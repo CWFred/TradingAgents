@@ -7,7 +7,7 @@ import pytest
 from click.testing import CliRunner
 
 from ops.cli import cli
-from ops.universe import Candidate
+from ops.universe import Candidate, CandidateSource
 from ops.universe.earnings import EarningsHit
 
 
@@ -18,7 +18,7 @@ def _candidate(sym, price="200"):
         revenue_actual=Decimal("100"), revenue_estimate=Decimal("90"),
         eps_beat=True, revenue_beat=True,
     )
-    return Candidate(symbol=sym, earnings=hit,
+    return Candidate(symbol=sym, source=CandidateSource.EARNINGS, earnings=hit,
                      last_price=Decimal(price),
                      avg_dollar_volume_20d=Decimal("100000000"))
 

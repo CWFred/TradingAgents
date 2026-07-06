@@ -30,7 +30,7 @@ def test_per_position_cap_allows_under_threshold():
 
 
 def test_per_position_cap_blocks_over_threshold():
-    r = PerPositionCapRule().check(_ctx("25.01", [], "250", "250"))
+    r = PerPositionCapRule().check(_ctx("30.01", [], "250", "250"))
     assert r.allowed is False
 
 
@@ -50,9 +50,9 @@ def _pos(sym: str) -> Position:
 
 
 def test_max_open_positions_blocks_when_full():
-    positions = [_pos(s) for s in ("AAPL", "MSFT", "NVDA", "GOOG", "AMZN")]
+    positions = [_pos(s) for s in ("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "NFLX")]
     o = Order(
-        client_order_id="c", symbol="META", side=Side.BUY,
+        client_order_id="c", symbol="TSLA", side=Side.BUY,
         notional_dollars=Decimal("25"), order_type=OrderType.MARKET,
         stop_pct=Decimal("-0.08"),
     )
@@ -88,8 +88,8 @@ def test_max_open_positions_allows_under_cap():
     assert MaxOpenPositionsRule().check(ctx).allowed is True
 
 
-def test_cash_reserve_blocks_if_buy_would_breach_20pct_floor():
-    # Equity $250; 20% reserve = $50 floor. Cash $60. $25 BUY leaves $35 — below floor.
+def test_cash_reserve_blocks_if_buy_would_breach_16pct_floor():
+    # Equity $250; 16% reserve = $40 floor. Cash $60. $25 BUY leaves $35 — below floor.
     r = CashReserveRule().check(_ctx("25", [], "250", "60"))
     assert r.allowed is False
 

@@ -17,7 +17,7 @@ from ops.broker.types import Order, OrderType, Side
 from ops.config import OpsConfig
 from ops.pipeline_adapter import PipelineAdapter, PipelineDecision
 from ops.strategy.base import StrategyOrder
-from ops.universe import Candidate
+from ops.universe import Candidate, CandidateSource
 
 
 def _client_order_id(symbol: str, asof: date) -> str:
@@ -32,6 +32,18 @@ def _client_order_id(symbol: str, asof: date) -> str:
 
 def _quantize_money(d: Decimal) -> Decimal:
     return d.quantize(Decimal("0.01"))
+
+
+def _reason_for(cand: Candidate) -> str:
+    if cand.source is CandidateSource.EARNINGS:
+        return (
+            f"post-earnings beat (EPS {cand.earnings.eps_actual} vs "
+            f"est {cand.earnings.eps_estimate}); pipeline BUY"
+        )
+    return (
+        f"6-mo momentum leader (ret {cand.momentum.trailing_return_6m}, "
+        f"> 200d MA); pipeline BUY"
+    )
 
 
 class PostEarningsMomentumStrategy:
@@ -67,8 +79,7 @@ class PostEarningsMomentumStrategy:
             )
             out.append(StrategyOrder(
                 order=order,
-                reason=f"post-earnings beat (EPS {cand.earnings.eps_actual} vs "
-                       f"est {cand.earnings.eps_estimate}); pipeline BUY",
+                reason=_reason_for(cand),
                 candidate=cand,
                 pipeline=result,
             ))

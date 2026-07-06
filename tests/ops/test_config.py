@@ -15,10 +15,10 @@ def test_default_config_matches_spec():
         "SOXL", "SOXS", "LABU", "LABD", "TNA", "TZA",
         "TMF", "TMV", "QLD", "QID",
     }
-    assert cfg.per_position_cap_pct == Decimal("0.10")
+    assert cfg.per_position_cap_pct == Decimal("0.12")
     assert cfg.per_trade_dollar_floor == Decimal("5")
-    assert cfg.max_open_positions == 5
-    assert cfg.cash_reserve_pct == Decimal("0.20")
+    assert cfg.max_open_positions == 7
+    assert cfg.cash_reserve_pct == Decimal("0.16")
     assert cfg.daily_drawdown_pct == Decimal("-0.07")
     assert cfg.weekly_drawdown_pct == Decimal("-0.15")
     assert cfg.per_position_stop_pct == Decimal("-0.08")
@@ -114,3 +114,56 @@ def test_live_gate_from_env(monkeypatch):
     monkeypatch.setenv("OPS_LIVE_FILL_GATE_COUNT", "30")
     c = load_config()
     assert c.live_max_position == Decimal("8") and c.live_fill_gate_count == 30
+
+
+def test_envelope_rev2_defaults_and_derived_concurrency():
+    cfg = OpsConfig()
+    assert cfg.max_open_positions == 7
+    assert cfg.per_position_cap_pct == Decimal("0.12")
+    assert cfg.cash_reserve_pct == Decimal("0.16")
+    # Neither dial is cosmetic: derived effective concurrency equals the cap.
+    deployable = Decimal("1") - cfg.cash_reserve_pct
+    assert min(cfg.max_open_positions,
+               int(deployable / cfg.per_position_cap_pct)) == 7
+    # Safety rails unchanged.
+    assert cfg.per_position_stop_pct == Decimal("-0.08")
+    assert cfg.daily_drawdown_pct == Decimal("-0.07")
+    assert cfg.weekly_drawdown_pct == Decimal("-0.15")
+
+
+def test_daily_analysis_budget_default_env_and_validation(monkeypatch):
+    assert OpsConfig().daily_analysis_budget == 8
+    monkeypatch.setenv("OPS_DAILY_ANALYSIS_BUDGET", "3")
+    assert load_config().daily_analysis_budget == 3
+    with pytest.raises(ValueError):
+        OpsConfig(daily_analysis_budget=0)
+
+
+def test_exit_defaults_and_env(monkeypatch):
+    cfg = OpsConfig()
+    assert cfg.momentum_exit_rank == 25
+    assert cfg.earnings_max_hold_days == 40
+    assert cfg.stopout_reentry_cooldown_days == 10
+    monkeypatch.setenv("OPS_MOMENTUM_EXIT_RANK", "30")
+    monkeypatch.setenv("OPS_EARNINGS_MAX_HOLD_DAYS", "50")
+    monkeypatch.setenv("OPS_STOPOUT_REENTRY_COOLDOWN_DAYS", "5")
+    loaded = load_config()
+    assert (loaded.momentum_exit_rank, loaded.earnings_max_hold_days,
+            loaded.stopout_reentry_cooldown_days) == (30, 50, 5)
+
+
+def test_exit_rank_must_exceed_analysis_budget():
+    # Exit rank at or below the entry budget removes the hysteresis band
+    # and guarantees churn at the boundary.
+    with pytest.raises(ValueError):
+        OpsConfig(momentum_exit_rank=8)
+    with pytest.raises(ValueError):
+        OpsConfig(daily_analysis_budget=8, momentum_exit_rank=8)
+    OpsConfig(momentum_exit_rank=9)  # boundary: budget+1 is valid
+
+
+def test_exit_day_counts_must_be_positive():
+    with pytest.raises(ValueError):
+        OpsConfig(earnings_max_hold_days=0)
+    with pytest.raises(ValueError):
+        OpsConfig(stopout_reentry_cooldown_days=0)

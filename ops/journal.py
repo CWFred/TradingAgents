@@ -453,6 +453,35 @@ class Journal:
             for row in rows
         ]
 
+    def latest_event_payload_by_symbol(self, kind: str) -> dict[str, dict[str, Any]]:
+        """Latest payload per payload['symbol'] for events of `kind`.
+
+        Ascending id scan; later rows overwrite earlier ones, so the value
+        is the most recent event for that symbol. Payloads without a symbol
+        key are ignored."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT payload FROM events WHERE kind = ? ORDER BY id",
+                (kind,),
+            ).fetchall()
+        out: dict[str, dict[str, Any]] = {}
+        for (raw,) in rows:
+            payload = json.loads(raw)
+            sym = payload.get("symbol")
+            if sym:
+                out[sym] = payload
+        return out
+
+    def event_symbols_since(self, kind: str, since: datetime) -> frozenset[str]:
+        """Distinct payload['symbol'] values of `kind` events at >= since."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT json_extract(payload, '$.symbol') FROM events"
+                " WHERE kind = ? AND at >= ?",
+                (kind, _to_iso(since)),
+            ).fetchall()
+        return frozenset(r[0] for r in rows if r[0])
+
     def __enter__(self) -> Journal:
         return self
 

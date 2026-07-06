@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from enum import Enum
 from typing import Callable
 
 from ops.config import OpsConfig
@@ -16,6 +17,7 @@ from ops.universe.filters import (
     apply_liquidity_filter,
     fetch_price_and_adv_from_yfinance,
 )
+from ops.universe.momentum import MomentumHit
 from ops.universe.sp500 import load_sp500_members
 
 # Hard-coded for v1 — promoted to OpsConfig only if we need to tune
@@ -24,12 +26,30 @@ _MIN_PRICE = Decimal("5")
 _LOOKBACK_TRADING_DAYS = 2
 
 
+class CandidateSource(str, Enum):
+    EARNINGS = "EARNINGS"
+    MOMENTUM = "MOMENTUM"
+
+
 @dataclass(frozen=True)
 class Candidate:
     symbol: str
-    earnings: EarningsHit
+    source: CandidateSource
     last_price: Decimal
     avg_dollar_volume_20d: Decimal
+    # Optional means genuinely absent, never fabricated. A name that is both
+    # a fresh earnings beat and a momentum leader carries BOTH payloads with
+    # source == EARNINGS (the primary thesis).
+    earnings: EarningsHit | None = None
+    momentum: MomentumHit | None = None
+
+    def __post_init__(self) -> None:
+        if self.earnings is None and self.momentum is None:
+            raise ValueError("Candidate requires at least one sleeve payload")
+        if self.source is CandidateSource.EARNINGS and self.earnings is None:
+            raise ValueError("EARNINGS candidate requires an earnings payload")
+        if self.source is CandidateSource.MOMENTUM and self.momentum is None:
+            raise ValueError("MOMENTUM candidate requires a momentum payload")
 
 
 def build_universe(
@@ -59,6 +79,7 @@ def build_universe(
     candidates = [
         Candidate(
             symbol=sym,
+            source=CandidateSource.EARNINGS,
             earnings=hits_by_sym[sym],
             last_price=price,
             avg_dollar_volume_20d=adv,
@@ -69,4 +90,4 @@ def build_universe(
     return candidates
 
 
-__all__ = ["Candidate", "build_universe"]
+__all__ = ["Candidate", "CandidateSource", "build_universe"]

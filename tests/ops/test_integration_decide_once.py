@@ -11,13 +11,14 @@ from ops.journal import Journal
 from ops.pipeline_adapter import PipelineDecision, StubPipelineAdapter
 from ops.position_guardian import PositionGuardian
 from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
-from ops.universe import Candidate
+from ops.universe import Candidate, CandidateSource
 from ops.universe.earnings import EarningsHit
 
 
 def _candidate(sym, price="200"):
     return Candidate(
         symbol=sym,
+        source=CandidateSource.EARNINGS,
         earnings=EarningsHit(
             symbol=sym, report_date=date(2026, 6, 30),
             eps_actual=Decimal("1"), eps_estimate=Decimal("0.9"),

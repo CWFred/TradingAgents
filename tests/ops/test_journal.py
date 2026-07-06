@@ -413,3 +413,22 @@ def test_journal_path_property(tmp_path):
     p = str(tmp_path / "j.sqlite")
     j = Journal(p)
     assert j.path == p
+
+
+def test_latest_event_payload_by_symbol(tmp_path):
+    j = Journal(str(tmp_path / "j.sqlite"))
+    j.record_event("position_opened", {"symbol": "NVDA", "source": "MOMENTUM"})
+    j.record_event("position_opened", {"symbol": "MSFT", "source": "EARNINGS"})
+    j.record_event("position_opened", {"symbol": "NVDA", "source": "EARNINGS"})
+    by_sym = j.latest_event_payload_by_symbol("position_opened")
+    assert by_sym["NVDA"]["source"] == "EARNINGS"   # latest wins
+    assert by_sym["MSFT"]["source"] == "EARNINGS"
+    assert j.latest_event_payload_by_symbol("no_such_kind") == {}
+
+
+def test_event_symbols_since(tmp_path):
+    j = Journal(str(tmp_path / "j.sqlite"))
+    j.record_event("stop_hit", {"symbol": "OLD"})
+    cutoff = datetime.now(timezone.utc)
+    j.record_event("stop_hit", {"symbol": "NEW"})
+    assert j.event_symbols_since("stop_hit", cutoff) == frozenset({"NEW"})

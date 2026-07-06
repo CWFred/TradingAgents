@@ -5,8 +5,9 @@ from ops.broker.types import Side, OrderType
 from ops.config import OpsConfig
 from ops.pipeline_adapter import PipelineDecision, StubPipelineAdapter
 from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
-from ops.universe import Candidate
+from ops.universe import Candidate, CandidateSource
 from ops.universe.earnings import EarningsHit
+from ops.universe.momentum import MomentumHit
 
 
 def _candidate(sym, price="200"):
@@ -17,9 +18,22 @@ def _candidate(sym, price="200"):
         eps_beat=True, revenue_beat=True,
     )
     return Candidate(
-        symbol=sym, earnings=hit,
+        symbol=sym, source=CandidateSource.EARNINGS, earnings=hit,
         last_price=Decimal(price), avg_dollar_volume_20d=Decimal("100000000"),
     )
+
+
+def _mhit(sym):
+    return MomentumHit(
+        symbol=sym, asof_date=date(2026, 6, 30),
+        trailing_return_6m=Decimal("0.4"), close=Decimal("200"),
+        sma_200=Decimal("150"), avg_dollar_volume_20d=Decimal("100000000"),
+        rank=1,
+    )
+
+
+def _fake_pipeline_buy():
+    return StubPipelineAdapter({"NVDA": PipelineDecision.BUY})
 
 
 def test_emits_buy_order_for_pipeline_buy():
@@ -35,8 +49,8 @@ def test_emits_buy_order_for_pipeline_buy():
     assert so.order.symbol == "AAPL"
     assert so.order.side == Side.BUY
     assert so.order.order_type == OrderType.MARKET
-    # Per-position cap = 10% of 250 = 25
-    assert so.order.notional_dollars == Decimal("25.00")
+    # Per-position cap = 12% of 250 = 30
+    assert so.order.notional_dollars == Decimal("30.00")
     # Entry-relative stop_pct, resolved to an absolute price from the actual
     # fill price at fill time — not from cand.last_price (M2).
     assert so.order.stop_pct == cfg.per_position_stop_pct == Decimal("-0.08")
@@ -59,13 +73,13 @@ def test_skips_non_buy_decisions():
 
 
 def test_skips_when_notional_below_floor():
-    """If 10% of equity is below the per_trade_dollar_floor, skip the candidate."""
-    cfg = OpsConfig()  # per_trade_dollar_floor default = $5; per_position_cap = 10%
+    """If 12% of equity is below the per_trade_dollar_floor, skip the candidate."""
+    cfg = OpsConfig()  # per_trade_dollar_floor default = $5; per_position_cap = 12%
     strat = PostEarningsMomentumStrategy(config=cfg)
     pipe = StubPipelineAdapter({"AAPL": PipelineDecision.BUY})
     orders = strat.propose_orders(
         candidates=[_candidate("AAPL")], pipeline=pipe,
-        current_equity=Decimal("40"),     # 10% = $4, below $5 floor
+        current_equity=Decimal("40"),     # 12% = $4.80, below $5 floor
         asof_date=date(2026, 6, 30),
     )
     assert orders == []
@@ -112,7 +126,7 @@ def test_client_order_id_distinct_across_ticks_for_same_symbol_and_date():
 
 def test_live_max_position_cap_clamps_notional():
     """C1: when live_max_position_cap is set, notional is clamped to it."""
-    cfg = OpsConfig()  # 10% cap = $25 at $250 equity
+    cfg = OpsConfig()  # 12% cap = $30 at $250 equity
     strat = PostEarningsMomentumStrategy(config=cfg)
     pipe = StubPipelineAdapter({"AAPL": PipelineDecision.BUY})
     orders = strat.propose_orders(
@@ -127,7 +141,7 @@ def test_live_max_position_cap_clamps_notional():
 def test_live_max_position_cap_no_effect_when_higher():
     """C1: when live_max_position_cap is higher than the normal notional,
     the normal notional is used."""
-    cfg = OpsConfig()  # 10% cap = $25 at $250 equity
+    cfg = OpsConfig()  # 12% cap = $30 at $250 equity
     strat = PostEarningsMomentumStrategy(config=cfg)
     pipe = StubPipelineAdapter({"AAPL": PipelineDecision.BUY})
     orders = strat.propose_orders(
@@ -136,7 +150,7 @@ def test_live_max_position_cap_no_effect_when_higher():
         live_max_position_cap=Decimal("100"),
     )
     assert len(orders) == 1
-    assert orders[0].order.notional_dollars == Decimal("25.00")
+    assert orders[0].order.notional_dollars == Decimal("30.00")
 
 
 def test_live_max_position_cap_none_uses_normal_notional():
@@ -150,4 +164,20 @@ def test_live_max_position_cap_none_uses_normal_notional():
         live_max_position_cap=None,
     )
     assert len(orders) == 1
-    assert orders[0].order.notional_dollars == Decimal("25.00")
+    assert orders[0].order.notional_dollars == Decimal("30.00")
+
+
+def test_momentum_candidate_gets_momentum_reason():
+    cand = Candidate(
+        symbol="NVDA", source=CandidateSource.MOMENTUM,
+        last_price=Decimal("200"), avg_dollar_volume_20d=Decimal("100000000"),
+        momentum=_mhit("NVDA"),
+    )
+    strategy = PostEarningsMomentumStrategy(config=OpsConfig())
+    orders = strategy.propose_orders(
+        candidates=[cand], pipeline=_fake_pipeline_buy(),
+        current_equity=Decimal("1000"), asof_date=date(2026, 7, 2),
+    )
+    assert len(orders) == 1
+    assert "6-mo momentum leader" in orders[0].reason
+    assert "0.4" in orders[0].reason

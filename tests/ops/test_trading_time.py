@@ -94,3 +94,28 @@ def test_trading_day_start_dst_boundary_sanity():
     after_dst_end = datetime(2026, 11, 2, 15, 0, tzinfo=timezone.utc)    # Mon, EST (UTC-5)
     assert trading_day_start(before_dst_end) == datetime(2026, 10, 26, 4, 0, tzinfo=timezone.utc)
     assert trading_day_start(after_dst_end) == datetime(2026, 11, 2, 5, 0, tzinfo=timezone.utc)
+
+
+from datetime import date
+
+from ops.trading_time import trading_days_back, trading_days_between
+
+
+def test_trading_days_between_same_week():
+    # Mon 2026-07-06 -> Fri 2026-07-10: Tue, Wed, Thu, Fri = 4
+    assert trading_days_between(date(2026, 7, 6), date(2026, 7, 10)) == 4
+
+
+def test_trading_days_between_spans_weekend():
+    # Fri 2026-07-10 -> Mon 2026-07-13: just Monday = 1
+    assert trading_days_between(date(2026, 7, 10), date(2026, 7, 13)) == 1
+
+
+def test_trading_days_between_zero_for_same_or_reversed():
+    assert trading_days_between(date(2026, 7, 6), date(2026, 7, 6)) == 0
+    assert trading_days_between(date(2026, 7, 10), date(2026, 7, 6)) == 0
+
+
+def test_trading_days_back_skips_weekend():
+    # 2 trading days before Mon 2026-07-13 = Thu 2026-07-09
+    assert trading_days_back(date(2026, 7, 13), 2) == date(2026, 7, 9)

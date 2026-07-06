@@ -50,6 +50,16 @@ def test_wire_returns_orchestrator_guardian_calendar(tmp_path):
     assert callable(cal.is_open_now)
 
 
+def test_wire_uses_composite_universe_builder(tmp_path):
+    from ops.universe.composite import build_composite_universe
+
+    cfg = OpsConfig()
+    j = Journal(str(tmp_path / "j.sqlite"))
+    broker = _build_broker(cfg, j)
+    orch, _guardian, _cal = _wire(broker, j, cfg)
+    assert orch._universe_builder is build_composite_universe
+
+
 def test_emit_halt_events_writes_inconsistency_and_startup_halted(tmp_path):
     j = Journal(str(tmp_path / "j.sqlite"))
     result = ReconcileResult(

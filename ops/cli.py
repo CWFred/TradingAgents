@@ -22,7 +22,7 @@ from ops.pipeline_adapter import (
 from ops.position_guardian import PositionGuardian
 from ops.quotes import make_yfinance_quote_source
 from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
-from ops.universe import Candidate, build_universe
+from ops.universe import Candidate, CandidateSource, build_universe
 from ops.universe.earnings import EarningsHit
 
 
@@ -185,6 +185,7 @@ def decide_once(
         price = quote_source(sym)
         candidates.append(Candidate(
             symbol=sym,
+            source=CandidateSource.EARNINGS,
             earnings=EarningsHit(
                 symbol=sym, report_date=asof_date,
                 eps_actual=Decimal("0"), eps_estimate=Decimal("0"),
