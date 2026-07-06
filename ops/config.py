@@ -56,6 +56,11 @@ class OpsConfig:
     live_fill_gate_count: int = 20
     # Cost dial: max full-pipeline (LLM) analyses per day; risk is capped separately.
     daily_analysis_budget: int = 8
+    # Exit engine (spec Component 6). Entry is top-daily_analysis_budget;
+    # the gap up to momentum_exit_rank is deliberate hysteresis.
+    momentum_exit_rank: int = 25
+    earnings_max_hold_days: int = 40
+    stopout_reentry_cooldown_days: int = 10
 
     def __post_init__(self) -> None:
         # Drawdown and per-position-stop percentages must be negative — a
@@ -84,6 +89,16 @@ class OpsConfig:
         if self.daily_analysis_budget <= 0:
             raise ValueError(
                 f"daily_analysis_budget must be > 0, got {self.daily_analysis_budget}"
+            )
+        for fname in ("earnings_max_hold_days", "stopout_reentry_cooldown_days"):
+            val = getattr(self, fname)
+            if val <= 0:
+                raise ValueError(f"{fname} must be > 0, got {val}")
+        if self.momentum_exit_rank <= self.daily_analysis_budget:
+            raise ValueError(
+                "momentum_exit_rank must exceed daily_analysis_budget "
+                f"(hysteresis band), got {self.momentum_exit_rank} <= "
+                f"{self.daily_analysis_budget}"
             )
         if self.broker_mode not in ("paper", "robinhood"):
             raise ValueError(
@@ -176,5 +191,17 @@ def load_config() -> OpsConfig:
     daily_analysis_budget = _env_int("OPS_DAILY_ANALYSIS_BUDGET")
     if daily_analysis_budget is not None:
         kwargs["daily_analysis_budget"] = daily_analysis_budget
+
+    momentum_exit_rank = _env_int("OPS_MOMENTUM_EXIT_RANK")
+    if momentum_exit_rank is not None:
+        kwargs["momentum_exit_rank"] = momentum_exit_rank
+
+    earnings_max_hold_days = _env_int("OPS_EARNINGS_MAX_HOLD_DAYS")
+    if earnings_max_hold_days is not None:
+        kwargs["earnings_max_hold_days"] = earnings_max_hold_days
+
+    stopout_reentry_cooldown_days = _env_int("OPS_STOPOUT_REENTRY_COOLDOWN_DAYS")
+    if stopout_reentry_cooldown_days is not None:
+        kwargs["stopout_reentry_cooldown_days"] = stopout_reentry_cooldown_days
 
     return OpsConfig(**kwargs)

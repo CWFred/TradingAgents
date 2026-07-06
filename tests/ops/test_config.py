@@ -137,3 +137,33 @@ def test_daily_analysis_budget_default_env_and_validation(monkeypatch):
     assert load_config().daily_analysis_budget == 3
     with pytest.raises(ValueError):
         OpsConfig(daily_analysis_budget=0)
+
+
+def test_exit_defaults_and_env(monkeypatch):
+    cfg = OpsConfig()
+    assert cfg.momentum_exit_rank == 25
+    assert cfg.earnings_max_hold_days == 40
+    assert cfg.stopout_reentry_cooldown_days == 10
+    monkeypatch.setenv("OPS_MOMENTUM_EXIT_RANK", "30")
+    monkeypatch.setenv("OPS_EARNINGS_MAX_HOLD_DAYS", "50")
+    monkeypatch.setenv("OPS_STOPOUT_REENTRY_COOLDOWN_DAYS", "5")
+    loaded = load_config()
+    assert (loaded.momentum_exit_rank, loaded.earnings_max_hold_days,
+            loaded.stopout_reentry_cooldown_days) == (30, 50, 5)
+
+
+def test_exit_rank_must_exceed_analysis_budget():
+    # Exit rank at or below the entry budget removes the hysteresis band
+    # and guarantees churn at the boundary.
+    with pytest.raises(ValueError):
+        OpsConfig(momentum_exit_rank=8)
+    with pytest.raises(ValueError):
+        OpsConfig(daily_analysis_budget=8, momentum_exit_rank=8)
+    OpsConfig(momentum_exit_rank=9)  # boundary: budget+1 is valid
+
+
+def test_exit_day_counts_must_be_positive():
+    with pytest.raises(ValueError):
+        OpsConfig(earnings_max_hold_days=0)
+    with pytest.raises(ValueError):
+        OpsConfig(stopout_reentry_cooldown_days=0)
