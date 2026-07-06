@@ -187,6 +187,16 @@ def test_silent_none_names_are_promoted_to_errors(config):
         assert any(e.startswith(f"{symbol}: skipped") for e in summary.errors)
 
 
+def test_summary_carries_per_bar_coverage(config):
+    summary = _run(config)
+    assert summary.coverage  # six bar names
+    assert summary.coverage["fcf_yield"]["computed"] >= 1
+    assert set(summary.coverage) == {
+        "ev_ebit_vs_sector", "fcf_yield", "pe_vs_own_history",
+        "roic_5y", "debt_to_ebitda", "gross_margin_stability",
+    }
+
+
 def test_year_end_prices_are_split_unadjusted(config):
     from ops.research.run import _name_inputs
 

@@ -38,6 +38,7 @@ class ScreenRunSummary:
     passed: tuple[str, ...]
     errors: tuple[str, ...]
     baseline: dict | None
+    coverage: dict[str, dict[str, int]]
 
 
 def _name_inputs(
@@ -136,12 +137,19 @@ def run_screen(
     results = screen_universe(inputs, asof=asof)
     passed = tuple(r.symbol for r in results if r.passed)
 
+    coverage: dict[str, dict[str, int]] = {}
+    for result in results:
+        for bar in (*result.valuation_bars, *result.quality_bars):
+            slot = coverage.setdefault(bar.name, {"computed": 0, "missing": 0})
+            slot["missing" if bar.detail.startswith("missing:") else "computed"] += 1
+
     run_id = None
     baseline_summary = None
     if not dry_run:
         store = ScreenStore(config.screen_store_path)
         run_id = store.record_run(
             asof=asof, universe_size=len(universe), results=results,
+            coverage=coverage,
         )
         try:
             with Journal(config.baseline_journal_path) as baseline_journal:
@@ -168,4 +176,5 @@ def run_screen(
         passed=passed,
         errors=tuple(errors),
         baseline=baseline_summary,
+        coverage=coverage,
     )

@@ -131,7 +131,9 @@ def status(journal_path: str | None) -> None:
               help="Screen and print only — no store writes, no baseline trades.")
 @click.option("--limit", default=None, type=int,
               help="Screen only the first N universe names (smoke runs).")
-def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None) -> None:
+@click.option("--notify", "do_notify", is_flag=True,
+              help="Send a Pushover summary (or a high-urgency alert on a blind sweep).")
+def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None, do_notify: bool = False) -> None:
     """Run the small/mid-cap fundamental screen + null-baseline portfolio."""
     from ops.research.run import run_screen
 
@@ -157,6 +159,35 @@ def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None) -> None:
             f"{len(summary.baseline['exits'])} exits, "
             f"{len(summary.baseline['skipped'])} skipped"
         )
+
+    for bar_name, counts in sorted(summary.coverage.items()):
+        total = counts["computed"] + counts["missing"]
+        pct = (100 * counts["computed"] // total) if total else 0
+        click.echo(f"  coverage {bar_name}: {counts['computed']}/{total} ({pct}%)")
+
+    blind = summary.universe_size > 0 and len(summary.errors) * 2 > summary.universe_size
+    if do_notify:
+        from ops.notify.config import load_notify_config
+        from ops.notify.push import build_push_transport
+        from ops.notify.transport import NotifyMessage
+
+        transport = build_push_transport(load_notify_config())
+        if blind:
+            transport.send(NotifyMessage(
+                title="screen BLIND",
+                body=(f"{len(summary.errors)}/{summary.universe_size} names errored; "
+                      "results unusable"),
+                urgency="high",
+            ))
+        else:
+            transport.send(NotifyMessage(
+                title="screen complete",
+                body=(f"asof {summary.asof}: {len(summary.passed)} passed / "
+                      f"{summary.screened} screened / {len(summary.errors)} errors"),
+                urgency="normal",
+            ))
+    if blind:
+        raise SystemExit(2)
 
 
 @cli.command("decide-once")
