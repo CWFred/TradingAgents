@@ -183,3 +183,36 @@ def test_same_day_retry_after_quote_failure_does_not_collide(journal):
     )
     assert second["buys"] == ["BAD"]          # GOOD already held, BAD now fills
     assert second["skipped"] == []
+
+
+def test_write_off_closes_position_at_given_price(journal):
+    from ops.research.baseline import update_baseline_portfolio, write_off_position
+
+    broker = _broker(journal)
+    update_baseline_portfolio(
+        broker=broker, journal=journal, passers=["DEAD"], asof=ASOF, now=NOW,
+    )
+    result = write_off_position(
+        journal=journal, symbol="DEAD", price=Decimal("2.50"),
+        starting_cash=Decimal("100000"), note="acquired at $2.50",
+    )
+    assert result["symbol"] == "DEAD"
+    # Replay must show the position gone and cash credited at the write-off price.
+    rebuilt = PaperBroker.from_journal(
+        journal=journal, quote_source=lambda s: Decimal("20"),
+        starting_cash=Decimal("100000"),
+    )
+    assert all(p.symbol != "DEAD" for p in rebuilt.get_positions())
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert "baseline_writeoff" in kinds
+
+
+def test_write_off_unknown_symbol_raises(journal):
+    from ops.broker.base import NoSuchPosition
+    from ops.research.baseline import write_off_position
+
+    with pytest.raises(NoSuchPosition):
+        write_off_position(
+            journal=journal, symbol="GHOST", price=Decimal("1"),
+            starting_cash=Decimal("100000"),
+        )

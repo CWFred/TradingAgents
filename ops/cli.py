@@ -190,6 +190,35 @@ def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None, do_notify
         raise SystemExit(2)
 
 
+@cli.group()
+def research() -> None:
+    """Long-horizon research sleeve commands."""
+
+
+@research.command("write-off")
+@click.argument("symbol")
+@click.option("--price", required=True,
+              help="Settlement price per share (deal price or last trade).")
+@click.option("--note", default=None, help="Why (e.g. 'acquired 2026-08-01 at $12.50').")
+def research_write_off(symbol: str, price: str, note: str | None) -> None:
+    """Resolve a delisted baseline position at a known price."""
+    from ops.research.baseline import write_off_position
+
+    config = load_config()
+    journal = Journal(config.baseline_journal_path)
+    try:
+        result = write_off_position(
+            journal=journal, symbol=symbol, price=Decimal(price),
+            starting_cash=config.baseline_starting_cash, note=note,
+        )
+    finally:
+        journal.close()
+    click.echo(
+        f"wrote off {result['quantity']} {result['symbol']} at {result['price']} "
+        f"(proceeds {result['proceeds']})"
+    )
+
+
 @cli.command("decide-once")
 @click.option("--date", "as_of", required=True,
               type=click.DateTime(formats=["%Y-%m-%d"]),
