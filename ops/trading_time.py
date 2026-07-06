@@ -14,7 +14,7 @@ comparisons remain UTC throughout.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 TRADING_TZ = ZoneInfo("America/New_York")
@@ -48,3 +48,32 @@ def trading_week_start(now: datetime) -> datetime:
         hour=0, minute=0, second=0, microsecond=0
     )
     return monday_local.astimezone(timezone.utc)
+
+
+def _is_trading_day(d: date) -> bool:
+    # Mon=0..Fri=4. Holidays are not handled — same approximation as
+    # ops/universe/earnings.py; a holiday merely shortens a window by a day.
+    return d.weekday() < 5
+
+
+def trading_days_back(asof: date, n: int) -> date:
+    """The date n trading days strictly before `asof`."""
+    d = asof
+    counted = 0
+    while counted < n:
+        d -= timedelta(days=1)
+        if _is_trading_day(d):
+            counted += 1
+    return d
+
+
+def trading_days_between(start: date, end: date) -> int:
+    """Trading days strictly after `start`, up to and including `end`."""
+    if end <= start:
+        return 0
+    d, count = start, 0
+    while d < end:
+        d += timedelta(days=1)
+        if _is_trading_day(d):
+            count += 1
+    return count
