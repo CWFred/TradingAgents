@@ -1,14 +1,20 @@
 """Orchestrator tick handler — called by APScheduler at :00/:30 during trading hours."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, time, timezone
 from decimal import Decimal
 
 from ops import events
-from ops.broker.base import BrokerError, OrderRejected
+from ops.broker.base import BrokerError, NoSuchPosition, OrderRejected
 from ops.exits import evaluate_exits
 from ops.live_gate import count_live_buy_fills
-from ops.trading_time import trading_day_start, trading_days_back, trading_week_start
+from ops.trading_time import (
+    TRADING_TZ,
+    trading_day_start,
+    trading_days_back,
+    trading_week_start,
+)
 from ops.universe.filters import apply_deny_list
 from ops.universe.momentum import (
     fetch_closes_and_volumes_from_yfinance,
@@ -24,6 +30,7 @@ class Orchestrator:
         members_loader=load_sp500_members,
         momentum_finder=find_momentum_leaders,
         closes_fetch=fetch_closes_and_volumes_from_yfinance,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._broker = broker
         self._universe_builder = universe_builder
@@ -35,6 +42,7 @@ class Orchestrator:
         self._members_loader = members_loader
         self._momentum_finder = momentum_finder
         self._closes_fetch = closes_fetch
+        self._now_fn = now_fn if now_fn is not None else lambda: datetime.now(timezone.utc)
 
     def tick(self) -> None:
         try:
@@ -53,7 +61,22 @@ class Orchestrator:
         self._maybe_snapshot_equity()
         if self._is_daily_halted() or self._is_weekly_halted():
             return
-        asof_date = datetime.now(timezone.utc).date()
+        now = self._now_fn()
+        asof_date = now.date()
+
+        # The leaderboard/exits/entries cycle costs ~500 yfinance calls plus
+        # up to daily_analysis_budget LLM runs, so it may run only once per
+        # trading day — the FIRST open, un-halted tick. Record the event
+        # BEFORE running the cycle (not after): a mid-cycle crash must not
+        # re-spend the budget on the next tick. Exits crashing mid-cycle is
+        # already journaled separately, and the guardian still enforces
+        # stops regardless of whether this cycle ran.
+        if self._journal.has_event_today(events.KIND_DAILY_CYCLE_RUN, now=now):
+            return
+        self._journal.record_event(
+            events.KIND_DAILY_CYCLE_RUN,
+            events.daily_cycle_run_payload(asof_date=asof_date),
+        )
 
         # Leaderboard is computed ONCE per tick: the exit engine reads held
         # names' ranks off it and the builder takes its head for entries.
@@ -127,6 +150,11 @@ class Orchestrator:
                     symbol=skip.symbol, reason=skip.reason,
                 ),
             )
+        for symbol in report.unknown_provenance:
+            self._journal.record_event(
+                events.KIND_EXIT_UNKNOWN_PROVENANCE,
+                events.exit_unknown_provenance_payload(symbol=symbol),
+            )
         for decision in report.decisions:
             self._journal.record_event(
                 events.KIND_EXIT_DECISION,
@@ -137,6 +165,18 @@ class Orchestrator:
             )
             try:
                 fill = self._broker.close_position(decision.symbol)
+            except NoSuchPosition:
+                # The position vanished between the decision and the close —
+                # e.g. the guardian's stop fired first. Not an error: journal
+                # a breadcrumb instead of exit_check_error (which emails).
+                self._journal.record_event(
+                    events.KIND_EXIT_SKIPPED_MISSING_DATA,
+                    events.exit_skipped_missing_data_payload(
+                        symbol=decision.symbol,
+                        reason="position already closed before exit order (guardian race)",
+                    ),
+                )
+                continue
             except BrokerError as exc:
                 # Position still held, condition still true next tick — the
                 # engine is idempotent, so journal and move on.
@@ -161,7 +201,12 @@ class Orchestrator:
         since_date = trading_days_back(
             asof_date, self._config.stopout_reentry_cooldown_days,
         )
-        since = datetime.combine(since_date, time.min, tzinfo=timezone.utc)
+        # Day boundaries go through trading_day_start (ET midnight), not UTC
+        # midnight — see ops/trading_time.py. since_date is an ET-calendar
+        # date already, so build it in TRADING_TZ before converting to UTC.
+        since = trading_day_start(
+            datetime.combine(since_date, time.min, tzinfo=TRADING_TZ)
+        )
         return self._journal.event_symbols_since(events.KIND_STOP_HIT, since)
 
     def _compute_live_cap(self) -> Decimal | None:
@@ -178,7 +223,7 @@ class Orchestrator:
         return self._config.live_max_position
 
     def _maybe_snapshot_equity(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = self._now_fn()
         start_of_day = trading_day_start(now)
         existing_day = self._journal.get_latest_equity_snapshot(
             kind="open_day", since=start_of_day,

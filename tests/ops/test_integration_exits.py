@@ -3,6 +3,7 @@ sells and the freed slot is refilled the SAME tick. Real composite builder,
 exit engine, strategy, guarded paper broker, and journal; yfinance, pipeline,
 and calendar are faked (no network, no LLM calls)."""
 import functools
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -54,6 +55,10 @@ def test_momentum_lifecycle_buy_then_rank_decay_sell_then_refill(tmp_path):
         earnings_finder=lambda syms, asof_date, lookback_days, fetch=None: [],
         metrics_fetcher=lambda sym: (Decimal("100"), Decimal("100000000")),
     )
+    # The leaderboard/exits/entries cycle now runs only once per trading day
+    # (daily_cycle_run gate), so the two ticks must land on different
+    # trading days — inject a controllable clock.
+    clock = {"now": datetime(2026, 7, 6, 15, 0, tzinfo=timezone.utc)}  # Mon
     orch = Orchestrator(
         broker=broker, universe_builder=universe_builder,
         strategy=PostEarningsMomentumStrategy(config=cfg),
@@ -62,6 +67,7 @@ def test_momentum_lifecycle_buy_then_rank_decay_sell_then_refill(tmp_path):
         members_loader=lambda: ["NVDA", "AMD"],
         momentum_finder=momentum_finder,
         closes_fetch=lambda s: (_UPTREND, [Decimal("1000000")] * len(_UPTREND)),
+        now_fn=lambda: clock["now"],
     )
 
     orch.tick()  # day 1: NVDA is rank 1, one free slot -> bought
@@ -70,6 +76,7 @@ def test_momentum_lifecycle_buy_then_rank_decay_sell_then_refill(tmp_path):
     # day 2: NVDA decays to rank 30 (> exit rank 25, uptrend intact so no
     # trend_break); AMD is the new leader.
     board["ranks"] = [("AMD", 1), ("NVDA", 30)]
+    clock["now"] = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)  # Tue
     orch.tick()
     assert {p.symbol for p in broker.get_positions()} == {"AMD"}
 

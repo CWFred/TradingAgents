@@ -84,6 +84,10 @@ KIND_EXIT_DECISION = "exit_decision"
 KIND_EXIT_ORDER_PLACED = "exit_order_placed"
 KIND_EXIT_SKIPPED_MISSING_DATA = "exit_skipped_missing_data"
 KIND_EXIT_CHECK_ERROR = "exit_check_error"
+KIND_EXIT_UNKNOWN_PROVENANCE = "exit_unknown_provenance"
+
+# Scheduler / daily-cycle gate
+KIND_DAILY_CYCLE_RUN = "daily_cycle_run"
 
 # Kinds deliberately NOT notified. Everything here is an audit trail the
 # operator reads via `ops status` or sqlite, not a push/email — either
@@ -111,6 +115,10 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_EXIT_DECISION,
     KIND_EXIT_ORDER_PLACED,
     KIND_EXIT_SKIPPED_MISSING_DATA,
+    # Backward-compat audit trail — position predates position_opened events.
+    KIND_EXIT_UNKNOWN_PROVENANCE,
+    # Operational bookkeeping, gates the once-daily universe/exit cycle.
+    KIND_DAILY_CYCLE_RUN,
 })
 
 
@@ -420,6 +428,14 @@ def exit_check_error_payload(*, error: str) -> dict[str, Any]:
     return {"error": error}
 
 
+def exit_unknown_provenance_payload(*, symbol: str) -> dict[str, Any]:
+    return {"symbol": symbol}
+
+
+def daily_cycle_run_payload(*, asof_date: date) -> dict[str, Any]:
+    return {"asof_date": asof_date.isoformat()}
+
+
 # Kind -> builder registry: the enforcement test walks this to prove every
 # POLICY kind has a builder and every builder's kind has been classified
 # (POLICY or AUDIT_ONLY). Register every new builder here.
@@ -458,4 +474,6 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_EXIT_ORDER_PLACED: exit_order_placed_payload,
     KIND_EXIT_SKIPPED_MISSING_DATA: exit_skipped_missing_data_payload,
     KIND_EXIT_CHECK_ERROR: exit_check_error_payload,
+    KIND_EXIT_UNKNOWN_PROVENANCE: exit_unknown_provenance_payload,
+    KIND_DAILY_CYCLE_RUN: daily_cycle_run_payload,
 }

@@ -343,7 +343,12 @@ Validation: `momentum_exit_rank` must exceed the entry cap (8) — an exit rank
 at or below the entry rank removes the hysteresis band and guarantees churn;
 day counts must be > 0.
 
-## Data Flow (per decide-once tick)
+## Data Flow (once per trading day — first open, un-halted tick)
+
+The `daily_cycle_run` journal event (recorded before the cycle runs, not
+after) gates this whole flow to the FIRST open, un-halted orchestrator tick
+of each trading day, enforcing the daily analysis-budget ceiling against the
+30-minute scheduler cadence — every other tick that day short-circuits here.
 
 ```
 market open? → kill-switch halts? (existing gates)

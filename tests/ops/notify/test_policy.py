@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -160,6 +160,8 @@ SAMPLE_BUILDER_ARGS: dict[str, dict] = {
         body="2026-07-03: equity $250, P&L $5, 2 fill(s)\n\nOpen positions:",
         equity=Decimal("250.00"), n_fills_today=2,
     ),
+    events.KIND_EXIT_UNKNOWN_PROVENANCE: dict(symbol="AAPL"),
+    events.KIND_DAILY_CYCLE_RUN: dict(asof_date=date(2026, 7, 3)),
 }
 
 

@@ -487,3 +487,162 @@ def test_exit_engine_crash_is_journaled_and_buys_proceed():
     orch.tick()
     assert any(e["kind"] == "exit_check_error" for e in journal.read_events())
     assert "held_symbols" in seen  # tick reached the builder anyway
+
+
+# --- Fix 1: once-per-trading-day gate on the leaderboard/exits/entries cycle ---
+
+_MON = datetime(2026, 7, 6, 15, 0, tzinfo=timezone.utc)
+_TUE = datetime(2026, 7, 7, 15, 0, tzinfo=timezone.utc)
+
+
+def _pin_journal_clock(monkeypatch, clock):
+    """Journal.record_event always stamps `at` with the real wall clock (no
+    override param) — see the `_record_fill_at` pattern in
+    tests/ops/notify/test_summary.py. Pin it to the same fabricated `clock`
+    dict the orchestrator's now_fn reads from, so a fresh event's stored
+    `at` lines up with the has_event_today() query the gate performs."""
+    import ops.journal as journal_mod
+    monkeypatch.setattr(journal_mod, "_now_iso", lambda: clock["now"].isoformat())
+
+
+def test_daily_cycle_gate_runs_leaderboard_once_per_day(monkeypatch):
+    journal = _make_journal()
+    clock = {"now": _MON}
+    _pin_journal_clock(monkeypatch, clock)
+    universe = _fake_universe([])
+    orch = _make_orchestrator(
+        universe_builder=universe, journal=journal, now_fn=lambda: clock["now"],
+    )
+    orch.tick()
+    orch.tick()
+    assert universe.call_count == 1
+    cycle_events = [e for e in journal.read_events() if e["kind"] == "daily_cycle_run"]
+    assert len(cycle_events) == 1
+    assert cycle_events[0]["payload"]["asof_date"] == "2026-07-06"
+
+
+def test_daily_cycle_gate_is_restart_safe_over_same_journal_same_day(monkeypatch):
+    """A fresh Orchestrator instance (simulating a process restart) reading
+    the SAME journal on the SAME trading day must still be gated — the gate
+    lives in the journal, not in-memory state."""
+    journal = _make_journal()
+    clock = {"now": _MON}
+    _pin_journal_clock(monkeypatch, clock)
+    orch1 = _make_orchestrator(
+        universe_builder=_fake_universe([]), journal=journal, now_fn=lambda: clock["now"],
+    )
+    orch1.tick()
+
+    universe2 = _fake_universe([])
+    orch2 = _make_orchestrator(
+        universe_builder=universe2, journal=journal, now_fn=lambda: clock["now"],
+    )
+    orch2.tick()
+
+    universe2.assert_not_called()
+    cycle_events = [e for e in journal.read_events() if e["kind"] == "daily_cycle_run"]
+    assert len(cycle_events) == 1
+
+
+def test_daily_cycle_gate_runs_again_on_the_next_trading_day(monkeypatch):
+    journal = _make_journal()
+    clock = {"now": _MON}
+    _pin_journal_clock(monkeypatch, clock)
+    universe = _fake_universe([])
+    orch = _make_orchestrator(
+        universe_builder=universe, journal=journal, now_fn=lambda: clock["now"],
+    )
+    orch.tick()
+    clock["now"] = _TUE
+    orch.tick()
+    assert universe.call_count == 2
+    cycle_events = [e for e in journal.read_events() if e["kind"] == "daily_cycle_run"]
+    assert len(cycle_events) == 2
+
+
+# --- Fix 2: unknown-provenance positions are journaled for audit ---
+
+def test_exit_engine_journals_unknown_provenance_for_position_with_no_entry_event():
+    journal = _make_journal()
+    orch = _make_orchestrator(
+        broker=_broker_holding_momentum("OLDPOS"),
+        universe_builder=_fake_universe([]),
+        journal=journal,
+        momentum_finder=lambda members, asof_date: [_mhit("OLDPOS", 5)],
+        closes_fetch=lambda s: (_uptrend_closes(), []),
+    )
+    # No position_opened event was ever journaled for OLDPOS.
+    orch.tick()
+    unknown = [
+        e for e in journal.read_events() if e["kind"] == "exit_unknown_provenance"
+    ]
+    assert len(unknown) == 1
+    assert unknown[0]["payload"]["symbol"] == "OLDPOS"
+
+
+# --- Fix 3: cooldown window boundary is the ET trading-day start ---
+
+def test_cooldown_boundary_uses_et_trading_day_start_not_utc_midnight():
+    """since_date for a 1-day cooldown as-of Wed 2026-07-08 is Tue 2026-07-07.
+    ET midnight of that Tuesday is 2026-07-07T04:00:00Z (EDT, UTC-4). A
+    stop_hit journaled at 2026-07-07T02:00:00Z actually happened at ET
+    2026-07-06 22:00 — the PREVIOUS trading day — and must be excluded. The
+    old UTC-midnight boundary (2026-07-07T00:00:00Z) would have wrongly
+    included it."""
+    import json
+    from ops.config import OpsConfig
+
+    journal = _make_journal()
+    journal._conn.execute(
+        "INSERT INTO events (at, kind, payload) VALUES (?, ?, ?)",
+        ("2026-07-07T02:00:00+00:00", "stop_hit", json.dumps({"symbol": "OLDBUG"})),
+    )
+    seen = {}
+    orch = _make_orchestrator(
+        broker=_fake_broker_with_positions([]),
+        universe_builder=_fake_universe([], seen),
+        journal=journal,
+        config=OpsConfig(stopout_reentry_cooldown_days=1),
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
+        now_fn=lambda: datetime(2026, 7, 8, 15, 0, tzinfo=timezone.utc),
+    )
+    orch.tick()
+    assert "OLDBUG" not in seen["excluded_symbols"]
+
+
+# --- Fix 4: guardian/exit race is a breadcrumb, not an emailed error ---
+
+def _broker_holding_with_close_raising(sym, exc):
+    from ops.broker.types import Position
+    broker = MagicMock()
+    broker.get_positions.return_value = [
+        Position(symbol=sym, quantity=Decimal("1"), avg_entry_price=Decimal("100"))
+    ]
+    broker.get_equity.return_value = Decimal("1000")
+    broker.close_position.side_effect = exc
+    return broker
+
+
+def test_exit_close_position_no_such_position_journals_skip_not_check_error():
+    from ops.broker.base import NoSuchPosition
+
+    journal = _make_journal()
+    _journal_position_opened(journal, "NVDA", "MOMENTUM")
+    broker = _broker_holding_with_close_raising("NVDA", NoSuchPosition("gone"))
+    orch = _make_orchestrator(
+        broker=broker,
+        universe_builder=_fake_universe([]),
+        journal=journal,
+        momentum_finder=lambda members, asof_date: [_mhit("NVDA", 30)],
+        closes_fetch=lambda s: (_uptrend_closes(), []),
+    )
+    orch.tick()  # must not raise
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert "exit_check_error" not in kinds
+    skips = [
+        e for e in journal.read_events()
+        if e["kind"] == "exit_skipped_missing_data" and e["payload"]["symbol"] == "NVDA"
+    ]
+    assert len(skips) == 1
+    assert "guardian race" in skips[0]["payload"]["reason"]
