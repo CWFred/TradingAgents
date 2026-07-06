@@ -29,6 +29,18 @@ def _default_journal_path() -> str:
     return os.path.join(os.path.expanduser(base), "tradingagents", "ops_journal.sqlite")
 
 
+def _default_baseline_journal_path() -> str:
+    """Baseline (null-hypothesis) paper portfolio journal — separate DB from
+    the trading journal so the control can never contaminate real state."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(os.path.expanduser(base), "tradingagents", "baseline_journal.sqlite")
+
+
+def _default_screen_store_path() -> str:
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(os.path.expanduser(base), "tradingagents", "research_screen.sqlite")
+
+
 # Symbols in this set are a FULL contractual blackout: buy AND sell are
 # rejected. This is a strict subset of deny_list. Everything else in
 # deny_list (the leveraged ETFs) is BUY-denied but SELL-allowed — selling
@@ -54,6 +66,9 @@ class OpsConfig:
     starting_cash: Decimal = Decimal("250")
     live_max_position: Decimal = Decimal("10")
     live_fill_gate_count: int = 20
+    baseline_journal_path: str = field(default_factory=_default_baseline_journal_path)
+    baseline_starting_cash: Decimal = Decimal("100000")
+    screen_store_path: str = field(default_factory=_default_screen_store_path)
     # Cost dial: max full-pipeline (LLM) analyses per day; risk is capped separately.
     daily_analysis_budget: int = 8
     # Exit engine (spec Component 6). Entry is top-daily_analysis_budget;
@@ -114,6 +129,10 @@ class OpsConfig:
         if self.live_fill_gate_count < 0:
             raise ValueError(
                 f"live_fill_gate_count must be >= 0, got {self.live_fill_gate_count}"
+            )
+        if self.baseline_starting_cash <= 0:
+            raise ValueError(
+                f"baseline_starting_cash must be > 0, got {self.baseline_starting_cash}"
             )
 
 
@@ -187,6 +206,18 @@ def load_config() -> OpsConfig:
     live_fill_gate_count = _env_int("OPS_LIVE_FILL_GATE_COUNT")
     if live_fill_gate_count is not None:
         kwargs["live_fill_gate_count"] = live_fill_gate_count
+
+    baseline_journal_path = os.environ.get("OPS_BASELINE_JOURNAL_PATH")
+    if baseline_journal_path is not None:
+        kwargs["baseline_journal_path"] = baseline_journal_path
+
+    baseline_starting_cash = _env_decimal("OPS_BASELINE_STARTING_CASH")
+    if baseline_starting_cash is not None:
+        kwargs["baseline_starting_cash"] = baseline_starting_cash
+
+    screen_store_path = os.environ.get("OPS_SCREEN_STORE_PATH")
+    if screen_store_path is not None:
+        kwargs["screen_store_path"] = screen_store_path
 
     daily_analysis_budget = _env_int("OPS_DAILY_ANALYSIS_BUDGET")
     if daily_analysis_budget is not None:

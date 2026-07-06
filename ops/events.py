@@ -78,6 +78,9 @@ KIND_NOTIFY_RENDER_ERROR = "notify_render_error"
 KIND_NOTIFY_DISPATCH_ERROR = "notify_dispatch_error"
 KIND_NOTIFY_EVENT_SKIPPED = "notify_event_skipped"
 
+# Baseline (null-hypothesis) screen portfolio
+KIND_BASELINE_SCREEN_RUN = "baseline_screen_run"
+KIND_BASELINE_EXIT = "baseline_exit"
 # Position lifecycle / exit engine
 KIND_POSITION_OPENED = "position_opened"
 KIND_EXIT_DECISION = "exit_decision"
@@ -85,7 +88,6 @@ KIND_EXIT_ORDER_PLACED = "exit_order_placed"
 KIND_EXIT_SKIPPED_MISSING_DATA = "exit_skipped_missing_data"
 KIND_EXIT_CHECK_ERROR = "exit_check_error"
 KIND_EXIT_UNKNOWN_PROVENANCE = "exit_unknown_provenance"
-
 # Scheduler / daily-cycle gate
 KIND_DAILY_CYCLE_RUN = "daily_cycle_run"
 
@@ -109,6 +111,8 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_NOTIFY_RENDER_ERROR,
     KIND_NOTIFY_DISPATCH_ERROR,
     KIND_NOTIFY_EVENT_SKIPPED,
+    KIND_BASELINE_SCREEN_RUN,
+    KIND_BASELINE_EXIT,
     # Exit lifecycle: the sell itself already notifies via KIND_FILL (push);
     # these are audit breadcrumbs.
     KIND_POSITION_OPENED,
@@ -392,6 +396,20 @@ def notify_event_skipped_payload(
     }
 
 
+def baseline_screen_run_payload(
+    *, asof: str, passers: int, buys: list[str], exits: list[str],
+    skipped: list[str], equity: Decimal,
+) -> dict[str, Any]:
+    return {
+        "asof": asof, "passers": passers, "buys": buys,
+        "exits": exits, "skipped": skipped, "equity": str(equity),
+    }
+
+
+def baseline_exit_payload(*, symbol: str, held_days: int) -> dict[str, Any]:
+    return {"symbol": symbol, "held_days": held_days}
+
+
 def position_opened_payload(
     *, symbol: str, source: str, entry_date: date,
     client_order_id: str, entry_rank: int | None = None,
@@ -469,6 +487,8 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_NOTIFY_RENDER_ERROR: notify_render_error_payload,
     KIND_NOTIFY_DISPATCH_ERROR: notify_dispatch_error_payload,
     KIND_NOTIFY_EVENT_SKIPPED: notify_event_skipped_payload,
+    KIND_BASELINE_SCREEN_RUN: baseline_screen_run_payload,
+    KIND_BASELINE_EXIT: baseline_exit_payload,
     KIND_POSITION_OPENED: position_opened_payload,
     KIND_EXIT_DECISION: exit_decision_payload,
     KIND_EXIT_ORDER_PLACED: exit_order_placed_payload,

@@ -38,6 +38,7 @@ from ops.broker.base import BrokerError
 from ops.config import OpsConfig, load_config
 from ops.journal import Journal
 from ops.live_gate import flip_epoch, record_flip_marker
+from ops.llm_backend import build_managed_backend, load_managed_backend_config
 from ops.notify.config import load_notify_config
 from ops.notify.dispatcher import NotifyDispatcher
 from ops.notify.email import build_email_transport
@@ -245,18 +246,25 @@ def _live_flip_ritual(journal: Journal, broker, config: OpsConfig) -> None:
     record_flip_marker(journal)
 
 
-def _wire(broker, journal: Journal, config: OpsConfig):
-    """Wire the orchestrator + guardian + calendar for the given broker+config."""
+def _wire(broker, journal: Journal, config: OpsConfig, *, backend=None):
+    """Wire the orchestrator + guardian + calendar for the given broker+config.
+
+    ``backend`` is the managed local-model lifecycle manager threaded into the
+    pipeline adapter (off unless OPS_LLM_MANAGED_BACKEND is set). It is also
+    returned so the service can tear it down on shutdown. Injectable for tests.
+    """
     from ops.pipeline_adapter import TradingAgentsPipelineAdapter
     from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
     from ops.universe.composite import build_composite_universe
 
+    if backend is None:
+        backend = build_managed_backend(load_managed_backend_config())
     calendar = MarketCalendar()
     orchestrator = Orchestrator(
         broker=broker,
         universe_builder=build_composite_universe,
         strategy=PostEarningsMomentumStrategy(config=config),
-        pipeline_adapter=TradingAgentsPipelineAdapter(),
+        pipeline_adapter=TradingAgentsPipelineAdapter(backend=backend),
         calendar=calendar, journal=journal, config=config,
     )
     guardian = PositionGuardian(
@@ -264,7 +272,7 @@ def _wire(broker, journal: Journal, config: OpsConfig):
         journal=journal, broker_mode=config.broker_mode,
         market_open_fn=calendar.is_open_now,
     )
-    return orchestrator, guardian, calendar
+    return orchestrator, guardian, calendar, backend
 
 
 def _emit_halt_events(journal: Journal, result: ReconcileResult) -> None:
@@ -289,9 +297,9 @@ def _startup(config: OpsConfig, journal: Journal):
         # Before reconcile/scheduling: nothing live may proceed until the
         # first flip is confirmed (or the marker already exists).
         _live_flip_ritual(journal, broker, config)
-    orchestrator, guardian, calendar = _wire(broker, journal, config)
+    orchestrator, guardian, calendar, backend = _wire(broker, journal, config)
     result = reconcile(journal=journal, broker=broker, broker_mode=config.broker_mode)
-    return broker, orchestrator, guardian, calendar, result
+    return broker, orchestrator, guardian, calendar, result, backend
 
 
 def _build_dispatcher(journal: Journal) -> NotifyDispatcher:
@@ -477,6 +485,7 @@ def run() -> int:
     # 1 therefore means "crashed out through an unhandled exception" in the
     # service_stopping uptime record (A1.2).
     exit_code = 1
+    backend = None  # managed local-model backend, set once startup wires it
     try:
         journal.record_event(
             events.KIND_SERVICE_STARTED,
@@ -488,7 +497,7 @@ def run() -> int:
             ),
         )
         try:
-            broker, orchestrator, guardian, calendar, result = _startup(config, journal)
+            broker, orchestrator, guardian, calendar, result, backend = _startup(config, journal)
         except LiveFlipRefused as exc:
             # live_flip_refused is already journaled (audit-only) by the
             # ritual; nothing was scheduled.
@@ -549,6 +558,10 @@ def run() -> int:
         exit_code = 0
         return exit_code
     finally:
+        # Safety net: the per-tick session normally tears the managed backend
+        # down already; this frees it even if startup half-completed. Idempotent.
+        if backend is not None:
+            backend.shutdown()
         journal.record_event(
             events.KIND_SERVICE_STOPPING,
             events.service_stopping_payload(exit_code=exit_code),

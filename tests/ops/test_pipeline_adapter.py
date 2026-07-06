@@ -73,6 +73,86 @@ def test_real_adapter_constructs_graph_lazily(monkeypatch):
     assert r.decision == PipelineDecision.BUY
 
 
+class _RecordingBackend:
+    """Managed-backend double that records lifecycle calls in order."""
+
+    def __init__(self, events):
+        self.events = events
+        self.ensure_calls = 0
+        self.shutdown_calls = 0
+
+    def ensure_up(self):
+        self.ensure_calls += 1
+        self.events.append("ensure_up")
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+        self.events.append("shutdown")
+
+
+def test_propagate_ensures_backend_up_before_graph(monkeypatch):
+    """The managed backend must be brought up before the graph runs, so a
+    local server is loaded lazily only when an analysis actually happens."""
+    events = []
+
+    class FakeGraph:
+        def __init__(self, **kwargs):
+            pass
+
+        def propagate(self, ticker, dt):
+            events.append("propagate")
+            return ({}, "Buy")
+
+    monkeypatch.setattr("ops.pipeline_adapter.TradingAgentsGraph", FakeGraph)
+    backend = _RecordingBackend(events)
+    adapter = TradingAgentsPipelineAdapter(backend=backend)
+    adapter.propagate("AAPL", date(2026, 6, 30))
+    assert events == ["ensure_up", "propagate"]
+    assert backend.ensure_calls == 1
+
+
+def test_session_shuts_down_backend():
+    events = []
+    backend = _RecordingBackend(events)
+    adapter = TradingAgentsPipelineAdapter(backend=backend)
+    with adapter.session():
+        pass
+    assert backend.shutdown_calls == 1
+    assert events == ["shutdown"]
+
+
+def test_session_shuts_down_even_on_error():
+    events = []
+    backend = _RecordingBackend(events)
+    adapter = TradingAgentsPipelineAdapter(backend=backend)
+    with pytest.raises(ValueError):
+        with adapter.session():
+            raise ValueError("boom")
+    assert backend.shutdown_calls == 1
+
+
+def test_default_adapter_has_no_managed_backend(monkeypatch):
+    """Constructed with no backend, propagate/session must work (Null backend)."""
+    class FakeGraph:
+        def __init__(self, **kwargs):
+            pass
+
+        def propagate(self, ticker, dt):
+            return ({}, "Hold")
+
+    monkeypatch.setattr("ops.pipeline_adapter.TradingAgentsGraph", FakeGraph)
+    adapter = TradingAgentsPipelineAdapter()
+    with adapter.session():
+        r = adapter.propagate("AAPL", date(2026, 6, 30))
+    assert r.decision == PipelineDecision.HOLD
+
+
+def test_stub_session_is_noop():
+    stub = StubPipelineAdapter({})
+    with stub.session():
+        pass  # must be a usable context manager
+
+
 def test_ensure_graph_is_thread_safe(monkeypatch):
     """Two concurrent callers get the same graph instance; build runs once."""
     build_count = 0

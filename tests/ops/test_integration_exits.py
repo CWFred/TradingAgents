@@ -3,6 +3,7 @@ sells and the freed slot is refilled the SAME tick. Real composite builder,
 exit engine, strategy, guarded paper broker, and journal; yfinance, pipeline,
 and calendar are faked (no network, no LLM calls)."""
 import functools
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock
@@ -24,6 +25,9 @@ class _AlwaysBuyPipeline:
     def propagate(self, symbol, asof_date):
         return PipelineResult(symbol=symbol, date=asof_date,
                               decision=PipelineDecision.BUY, raw={})
+
+    def session(self):
+        return nullcontext()
 
 
 def test_momentum_lifecycle_buy_then_rank_decay_sell_then_refill(tmp_path):

@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import re
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from typing import Protocol
 
+from ops.llm_backend import ManagedBackend, NullManagedBackend
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 
@@ -31,6 +34,15 @@ class PipelineResult:
 
 class PipelineAdapter(Protocol):
     def propagate(self, symbol: str, asof_date: date) -> PipelineResult: ...
+
+    def session(self):
+        """Context manager bracketing a batch of analyses.
+
+        On exit, any managed local model backend is torn down. Bringing the
+        backend *up* is lazy (done inside propagate), so an empty batch never
+        starts a server.
+        """
+        ...
 
 
 # Upstream ratings are one of: Buy, Overweight, Hold, Underweight, Sell.
@@ -69,10 +81,11 @@ def parse_decision(text: str) -> PipelineDecision:
 class TradingAgentsPipelineAdapter:
     """Wraps the upstream graph. Constructs lazily and reuses one instance."""
 
-    def __init__(self, **graph_kwargs):
+    def __init__(self, *, backend: ManagedBackend | None = None, **graph_kwargs):
         self._kwargs = graph_kwargs
         self._graph: TradingAgentsGraph | None = None
         self._lock = threading.Lock()
+        self._backend: ManagedBackend = backend or NullManagedBackend()
 
     def _ensure_graph(self) -> TradingAgentsGraph:
         # Fast path: no lock once the cache is populated.
@@ -89,11 +102,22 @@ class TradingAgentsPipelineAdapter:
         return TradingAgentsGraph(**self._kwargs)
 
     def propagate(self, symbol: str, asof_date: date) -> PipelineResult:
+        # Bring the managed backend up lazily — only when an analysis actually
+        # runs, so ticks with no candidates never load a local model.
+        self._backend.ensure_up()
         graph = self._ensure_graph()
         raw, decision_text = graph.propagate(symbol, asof_date.isoformat())
         decision = parse_decision(decision_text or "")
         raw_dict = raw if isinstance(raw, dict) else {"output": str(raw)}
         return PipelineResult(symbol=symbol, date=asof_date, decision=decision, raw=raw_dict)
+
+    @contextmanager
+    def session(self) -> Iterator[TradingAgentsPipelineAdapter]:
+        """Bracket a batch of analyses; tear the managed backend down on exit."""
+        try:
+            yield self
+        finally:
+            self._backend.shutdown()
 
 
 class StubPipelineAdapter:
@@ -105,3 +129,7 @@ class StubPipelineAdapter:
     def propagate(self, symbol: str, asof_date: date) -> PipelineResult:
         decision = self._decisions.get(symbol, PipelineDecision.HOLD)
         return PipelineResult(symbol=symbol, date=asof_date, decision=decision, raw={})
+
+    @contextmanager
+    def session(self) -> Iterator[StubPipelineAdapter]:
+        yield self

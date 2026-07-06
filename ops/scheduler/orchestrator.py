@@ -106,31 +106,35 @@ class Orchestrator:
         fresh_candidates = [c for c in candidates if c.symbol not in held]
         current_equity = self._broker.get_equity()
         live_cap = self._compute_live_cap()
-        proposals = self._strategy.propose_orders(
-            candidates=fresh_candidates,
-            pipeline=self._pipeline_adapter,
-            current_equity=current_equity,
-            asof_date=asof_date,
-            live_max_position_cap=live_cap,
-        )
-        for proposal in proposals:
-            try:
-                self._broker.place_order(proposal.order)
-            except OrderRejected:
-                continue
-            except BrokerError:
-                break
-            cand = proposal.candidate
-            self._journal.record_event(
-                events.KIND_POSITION_OPENED,
-                events.position_opened_payload(
-                    symbol=cand.symbol,
-                    source=cand.source.value,
-                    entry_date=asof_date,
-                    client_order_id=proposal.order.client_order_id,
-                    entry_rank=cand.momentum.rank if cand.momentum else None,
-                ),
+        # Bracket the analysis batch: a managed local model backend (e.g. ds4)
+        # is torn down when the session exits, freeing its resident memory
+        # between ticks. Bringing it up is lazy inside propagate().
+        with self._pipeline_adapter.session():
+            proposals = self._strategy.propose_orders(
+                candidates=fresh_candidates,
+                pipeline=self._pipeline_adapter,
+                current_equity=current_equity,
+                asof_date=asof_date,
+                live_max_position_cap=live_cap,
             )
+            for proposal in proposals:
+                try:
+                    self._broker.place_order(proposal.order)
+                except OrderRejected:
+                    continue
+                except BrokerError:
+                    break
+                cand = proposal.candidate
+                self._journal.record_event(
+                    events.KIND_POSITION_OPENED,
+                    events.position_opened_payload(
+                        symbol=cand.symbol,
+                        source=cand.source.value,
+                        entry_date=asof_date,
+                        client_order_id=proposal.order.client_order_id,
+                        entry_rank=cand.momentum.rank if cand.momentum else None,
+                    ),
+                )
 
     def _run_exits(self, leaderboard, asof_date) -> None:
         report = evaluate_exits(

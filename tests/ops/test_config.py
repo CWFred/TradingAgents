@@ -116,6 +116,24 @@ def test_live_gate_from_env(monkeypatch):
     assert c.live_max_position == Decimal("8") and c.live_fill_gate_count == 30
 
 
+def test_baseline_config_fields_and_env_overrides(monkeypatch):
+    cfg = OpsConfig()
+    assert cfg.baseline_starting_cash == Decimal("100000")
+    assert cfg.baseline_journal_path.endswith("baseline_journal.sqlite")
+    assert cfg.screen_store_path.endswith("research_screen.sqlite")
+
+    monkeypatch.setenv("OPS_BASELINE_JOURNAL_PATH", "/tmp/x.sqlite")
+    monkeypatch.setenv("OPS_BASELINE_STARTING_CASH", "50000")
+    monkeypatch.setenv("OPS_SCREEN_STORE_PATH", "/tmp/y.sqlite")
+    cfg = load_config()
+    assert cfg.baseline_journal_path == "/tmp/x.sqlite"
+    assert cfg.baseline_starting_cash == Decimal("50000")
+    assert cfg.screen_store_path == "/tmp/y.sqlite"
+
+    with pytest.raises(ValueError):
+        OpsConfig(baseline_starting_cash=Decimal("0"))
+
+
 def test_envelope_rev2_defaults_and_derived_concurrency():
     cfg = OpsConfig()
     assert cfg.max_open_positions == 7

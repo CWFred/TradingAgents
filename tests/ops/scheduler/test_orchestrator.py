@@ -106,6 +106,26 @@ def test_tick_market_closed_noop(tmp_path):
     broker.get_equity.assert_not_called()
 
 
+def test_tick_brackets_analysis_in_pipeline_session(tmp_path):
+    """A tick that reaches the analysis stage must wrap it in the pipeline's
+    session() so a managed local model server is torn down when the batch ends."""
+    from ops.journal import Journal
+    from ops.config import OpsConfig
+    j = Journal(str(tmp_path / "j.sqlite"))
+    broker = _fake_broker(positions=[])
+    pipeline = _fake_pipeline()
+    orch = Orchestrator(
+        broker=broker, universe_builder=_fake_universe(["AAPL"]),
+        strategy=_fake_strategy([]), pipeline_adapter=pipeline,
+        calendar=_fake_calendar(is_open=True), journal=j,
+        config=OpsConfig(),
+    )
+    orch.tick()
+    pipeline.session.assert_called_once()
+    pipeline.session.return_value.__enter__.assert_called_once()
+    pipeline.session.return_value.__exit__.assert_called_once()
+
+
 def test_tick_journals_orchestrator_tick_error_on_unexpected_exception(tmp_path):
     """Any unexpected exception from a collaborator is swallowed and journaled."""
     from ops.journal import Journal

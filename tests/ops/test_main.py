@@ -44,10 +44,50 @@ def test_wire_returns_orchestrator_guardian_calendar(tmp_path):
     cfg = OpsConfig()
     j = Journal(str(tmp_path / "j.sqlite"))
     broker = _build_broker(cfg, j)
-    orch, guardian, cal = _wire(broker, j, cfg)
+    orch, guardian, cal, backend = _wire(broker, j, cfg)
     assert callable(orch.tick)
     assert callable(guardian.check_stops_once)
     assert callable(cal.is_open_now)
+
+
+class _RecordingBackend:
+    def __init__(self):
+        self.shutdown_calls = 0
+
+    def ensure_up(self):
+        pass
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+
+
+def test_wire_injects_and_returns_managed_backend(tmp_path):
+    """The managed backend is threaded into the pipeline adapter and returned
+    so the service can tear it down on shutdown."""
+    cfg = OpsConfig()
+    j = Journal(str(tmp_path / "j.sqlite"))
+    broker = _build_broker(cfg, j)
+    fake = _RecordingBackend()
+    orch, guardian, cal, backend = _wire(broker, j, cfg, backend=fake)
+    assert backend is fake
+    assert orch._pipeline_adapter._backend is fake
+
+
+def test_run_shuts_down_managed_backend_in_finally(
+    monkeypatch, tmp_path, preset_shutdown, capsys,
+):
+    """Safety net: the service tears the managed backend down on the way out,
+    even though the per-tick session normally already has."""
+    from ops.main import run
+
+    fake = _RecordingBackend()
+    monkeypatch.setattr("ops.main.build_managed_backend", lambda cfg: fake)
+    monkeypatch.delenv("OPS_BROKER_MODE", raising=False)
+    monkeypatch.setenv("OPS_JOURNAL_PATH", str(tmp_path / "j.sqlite"))
+
+    exit_code = run()
+    assert exit_code == 0
+    assert fake.shutdown_calls >= 1
 
 
 def test_wire_uses_composite_universe_builder(tmp_path):
@@ -56,7 +96,7 @@ def test_wire_uses_composite_universe_builder(tmp_path):
     cfg = OpsConfig()
     j = Journal(str(tmp_path / "j.sqlite"))
     broker = _build_broker(cfg, j)
-    orch, _guardian, _cal = _wire(broker, j, cfg)
+    orch, _guardian, _cal, _backend = _wire(broker, j, cfg)
     assert orch._universe_builder is build_composite_universe
 
 
@@ -136,7 +176,7 @@ def test_wire_gates_guardian_on_market_calendar(tmp_path):
     cfg = OpsConfig()
     j = Journal(str(tmp_path / "j.sqlite"))
     broker = _build_broker(cfg, j)
-    orch, guardian, cal = _wire(broker, j, cfg)
+    orch, guardian, cal, backend = _wire(broker, j, cfg)
     assert guardian._market_open == cal.is_open_now
 
 

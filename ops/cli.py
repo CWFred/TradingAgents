@@ -5,7 +5,7 @@ fills → stop check. Designed for ad-hoc invocation and as the basic
 building block for Plan 3's orchestrator."""
 from __future__ import annotations
 
-from datetime import date as date_cls, datetime
+from datetime import datetime
 from decimal import Decimal
 
 import click
@@ -120,6 +120,43 @@ def status(journal_path: str | None) -> None:
         click.echo(format_status(build_status(journal, load_config())))
     finally:
         journal.close()
+
+
+@cli.command()
+@click.option("--asof", "asof_dt", default=None,
+              type=click.DateTime(formats=["%Y-%m-%d"]),
+              help="Screen as of this date (YYYY-MM-DD); default today. Debug knob, "
+                   "not a backtest — see docs/research_screener.md.")
+@click.option("--dry-run", is_flag=True,
+              help="Screen and print only — no store writes, no baseline trades.")
+@click.option("--limit", default=None, type=int,
+              help="Screen only the first N universe names (smoke runs).")
+def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None) -> None:
+    """Run the small/mid-cap fundamental screen + null-baseline portfolio."""
+    from ops.research.run import run_screen
+
+    config = load_config()
+    asof_date = asof_dt.date() if asof_dt else datetime.now().date()
+    if asof_date < datetime.now().date() and not dry_run:
+        click.echo(
+            "warning: backdated --asof screens point-in-time fundamentals but "
+            "uses TODAY's universe membership and TODAY's baseline fill prices "
+            "— debug knob, not a backtest."
+        )
+    summary = run_screen(config=config, asof=asof_date, dry_run=dry_run, limit=limit)
+    click.echo(f"screen run {summary.run_id or '(dry-run)'} asof {summary.asof}")
+    click.echo(
+        f"universe {summary.universe_size}, screened {summary.screened}, "
+        f"passed {len(summary.passed)}, errors {len(summary.errors)}"
+    )
+    for symbol in summary.passed:
+        click.echo(f"  PASS {symbol}")
+    if summary.baseline is not None:
+        click.echo(
+            f"baseline: {len(summary.baseline['buys'])} buys, "
+            f"{len(summary.baseline['exits'])} exits, "
+            f"{len(summary.baseline['skipped'])} skipped"
+        )
 
 
 @cli.command("decide-once")
