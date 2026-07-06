@@ -167,3 +167,10 @@ service** (`ops run`, i.e. the `Orchestrator`) is the wired path for the momentu
 sleeve and exits: it computes the leaderboard, runs `evaluate_exits`, and gates
 the whole cycle to once per trading day (`daily_cycle_run`). Fixing `decide-once`
 to share that path is the first post-merge follow-up.
+
+Second deferred follow-up (from the whole-branch review): the composite builder
+has no sanity floor on leaderboard cardinality — under a *partial* yfinance
+outage, "top-8" means top-8 of whatever fetched, so entry quality can silently
+degrade (exits are hold-biased and unaffected). Consider skipping momentum
+*entries* when the leaderboard is implausibly small (e.g. under half of
+expected membership), journaling why.
