@@ -25,8 +25,15 @@ def _fake_strategy(propose_orders_return):
     return strat
 
 
-def _fake_universe(symbols):
-    return MagicMock(return_value=[MagicMock(symbol=s) for s in symbols])
+def _fake_universe(symbols, seen=None):
+    """`seen`, if given, is updated with every kwarg the builder is called
+    with (held_symbols, free_slots, excluded_symbols, momentum_leaders, ...)
+    so tests can assert on what the orchestrator handed the builder."""
+    def side_effect(**kwargs):
+        if seen is not None:
+            seen.update(kwargs)
+        return [MagicMock(symbol=s) for s in symbols]
+    return MagicMock(side_effect=side_effect)
 
 
 def _fake_broker(positions=None, equity=Decimal("1000"), cash=Decimal("500")):
@@ -35,6 +42,33 @@ def _fake_broker(positions=None, equity=Decimal("1000"), cash=Decimal("500")):
     b.get_equity.return_value = equity
     b.get_cash.return_value = cash
     return b
+
+
+def _fake_broker_with_positions(symbols):
+    return _fake_broker(positions=[MagicMock(symbol=s) for s in symbols])
+
+
+def _make_journal():
+    from ops.journal import Journal
+    return Journal(":memory:")
+
+
+def _make_orchestrator(**overrides):
+    from ops.config import OpsConfig
+    defaults = dict(
+        broker=_fake_broker(),
+        universe_builder=_fake_universe([]),
+        strategy=_fake_strategy([]),
+        pipeline_adapter=_fake_pipeline(),
+        calendar=_fake_calendar(is_open=True),
+        journal=_make_journal(),
+        config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
+    )
+    defaults.update(overrides)
+    return Orchestrator(**defaults)
 
 
 def _order(symbol):
@@ -63,6 +97,9 @@ def test_tick_market_closed_noop(tmp_path):
         strategy=_fake_strategy([]), pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=False), journal=j,
         config=MagicMock(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     assert j.read_events() == []
@@ -83,6 +120,9 @@ def test_tick_journals_orchestrator_tick_error_on_unexpected_exception(tmp_path)
         pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()  # must NOT raise
     events = j.read_events()
@@ -103,6 +143,9 @@ def test_tick_places_buy_when_strategy_proposes_order(tmp_path):
         pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     broker.place_order.assert_called_once()
@@ -124,6 +167,9 @@ def test_tick_skips_when_strategy_proposes_nothing(tmp_path):
         pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     broker.place_order.assert_not_called()
@@ -143,6 +189,9 @@ def test_tick_continues_after_rule_reject(tmp_path):
         pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     assert broker.place_order.call_count == 2
@@ -161,6 +210,9 @@ def test_tick_breaks_on_broker_error(tmp_path):
         pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     assert broker.place_order.call_count == 1
@@ -176,6 +228,9 @@ def test_maybe_snapshot_equity_writes_open_day_once(tmp_path):
         strategy=_fake_strategy([]), pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     orch.tick()
@@ -200,6 +255,9 @@ def test_tick_shortcircuits_on_daily_halt(tmp_path):
         pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     universe.assert_not_called()
@@ -222,6 +280,9 @@ def test_tick_passes_held_and_free_slots_to_builder(tmp_path):
         strategy=_fake_strategy([]), pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     kwargs = universe.call_args.kwargs
@@ -242,6 +303,9 @@ def test_tick_shortcircuits_on_weekly_kill_switch(tmp_path):
         pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     universe.assert_not_called()
@@ -290,6 +354,9 @@ def test_tick_journals_position_opened_on_successful_buy(tmp_path):
         pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     evts = [e for e in j.read_events() if e["kind"] == "position_opened"]
@@ -315,6 +382,108 @@ def test_tick_rejected_order_does_not_journal_position_opened(tmp_path):
         pipeline_adapter=_fake_pipeline(),
         calendar=_fake_calendar(is_open=True), journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     assert all(e["kind"] != "position_opened" for e in j.read_events())
+
+
+def _mhit(sym, rank):
+    from ops.universe.momentum import MomentumHit
+    return MomentumHit(symbol=sym, asof_date=date(2026, 7, 6),
+                       trailing_return_6m=Decimal("0.2"),
+                       close=Decimal("110"), sma_200=Decimal("100"),
+                       avg_dollar_volume_20d=Decimal("100000000"), rank=rank)
+
+
+def _uptrend_closes():
+    from ops.universe.momentum import SMA_WINDOW
+    # 201 rising closes: both last closes comfortably above their MAs.
+    return [Decimal(100) + Decimal(i) for i in range(SMA_WINDOW + 1)]
+
+
+def _broker_holding_momentum(sym):
+    """Fake broker holding one position; close_position removes it."""
+    from datetime import datetime, timezone
+    from ops.broker.types import Fill, Position, Side
+    broker = MagicMock()
+    state = {"positions": [Position(symbol=sym, quantity=Decimal("1"),
+                                    avg_entry_price=Decimal("100"))]}
+    broker.get_positions.side_effect = lambda: list(state["positions"])
+    broker.get_equity.return_value = Decimal("1000")
+
+    def close(symbol, **kwargs):
+        state["positions"] = [p for p in state["positions"] if p.symbol != symbol]
+        return Fill(order_id="o", client_order_id=f"exit-{symbol}",
+                    symbol=symbol, side=Side.SELL, quantity=Decimal("1"),
+                    price=Decimal("100"),
+                    filled_at=datetime.now(timezone.utc))
+    broker.close_position.side_effect = close
+    return broker
+
+
+def _journal_position_opened(journal, sym, source):
+    from datetime import datetime, timezone
+    from ops import events
+    journal.record_event(events.KIND_POSITION_OPENED, events.position_opened_payload(
+        symbol=sym, source=source,
+        entry_date=datetime.now(timezone.utc).date(), client_order_id="x",
+    ))
+
+
+def _raises(exc):
+    def f(*args, **kwargs):
+        raise exc
+    return f
+
+
+def test_exit_decision_sells_and_journals_and_frees_slot():
+    # Broker holds NVDA (momentum, rank 30 today -> rank_decay).
+    # After the exit, the builder must see NVDA gone and one more free slot.
+    from ops.config import OpsConfig
+    journal = _make_journal()
+    seen = {}
+    orch = _make_orchestrator(
+        broker=_broker_holding_momentum("NVDA"),
+        universe_builder=_fake_universe([], seen),
+        journal=journal,
+        momentum_finder=lambda members, asof_date: [_mhit("NVDA", 30)],
+        closes_fetch=lambda s: (_uptrend_closes(), []),
+    )
+    _journal_position_opened(journal, "NVDA", "MOMENTUM")
+    orch.tick()
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert "exit_decision" in kinds and "exit_order_placed" in kinds
+    assert seen["held_symbols"] == frozenset()
+    assert seen["free_slots"] == OpsConfig().max_open_positions
+    assert seen["momentum_leaders"][0].symbol == "NVDA"  # computed once, passed through
+
+
+def test_recent_stop_out_is_excluded_from_builder():
+    journal = _make_journal()
+    journal.record_event("stop_hit", {"symbol": "BURNED"})
+    seen = {}
+    orch = _make_orchestrator(
+        broker=_fake_broker_with_positions([]),
+        universe_builder=_fake_universe([], seen), journal=journal,
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
+    )
+    orch.tick()
+    assert "BURNED" in seen["excluded_symbols"]
+
+
+def test_exit_engine_crash_is_journaled_and_buys_proceed():
+    journal = _make_journal()
+    seen = {}
+    orch = _make_orchestrator(
+        broker=_fake_broker_with_positions([]),
+        universe_builder=_fake_universe([], seen), journal=journal,
+        momentum_finder=_raises(RuntimeError("boom")),
+        closes_fetch=lambda s: None,
+    )
+    orch.tick()
+    assert any(e["kind"] == "exit_check_error" for e in journal.read_events())
+    assert "held_symbols" in seen  # tick reached the builder anyway

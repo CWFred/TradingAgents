@@ -64,6 +64,9 @@ def test_end_to_end_orchestrator_buy_then_guardian_stop_survives_restart(tmp_pat
         broker=broker, universe_builder=universe_builder, strategy=strategy,
         pipeline_adapter=pipeline, calendar=calendar, journal=j,
         config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
     )
     orch.tick()
     positions = broker.get_positions()
