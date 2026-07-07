@@ -287,6 +287,63 @@ def research_write_off(symbol: str, price: str, note: str | None) -> None:
     )
 
 
+@research.command("run")
+@click.option("--max-names", default=3, show_default=True, type=int,
+              help="How many pending hits to research this batch (oldest first).")
+def research_run(max_names: int) -> None:
+    """Deep-research pending screen hits into structured memos (local models)."""
+    from ops.llm_backend import build_managed_backend, load_managed_backend_config
+    from ops.research.brain import ResearchError, research_hit
+    from ops.research.models import build_stage_llm
+    from ops.research.store import ScreenStore
+    from tradingagents.memos.store import MemoStore
+
+    config = load_config()
+    store = ScreenStore(config.screen_store_path)
+    hits = store.pending_hits()[:max_names]
+    if not hits:
+        click.echo("no pending hits")
+        return
+    memo_store = MemoStore(config.memo_store_path)
+    evidence_llm = build_stage_llm(config.research_evidence_model)
+    thesis_llm = build_stage_llm(config.research_thesis_model)
+    backend = build_managed_backend(load_managed_backend_config())
+    researched = failed = 0
+    try:
+        backend.ensure_up()
+        for hit in hits:
+            try:
+                outcome = research_hit(
+                    hit, evidence_llm=evidence_llm, thesis_llm=thesis_llm,
+                    memo_store=memo_store,
+                )
+            except ResearchError:
+                raise  # configuration problem: abort the whole batch
+            except Exception as exc:
+                store.mark_failed(hit["id"])
+                failed += 1
+                click.echo(f"{hit['symbol']}: FAILED ({type(exc).__name__}: {exc})")
+                continue
+            if outcome.status == "researched":
+                store.mark_researched(hit["id"])
+                researched += 1
+                click.echo(
+                    f"{outcome.symbol}: memo {outcome.memo_id} "
+                    f"({outcome.recommendation}; evidence {outcome.evidence_kept} kept"
+                    f"/{outcome.evidence_dropped} dropped)"
+                )
+            else:
+                store.mark_failed(hit["id"])
+                failed += 1
+                click.echo(f"{outcome.symbol}: FAILED — " + "; ".join(outcome.errors))
+    finally:
+        backend.shutdown()
+    click.echo(f"research run: {researched} researched, {failed} failed, "
+               f"{len(store.pending_hits())} still pending")
+    if failed == len(hits):
+        raise SystemExit(1)
+
+
 @cli.command("decide-once")
 @click.option("--date", "as_of", required=True,
               type=click.DateTime(formats=["%Y-%m-%d"]),

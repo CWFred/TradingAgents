@@ -5,9 +5,10 @@ a process-wide lock, ISO-8601 UTC TEXT timestamps, full payload as JSON with
 columns as query indexes only.
 
 Hit lifecycle: ``pending`` (awaiting deep research — build-order step 5
-consumes these) -> ``researched`` (a memo exists) or ``expired`` (went stale
-before research). A pending symbol is never duplicated by later runs; once
-researched/expired it may be queued again by a fresh screen pass.
+consumes these) -> ``researched`` (a memo exists) | ``failed`` (research
+rejected) | ``expired`` (went stale). A pending symbol is never duplicated by
+later runs; once researched/failed/expired it may be queued again by a fresh
+screen pass.
 """
 
 from __future__ import annotations
@@ -124,6 +125,14 @@ class ScreenStore:
 
     def mark_expired(self, hit_id: int) -> None:
         self._set_status(hit_id, "expired")
+
+    def mark_failed(self, hit_id: int) -> None:
+        """Deep research rejected this hit's memo (weak-model guardrails).
+
+        Surfaced for human review via `ops research run` output; a later
+        screen pass may queue the symbol fresh.
+        """
+        self._set_status(hit_id, "failed")
 
     def last_run(self) -> dict | None:
         with self._connect() as conn:

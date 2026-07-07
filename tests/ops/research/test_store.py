@@ -60,6 +60,16 @@ def test_mark_expired(store):
     assert store.pending_hits() == []
 
 
+def test_mark_failed_and_requeue(store):
+    store.record_run(asof=ASOF, universe_size=5, results=[_result("AAA")])
+    hit = store.pending_hits()[0]
+    store.mark_failed(hit["id"])
+    assert store.pending_hits() == []
+    # A later run may queue the symbol again.
+    store.record_run(asof=date(2026, 7, 8), universe_size=5, results=[_result("AAA")])
+    assert [h["symbol"] for h in store.pending_hits()] == ["AAA"]
+
+
 def test_last_run_summary(store):
     assert store.last_run() is None
     run_id = store.record_run(
