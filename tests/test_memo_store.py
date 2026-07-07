@@ -205,3 +205,13 @@ class TestStore:
         store.save(due)
         store.save(fresh)
         assert [m.memo_id for m in store.due_for_resolution()] == [due.memo_id]
+
+
+def test_default_memo_store_path_env_override(monkeypatch):
+    from tradingagents.memos.store import default_memo_store_path
+
+    monkeypatch.setenv("OPS_MEMO_STORE_PATH", "/tmp/custom-memos.sqlite")
+    assert default_memo_store_path() == "/tmp/custom-memos.sqlite"
+    monkeypatch.delenv("OPS_MEMO_STORE_PATH")
+    monkeypatch.setenv("XDG_STATE_HOME", "/tmp/state")
+    assert default_memo_store_path() == "/tmp/state/tradingagents/memos.sqlite"

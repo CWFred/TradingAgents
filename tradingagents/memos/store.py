@@ -13,6 +13,7 @@ source of truth for *reasoning*. A position links to its memo by ``memo_id``.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -37,6 +38,19 @@ CREATE INDEX IF NOT EXISTS idx_memos_ticker ON memos(ticker);
 CREATE INDEX IF NOT EXISTS idx_memos_status ON memos(status);
 CREATE INDEX IF NOT EXISTS idx_memos_type ON memos(thesis_type);
 """
+
+
+def default_memo_store_path() -> str:
+    """Default memo DB location, shared by ops config and the agent tools.
+
+    Env override first so the tools and OpsConfig always agree on which
+    corpus they are reading.
+    """
+    override = os.environ.get("OPS_MEMO_STORE_PATH")
+    if override:
+        return override
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(os.path.expanduser(base), "tradingagents", "memos.sqlite")
 
 
 class MemoStore:
