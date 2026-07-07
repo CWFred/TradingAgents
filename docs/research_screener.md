@@ -78,6 +78,26 @@ for recently-listed names: AIBZ, AYA).
 
 **A6 gate (ev_ebit & fcf_yield ≥ 60%): FAILED on ev_ebit_vs_sector (43%).**
 
+### 2026-07-07 (Phase B, Task 0 — after Task 0 tuning)
+
+`ops screen --limit 200 --dry-run` re-run after the honest-diagnostics split
+(`unprofitable:`/`not-meaningful:` no longer count as missing) and the EBIT
+pretax+interest fallback chain: universe 200, screened 198, passed 15,
+errors 2 (same two SEC companyfacts 404s: AIBZ, AYA).
+
+| bar | computed | coverage |
+|---|---|---|
+| ev_ebit_vs_sector | 141/198 | 71% |
+| fcf_yield | 142/198 | 71% |
+| pe_vs_own_history | 147/198 | 74% |
+| roic_5y | 134/198 | 67% |
+| debt_to_ebitda | 105/198 | 53% |
+| gross_margin_stability | 86/198 | 43% |
+
+**A6 gate (ev_ebit & fcf_yield ≥ 60%): PASSED (71% / 71%).**
+(`debt_to_ebitda` and `gross_margin_stability` remain below 60% but are not
+part of the gate; residual gaps are true XBRL data gaps.)
+
 ## Follow-ups
 
 - A6 gate follow-up (2026-07-06): ev_ebit coverage 43% < 60%. Two known
