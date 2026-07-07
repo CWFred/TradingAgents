@@ -1,11 +1,13 @@
 """Unit tests for research-sleeve sizing fences (pure, no I/O)."""
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from ops.research.sizing import (
     TIER_SIZING,
+    cost_basis,
     size_entry,
 )
 
@@ -40,6 +42,12 @@ def test_base_sizing_by_tier():
 def test_cash_clamps():
     d = _size(tier="high", cash=Decimal("2500"))
     assert d.notional == Decimal("2500.00") and d.rejected is None
+
+
+def test_cash_clamp_quantizes_to_cents():
+    """Cash clamp should quantize to cents, not leak sub-cent precision."""
+    d = _size(tier="high", cash=Decimal("2500.005"))
+    assert d.notional == Decimal("2500.00")
 
 
 def test_name_cap_at_cost_clamps_then_rejects():
@@ -78,3 +86,28 @@ def test_unknown_sector_is_a_real_bucket():
 def test_unknown_tier_rejected():
     d = _size(tier="yolo")
     assert d.rejected is not None and "tier" in d.rejected
+
+
+def test_cost_basis_from_positions():
+    """cost_basis() maps symbols to quantity*avg_entry_price and totals them."""
+    pos1 = SimpleNamespace(
+        symbol="AAPL",
+        quantity=Decimal("100"),
+        avg_entry_price=Decimal("150.50"),
+    )
+    pos2 = SimpleNamespace(
+        symbol="MSFT",
+        quantity=Decimal("50"),
+        avg_entry_price=Decimal("380.00"),
+    )
+    by_symbol, total = cost_basis([pos1, pos2])
+    assert by_symbol == {
+        "AAPL": Decimal("15050"),
+        "MSFT": Decimal("19000"),
+    }
+    assert total == Decimal("34050")
+
+    # Empty positions list.
+    by_symbol, total = cost_basis([])
+    assert by_symbol == {}
+    assert total == Decimal("0")

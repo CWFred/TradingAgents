@@ -58,7 +58,7 @@ def size_entry(
     if pct is None:
         return SizingDecision(Decimal("0"), f"unknown tier {tier!r}")
     notional = _quantize_money(equity * pct)
-    notional = min(notional, cash)
+    notional = min(notional, _quantize_money(cash))
 
     name_room = NAME_CAP_PCT * equity - cost_by_symbol.get(symbol, Decimal("0"))
     if name_room < MIN_ORDER_DOLLARS:
