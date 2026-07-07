@@ -17,6 +17,11 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("OPS_SCREEN_STORE_PATH", str(tmp_path / "screen.sqlite"))
     monkeypatch.setenv("OPS_MEMO_STORE_PATH", str(tmp_path / "memos.sqlite"))
     monkeypatch.delenv("OPS_LLM_MANAGED_BACKEND", raising=False)
+    # Hermetic regardless of what the real environment has: `research run`
+    # now fails fast on a missing SEC_EDGAR_USER_AGENT (see
+    # test_missing_sec_edgar_user_agent_fails_fast_without_marking below),
+    # so every other test in this file needs one set to reach its behavior.
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "Test Suite test@example.com")
     # The command imports these lazily (repo convention: heavy imports live
     # in command bodies), so patch the SOURCE modules, not ops.cli.
     monkeypatch.setattr("ops.research.models.build_stage_llm", lambda spec: f"llm:{spec}")
@@ -104,6 +109,23 @@ def test_unexpected_exception_marks_failed_and_continues(env, monkeypatch):
     assert result.exit_code == 0, result.output
     statuses = {h["symbol"]: h["status"] for h in _all_hits(store)}
     assert statuses == {"AAA": "failed", "BBB": "researched"}
+
+
+def test_missing_sec_edgar_user_agent_fails_fast_without_marking(env, monkeypatch):
+    store = _seed_hits(env, ["AAA"])
+    # Override the env fixture's SEC_EDGAR_USER_AGENT: this test exercises
+    # the unset case specifically, hermetic to whatever the real shell has.
+    monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
+
+    def must_not_be_called(hit, **kw):
+        raise AssertionError("research_hit must not be called when EDGAR is unconfigured")
+
+    monkeypatch.setattr("ops.research.brain.research_hit", must_not_be_called)
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.cli, ["research", "run"])
+    assert result.exit_code != 0
+    statuses = {h["symbol"]: h["status"] for h in _all_hits(store)}
+    assert statuses == {"AAA": "pending"}
 
 
 def _all_hits(store):

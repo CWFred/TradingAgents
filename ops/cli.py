@@ -304,6 +304,20 @@ def research_run(max_names: int) -> None:
     if not hits:
         click.echo("no pending hits")
         return
+
+    # Fail fast: EdgarNotConfiguredError is a ValueError subtype, not a
+    # ResearchError, so research_hit's per-hit `except Exception` below
+    # would swallow it and mark_failed() every hit in the batch — burning
+    # real pending screen hits on a pure configuration error. Mirrors the
+    # same guard in ops/research/run.py's run_screen().
+    from tradingagents.dataflows import edgar
+
+    try:
+        edgar.get_user_agent()
+    except edgar.EdgarNotConfiguredError as exc:
+        click.echo(f"research run: aborted — {exc}", err=True)
+        raise SystemExit(1) from exc
+
     memo_store = MemoStore(config.memo_store_path)
     evidence_llm = build_stage_llm(config.research_evidence_model)
     thesis_llm = build_stage_llm(config.research_thesis_model)
