@@ -11,6 +11,7 @@ occurrence is the longest span (TOC entries collide with their neighbors).
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass
 
@@ -40,6 +41,19 @@ class FilingSection:
     @property
     def source_ref(self) -> str:
         return f"{self.accession}:{self.section}"
+
+
+@dataclass(frozen=True)
+class SectionDiff:
+    ticker: str
+    section: str
+    accession_new: str
+    accession_old: str
+    text: str
+
+    @property
+    def source_ref(self) -> str:
+        return f"{self.accession_new}+{self.accession_old}:{self.section}_diff"
 
 
 def _truncate(text: str, max_chars: int) -> str:
@@ -107,4 +121,60 @@ def read_filing_section(
     return FilingSection(
         ticker=ticker.upper(), accession=accession, section=section,
         form=filing.form, text=text,
+    )
+
+
+def _fiscal_year(filing) -> int:
+    when = filing.report_date or filing.filing_date
+    return when.year
+
+
+def diff_filing_sections(
+    ticker: str,
+    section: str,
+    year_a: int,
+    year_b: int,
+    *,
+    max_chars: int = 12000,
+    list_filings=None,
+    fetch_text=None,
+) -> SectionDiff:
+    """Unified diff of one section between two fiscal years' 10-Ks (old→new).
+
+    The YoY language delta is the point: new risk factors, changed customer
+    concentration numbers, dropped reassurances. Line-level diff works because
+    fetch_filing_text flattens HTML to one text chunk per line.
+    """
+    from tradingagents.dataflows import edgar
+
+    list_filings = list_filings or edgar.list_filings
+    fetch_text = fetch_text or edgar.fetch_filing_text
+    filings = list_filings(ticker, forms={"10-K", "10-K/A"}, limit=200)
+    by_year: dict[int, object] = {}
+    for f in filings:  # newest-first; keep the newest filing per fiscal year
+        by_year.setdefault(_fiscal_year(f), f)
+    old_year, new_year = sorted((year_a, year_b))
+    missing = [y for y in (old_year, new_year) if y not in by_year]
+    if missing:
+        raise KeyError(
+            f"no 10-K for fiscal year(s) {missing} for {ticker!r} "
+            f"(have: {sorted(by_year)})"
+        )
+    old_f, new_f = by_year[old_year], by_year[new_year]
+    old_text = extract_section(
+        fetch_text(old_f), form=old_f.form, section=section, max_chars=max_chars,
+    )
+    new_text = extract_section(
+        fetch_text(new_f), form=new_f.form, section=section, max_chars=max_chars,
+    )
+    diff_lines = difflib.unified_diff(
+        old_text.splitlines(), new_text.splitlines(),
+        fromfile=f"{old_f.accession_number} (FY{old_year})",
+        tofile=f"{new_f.accession_number} (FY{new_year})",
+        lineterm="", n=1,
+    )
+    return SectionDiff(
+        ticker=ticker.upper(), section=section,
+        accession_new=new_f.accession_number, accession_old=old_f.accession_number,
+        text=_truncate("\n".join(diff_lines), max_chars),
     )

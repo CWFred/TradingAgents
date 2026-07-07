@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 
+from tradingagents.dataflows import edgar_sections
 from tradingagents.dataflows.edgar import Filing
 from tradingagents.dataflows.edgar_sections import (
     FilingSection,
@@ -100,4 +101,47 @@ def test_read_filing_section_unknown_accession_raises():
             "WIDG", "0000000001-26-999999", "mdna",
             list_filings=lambda ticker, **kw: [_filing()],
             fetch_text=lambda f, **kw: TEN_K_TEXT,
+        )
+
+
+TEN_K_TEXT_PRIOR = TEN_K_TEXT.replace(
+    "Customer concentration: one customer is 40% of revenue.",
+    "Customer concentration: one customer is 25% of revenue.",
+).replace(
+    "Litigation: patent suit pending in Delaware.",
+    "No material litigation.",
+)
+
+
+def _two_ten_ks():
+    new = _filing(accession="0000000001-26-000001")
+    old = Filing(
+        ticker="WIDG", cik=1234567, accession_number="0000000001-25-000001",
+        form="10-K", filing_date=date(2025, 3, 1), report_date=date(2024, 12, 31),
+        primary_document="widg-10k.htm",
+    )
+    texts = {new.accession_number: TEN_K_TEXT, old.accession_number: TEN_K_TEXT_PRIOR}
+    return new, old, texts
+
+
+def test_diff_shows_yoy_language_change():
+    new, old, texts = _two_ten_ks()
+    diff = edgar_sections.diff_filing_sections(
+        "WIDG", "risk_factors", 2024, 2025,
+        list_filings=lambda ticker, **kw: [new, old],
+        fetch_text=lambda f, **kw: texts[f.accession_number],
+    )
+    assert diff.source_ref == f"{new.accession_number}+{old.accession_number}:risk_factors_diff"
+    assert "-Customer concentration: one customer is 25% of revenue." in diff.text
+    assert "+Customer concentration: one customer is 40% of revenue." in diff.text
+    assert "+Litigation: patent suit pending in Delaware." in diff.text
+
+
+def test_diff_missing_year_raises():
+    new, old, texts = _two_ten_ks()
+    with pytest.raises(KeyError):
+        edgar_sections.diff_filing_sections(
+            "WIDG", "risk_factors", 2019, 2025,
+            list_filings=lambda ticker, **kw: [new, old],
+            fetch_text=lambda f, **kw: texts[f.accession_number],
         )
