@@ -58,3 +58,32 @@ Insider-cluster triggers are deferred to build-order step 4 (needs the Form 4
 XML parser to separate open-market buys from routine sales/grants). EDGAR
 triggers today: 13D/13D-A, notable 8-K items, 10-12B spinoffs, tenders,
 going-private. Plus the price trigger: close ≥25% below the 60-day high.
+
+## Calibration runs
+
+### 2026-07-06 (Phase A, Task 9 — first live run, pre-tuning)
+
+`ops screen --limit 200 --dry-run` (first 200 universe names, network live):
+universe 200, screened 198, passed 15, errors 2 (both SEC companyfacts 404s
+for recently-listed names: AIBZ, AYA).
+
+| bar | computed | coverage |
+|---|---|---|
+| ev_ebit_vs_sector | 87/198 | 43% |
+| fcf_yield | 142/198 | 71% |
+| pe_vs_own_history | 84/198 | 42% |
+| roic_5y | 132/198 | 66% |
+| debt_to_ebitda | 79/198 | 39% |
+| gross_margin_stability | 86/198 | 43% |
+
+**A6 gate (ev_ebit & fcf_yield ≥ 60%): FAILED on ev_ebit_vs_sector (43%).**
+
+## Follow-ups
+
+- A6 gate follow-up (2026-07-06): ev_ebit coverage 43% < 60%. Two known
+  causes: (1) the coverage metric counts unprofitable names (EBIT ≤ 0) as
+  "missing" although the screener saw the data and judged the bar; (2)
+  `EBIT_CONCEPTS` is a single tag (`OperatingIncomeLoss`) with no fallback
+  for filers that reconstruct via pretax + interest. Tuning task written up
+  as Task 0 of docs/superpowers/plans/2026-07-06-phase-b-brain.md — must be
+  resolved before the Phase B brain runs on real hits.

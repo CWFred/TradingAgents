@@ -157,18 +157,40 @@ spendable buying power (currently $0). The first 20 live fills are code-capped a
 - Paper mode touches no real money. SPOT is dual-blocked. The kill switch auto-closes in paper.
 - To reset for a clean smoke: point `OPS_JOURNAL_PATH` at a fresh file (avoids M2 replay storm).
 
-## Known limitation: `ops decide-once` (non-forced) doesn't see the momentum sleeve
+## Deploy (live worktree)
 
-`ops decide-once` without `--force-candidate` still builds its universe from the
-earnings-only sleeve — it does **not** run the momentum leaderboard, so it will
-never surface momentum candidates, and it does not run the exit engine, so it
-will never sell a decayed/trend-broken/max-held position either. The **always-on
-service** (`ops run`, i.e. the `Orchestrator`) is the wired path for the momentum
-sleeve and exits: it computes the leaderboard, runs `evaluate_exits`, and gates
-the whole cycle to once per trading day (`daily_cycle_run`). Fixing `decide-once`
-to share that path is the first post-merge follow-up.
+The daemon and the weekly screen run from `~/Code/TradingAgents-live` (a git
+worktree pinned to `main`, with its own venv) — NEVER from the dev checkout.
+This is the fix for the 2026-07-06 deploy hazard: a branch switch in the dev
+checkout used to change what the daemon ran on its next relaunch. Both plists
+(`com.tradingagents.ops`, `com.tradingagents.screen`) point at the live
+worktree's interpreter and WorkingDirectory; their `EnvironmentVariables`
+blocks carry the notify/heartbeat/LLM credentials — re-rendering with
+`install-service`/`install-screen-service` resets that block to template
+defaults, so re-apply the env keys after any re-render.
 
-Second deferred follow-up (from the whole-branch review): the composite builder
+Redeploy after merging to main:
+
+    git -C ~/Code/TradingAgents-live pull --ff-only
+    ~/Code/TradingAgents-live/.venv/bin/pip install -e ~/Code/TradingAgents-live   # only if deps changed
+    launchctl kickstart -k gui/$(id -u)/com.tradingagents.ops
+
+The screen job (`com.tradingagents.screen`, Saturday 10:00 local) picks up
+new code on its next run automatically; kickstart it manually to run early.
+Rule: the dev checkout (`~/Code/TradingAgents`) never runs services.
+
+Momentum sunset review due ~2026-08-30 (8-week paper gate): keep / pause /
+retire on its track record. See
+docs/superpowers/specs/2026-07-06-finish-research-system-design.md.
+
+## Resolved: `ops decide-once` composite parity (was a known limitation)
+
+Fixed in Phase A (PR #13): `ops decide-once` (non-forced) now builds the
+composite universe (earnings + momentum sleeves), matching what the daemon
+runs. It still does not run the exit engine — the always-on service remains
+the only wired path for exits and the once-daily cycle gate.
+
+Deferred follow-up (from the whole-branch review): the composite builder
 has no sanity floor on leaderboard cardinality — under a *partial* yfinance
 outage, "top-8" means top-8 of whatever fetched, so entry quality can silently
 degrade (exits are hold-biased and unaffected). Consider skipping momentum
