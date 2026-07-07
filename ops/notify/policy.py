@@ -55,6 +55,14 @@ POLICY: dict[str, PolicyEntry] = {
     # The universe came back empty because the data feed was failing, not
     # because the market was quiet (2026-07-06 incident) — worth a push.
     events.KIND_UNIVERSE_BLIND: PolicyEntry(("push",), "high", None),
+    # Research monitoring (Phase C): falsifier triggered, immediate investigation needed.
+    events.KIND_FALSIFIER_TRIPPED: PolicyEntry(("push",), "high", None),
+    # Research monitoring: memo reaching expected resolution date.
+    events.KIND_RESOLUTION_DUE: _PUSH_ONLY,
+    # Research monitoring: catalyst event expected.
+    events.KIND_CATALYST_DUE: _PUSH_ONLY,
+    # Research monitoring: critical issue detected by monitor, escalation needed.
+    events.KIND_RESEARCH_ESCALATION: PolicyEntry(("push",), "high", None),
     # NOTE: audit-only kinds (events.AUDIT_ONLY — e.g.
     # journal_replay_orphan_sell, service_started) are intentionally
     # absent and must never be notified.
@@ -99,6 +107,23 @@ def render(kind: str, payload: dict) -> NotifyMessage:
     elif kind == events.KIND_DAILY_SUMMARY:
         title = payload.get("headline", "Daily summary")
         body = payload.get("body", str(payload))
+    elif kind == events.KIND_FALSIFIER_TRIPPED:
+        title = f"Falsifier tripped: {payload.get('ticker')}"
+        body = (f"{payload.get('description')} ({payload.get('metric')}); "
+                f"observed {payload.get('observed')} vs threshold "
+                f"{payload.get('threshold')} for {payload.get('consecutive_periods')} periods")
+    elif kind == events.KIND_RESOLUTION_DUE:
+        title = f"Resolution due: {payload.get('ticker')}"
+        body = (f"Memo {payload.get('memo_id')} thesis {payload.get('thesis_type')} "
+                f"status {payload.get('status')}: {payload.get('elapsed_days')} days "
+                f"elapsed of expected {payload.get('expected_holding_months')} months")
+    elif kind == events.KIND_CATALYST_DUE:
+        title = f"Catalyst due: {payload.get('ticker')}"
+        body = (f"{payload.get('description')} expected on "
+                f"{payload.get('expected_date')}")
+    elif kind == events.KIND_RESEARCH_ESCALATION:
+        title = f"Research escalation: {payload.get('ticker')}"
+        body = f"Memo {payload.get('memo_id')}: {payload.get('reason')}"
     else:
         title = _title(kind)
         body = _kv_body(payload) or kind

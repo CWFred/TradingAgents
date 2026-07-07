@@ -166,6 +166,23 @@ SAMPLE_BUILDER_ARGS: dict[str, dict] = {
         asof_date="2026-07-06", fetch_ok=0, fetch_failed=10,
         detail="empty universe with majority fetch failures",
     ),
+    events.KIND_FALSIFIER_TRIPPED: dict(
+        memo_id="memo-1", ticker="AAPL", falsifier_index="0",
+        description="price below support", metric="price", observed="145.50",
+        threshold="150.00", consecutive_periods=3,
+    ),
+    events.KIND_RESOLUTION_DUE: dict(
+        memo_id="memo-2", ticker="MSFT", thesis_type="growth", status="active",
+        expected_holding_months=12, elapsed_days=180, checklist="quarterly_check",
+    ),
+    events.KIND_CATALYST_DUE: dict(
+        memo_id="memo-3", ticker="GOOGL", catalyst_index="0",
+        description="earnings announcement", expected_date="2026-07-15",
+    ),
+    events.KIND_RESEARCH_ESCALATION: dict(
+        ticker="TSLA", memo_id="memo-4", reason="conflicting_signals",
+        hit_id=42,
+    ),
 }
 
 
@@ -278,3 +295,27 @@ def test_generic_render_omits_none_valued_keys():
         status="failed", quantity=Decimal("1.5"), fill_price=None,
     ))
     assert "quantity=1.5" in m2.body and "fill_price" not in m2.body
+
+
+def test_phase_c_monitoring_kinds_registered():
+    from ops import events
+    from ops.notify.policy import POLICY
+
+    assert POLICY[events.KIND_FALSIFIER_TRIPPED].urgency == "high"
+    assert POLICY[events.KIND_RESEARCH_ESCALATION].urgency == "high"
+    assert POLICY[events.KIND_RESOLUTION_DUE].urgency == "normal"
+    assert POLICY[events.KIND_CATALYST_DUE].urgency == "normal"
+    for kind in (
+        events.KIND_RESEARCH_MONITOR_RUN, events.KIND_RESEARCH_MONITOR_ERROR,
+        events.KIND_BASELINE_QUOTE_FAILURE, events.KIND_BASELINE_AUTO_WRITEOFF,
+    ):
+        assert kind in events.AUDIT_ONLY
+        assert kind not in POLICY
+    # Every new kind has a registered payload builder.
+    for kind in (
+        events.KIND_FALSIFIER_TRIPPED, events.KIND_RESOLUTION_DUE,
+        events.KIND_CATALYST_DUE, events.KIND_RESEARCH_ESCALATION,
+        events.KIND_RESEARCH_MONITOR_RUN, events.KIND_RESEARCH_MONITOR_ERROR,
+        events.KIND_BASELINE_QUOTE_FAILURE, events.KIND_BASELINE_AUTO_WRITEOFF,
+    ):
+        assert kind in events.BUILDERS

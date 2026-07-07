@@ -98,6 +98,16 @@ KIND_UNIVERSE_BLIND = "universe_blind"
 
 KIND_BASELINE_WRITEOFF = "baseline_writeoff"
 
+# --- Research monitoring (Phase C) ---
+KIND_FALSIFIER_TRIPPED = "falsifier_tripped"
+KIND_RESOLUTION_DUE = "resolution_due"
+KIND_CATALYST_DUE = "catalyst_due"
+KIND_RESEARCH_ESCALATION = "research_escalation"
+KIND_RESEARCH_MONITOR_RUN = "research_monitor_run"
+KIND_RESEARCH_MONITOR_ERROR = "research_monitor_error"
+KIND_BASELINE_QUOTE_FAILURE = "baseline_quote_failure"
+KIND_BASELINE_AUTO_WRITEOFF = "baseline_auto_writeoff"
+
 # Kinds deliberately NOT notified. Everything here is an audit trail the
 # operator reads via `ops status` or sqlite, not a push/email — either
 # because it fires during normal operation (service lifecycle, replay
@@ -134,6 +144,11 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_UNIVERSE_DIAGNOSTICS,
     # Baseline write-off: manual resolution of a delisted position.
     KIND_BASELINE_WRITEOFF,
+    # Research monitoring events: audit trail of monitor runs and failures.
+    KIND_RESEARCH_MONITOR_RUN,
+    KIND_RESEARCH_MONITOR_ERROR,
+    KIND_BASELINE_QUOTE_FAILURE,
+    KIND_BASELINE_AUTO_WRITEOFF,
 })
 
 
@@ -482,6 +497,79 @@ def baseline_writeoff_payload(
     return {"symbol": symbol, "quantity": str(quantity), "price": str(price), "note": note}
 
 
+def falsifier_tripped_payload(
+    *, memo_id: str, ticker: str, falsifier_index: str, description: str,
+    metric: str, observed: str, threshold: str, consecutive_periods: int,
+) -> dict[str, Any]:
+    return {
+        "memo_id": memo_id, "ticker": ticker, "falsifier_index": falsifier_index,
+        "description": description, "metric": metric, "observed": observed,
+        "threshold": threshold, "consecutive_periods": consecutive_periods,
+    }
+
+
+def resolution_due_payload(
+    *, memo_id: str, ticker: str, thesis_type: str, status: str,
+    expected_holding_months: int, elapsed_days: int, checklist: str,
+) -> dict[str, Any]:
+    return {
+        "memo_id": memo_id, "ticker": ticker, "thesis_type": thesis_type,
+        "status": status, "expected_holding_months": expected_holding_months,
+        "elapsed_days": elapsed_days, "checklist": checklist,
+    }
+
+
+def catalyst_due_payload(
+    *, memo_id: str, ticker: str, catalyst_index: str, description: str,
+    expected_date: str,
+) -> dict[str, Any]:
+    return {
+        "memo_id": memo_id, "ticker": ticker, "catalyst_index": catalyst_index,
+        "description": description, "expected_date": expected_date,
+    }
+
+
+def research_escalation_payload(
+    *, ticker: str, memo_id: str, reason: str, hit_id: int | None,
+) -> dict[str, Any]:
+    return {
+        "ticker": ticker, "memo_id": memo_id, "reason": reason, "hit_id": hit_id,
+    }
+
+
+def research_monitor_run_payload(
+    *, asof: str, memos_checked: int, falsifiers_evaluated: int, tripped: int,
+    unevaluable: int, escalations: int, resolution_due: int, catalyst_due: int,
+    errors: list[str],
+) -> dict[str, Any]:
+    return {
+        "asof": asof, "memos_checked": memos_checked,
+        "falsifiers_evaluated": falsifiers_evaluated, "tripped": tripped,
+        "unevaluable": unevaluable, "escalations": escalations,
+        "resolution_due": resolution_due, "catalyst_due": catalyst_due,
+        "errors": errors,
+    }
+
+
+def research_monitor_error_payload(*, error: str) -> dict[str, Any]:
+    return {"error": error}
+
+
+def baseline_quote_failure_payload(
+    *, symbol: str, asof: str, error: str,
+) -> dict[str, Any]:
+    return {"symbol": symbol, "asof": asof, "error": error}
+
+
+def baseline_auto_writeoff_payload(
+    *, symbol: str, quantity: str, price: str, failing_runs: int, note: str,
+) -> dict[str, Any]:
+    return {
+        "symbol": symbol, "quantity": quantity, "price": price,
+        "failing_runs": failing_runs, "note": note,
+    }
+
+
 def universe_blind_payload(
     *, asof_date, fetch_ok: int, fetch_failed: int, detail: str,
 ) -> dict[str, Any]:
@@ -536,4 +624,12 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_UNIVERSE_DIAGNOSTICS: universe_diagnostics_payload,
     KIND_UNIVERSE_BLIND: universe_blind_payload,
     KIND_BASELINE_WRITEOFF: baseline_writeoff_payload,
+    KIND_FALSIFIER_TRIPPED: falsifier_tripped_payload,
+    KIND_RESOLUTION_DUE: resolution_due_payload,
+    KIND_CATALYST_DUE: catalyst_due_payload,
+    KIND_RESEARCH_ESCALATION: research_escalation_payload,
+    KIND_RESEARCH_MONITOR_RUN: research_monitor_run_payload,
+    KIND_RESEARCH_MONITOR_ERROR: research_monitor_error_payload,
+    KIND_BASELINE_QUOTE_FAILURE: baseline_quote_failure_payload,
+    KIND_BASELINE_AUTO_WRITEOFF: baseline_auto_writeoff_payload,
 }
