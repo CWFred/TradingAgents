@@ -295,6 +295,7 @@ def research_hit(
     fetch_text=None,
     price_fetcher=None,
     today: date | None = None,
+    thesis_model_spec: str | None = None,
 ) -> ResearchOutcome:
     """Run the full two-stage pipeline for one pending screen hit."""
     from tradingagents.agents.utils.filing_reader_tools import summarize_memo
@@ -377,6 +378,7 @@ def research_hit(
         memo = Memo(
             ticker=symbol, as_of_date=today, entry_price_ref=float(price),
             evidence=kept, status="open",
+            authored_by_model=thesis_model_spec or "",
             **draft.model_dump(exclude={"recommendation"}),
         )
         errors = validate_memo(

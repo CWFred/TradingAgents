@@ -247,6 +247,14 @@ class Memo(BaseModel):
             "written. Empty means 'none found', which must be an explicit finding."
         ),
     )
+    authored_by_model: str = Field(
+        default="",
+        description=(
+            "Model spec (provider:model[@base_url]) of the thesis stage that "
+            "authored this memo; empty for memos predating attribution. "
+            "Report-time attribution only — never a sizing or monitoring input."
+        ),
+    )
 
     status: MemoStatus = "open"
     resolution: Resolution | None = None

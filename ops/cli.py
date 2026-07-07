@@ -379,6 +379,7 @@ def research_run(max_names: int, do_notify: bool = False) -> None:
                     outcome = research_hit(
                         hit, evidence_llm=evidence_llm, thesis_llm=thesis_llm,
                         memo_store=memo_store,
+                        thesis_model_spec=config.research_thesis_model,
                     )
                 except ResearchError:
                     raise  # configuration problem: abort the whole batch

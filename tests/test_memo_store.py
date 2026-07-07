@@ -207,6 +207,25 @@ class TestStore:
         assert [m.memo_id for m in store.due_for_resolution()] == [due.memo_id]
 
 
+def test_memo_without_authored_by_model_deserializes(tmp_path):
+    # Simulate a pre-Phase-D stored payload: dump a memo, strip the new field,
+    # write the row back raw, read it through the store.
+    import json
+    import sqlite3
+
+    store = MemoStore(tmp_path / "memos.sqlite")
+    memo = _value_memo()
+    store.save(memo)
+    payload = json.loads(memo.model_dump_json())
+    payload.pop("authored_by_model", None)
+    with sqlite3.connect(tmp_path / "memos.sqlite") as conn:
+        conn.execute("UPDATE memos SET payload = ? WHERE memo_id = ?",
+                     (json.dumps(payload), memo.memo_id))
+    loaded = store.get(memo.memo_id)
+    assert loaded is not None
+    assert loaded.authored_by_model == ""
+
+
 def test_default_memo_store_path_env_override(monkeypatch):
     from tradingagents.memos.store import default_memo_store_path
 
