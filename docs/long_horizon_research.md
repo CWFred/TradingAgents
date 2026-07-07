@@ -140,10 +140,9 @@ alongside post-earnings momentum).
 3. ✅ Small/mid-cap universe + point-in-time screener + null-baseline
    portfolio (`ops/universe/smallcap.py`, `ops/research/`, `ops screen` —
    see docs/research_screener.md)
-4. Filing-reader agent tools (`read_filing_section`, `diff_filing_sections`,
+4. ✅ Filing-reader agent tools (`read_filing_section`, `diff_filing_sections`,
    `get_insider_transactions`, `get_past_memos`)
-5. Thesis-type-aware graph config: memo-emitting trader/PM node (via the
-   existing `structured.py` path), debate prompts per sleeve
+5. ✅ Thesis-type-aware memo pipeline (ops/research/brain.py; two-stage, deterministic orchestration) — debate prompts per sleeve
 6. Monitoring loop: mechanical falsifier checks + `due_for_resolution`
    scheduling, escalation to full re-analysis on trip or −30% drawdown
 7. Sizing layer on the existing guardrails engine (tier caps, sector ≤25%,
