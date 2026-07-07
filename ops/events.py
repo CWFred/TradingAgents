@@ -91,6 +91,13 @@ KIND_EXIT_UNKNOWN_PROVENANCE = "exit_unknown_provenance"
 # Scheduler / daily-cycle gate
 KIND_DAILY_CYCLE_RUN = "daily_cycle_run"
 
+# Universe data-feed health (A3): "found nothing" must be distinguishable
+# from "could not see".
+KIND_UNIVERSE_DIAGNOSTICS = "universe_diagnostics"
+KIND_UNIVERSE_BLIND = "universe_blind"
+
+KIND_BASELINE_WRITEOFF = "baseline_writeoff"
+
 # Kinds deliberately NOT notified. Everything here is an audit trail the
 # operator reads via `ops status` or sqlite, not a push/email — either
 # because it fires during normal operation (service lifecycle, replay
@@ -123,6 +130,10 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_EXIT_UNKNOWN_PROVENANCE,
     # Operational bookkeeping, gates the once-daily universe/exit cycle.
     KIND_DAILY_CYCLE_RUN,
+    # Universe diagnostics: fire-and-forget breadcrumb for the audit trail.
+    KIND_UNIVERSE_DIAGNOSTICS,
+    # Baseline write-off: manual resolution of a delisted position.
+    KIND_BASELINE_WRITEOFF,
 })
 
 
@@ -454,6 +465,32 @@ def daily_cycle_run_payload(*, asof_date: date) -> dict[str, Any]:
     return {"asof_date": asof_date.isoformat()}
 
 
+def universe_diagnostics_payload(
+    *, asof_date, candidates: int, fetch_ok: int, fetch_failed: int,
+    by_label: dict[str, dict[str, int]],
+) -> dict[str, Any]:
+    return {
+        "asof_date": str(asof_date), "candidates": candidates,
+        "fetch_ok": fetch_ok, "fetch_failed": fetch_failed,
+        "by_label": by_label,
+    }
+
+
+def baseline_writeoff_payload(
+    *, symbol: str, quantity: Decimal, price: Decimal, note: str | None,
+) -> dict[str, Any]:
+    return {"symbol": symbol, "quantity": str(quantity), "price": str(price), "note": note}
+
+
+def universe_blind_payload(
+    *, asof_date, fetch_ok: int, fetch_failed: int, detail: str,
+) -> dict[str, Any]:
+    return {
+        "asof_date": str(asof_date), "fetch_ok": fetch_ok,
+        "fetch_failed": fetch_failed, "detail": detail,
+    }
+
+
 # Kind -> builder registry: the enforcement test walks this to prove every
 # POLICY kind has a builder and every builder's kind has been classified
 # (POLICY or AUDIT_ONLY). Register every new builder here.
@@ -496,4 +533,7 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_EXIT_CHECK_ERROR: exit_check_error_payload,
     KIND_EXIT_UNKNOWN_PROVENANCE: exit_unknown_provenance_payload,
     KIND_DAILY_CYCLE_RUN: daily_cycle_run_payload,
+    KIND_UNIVERSE_DIAGNOSTICS: universe_diagnostics_payload,
+    KIND_UNIVERSE_BLIND: universe_blind_payload,
+    KIND_BASELINE_WRITEOFF: baseline_writeoff_payload,
 }

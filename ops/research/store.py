@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS screen_runs (
     asof TEXT NOT NULL,
     created_at TEXT NOT NULL,
     universe_size INTEGER NOT NULL,
-    passed_count INTEGER NOT NULL
+    passed_count INTEGER NOT NULL,
+    coverage TEXT
 );
 CREATE TABLE IF NOT EXISTS screen_hits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,6 +56,9 @@ class ScreenStore:
         self._lock = threading.Lock()
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(screen_runs)")}
+            if "coverage" not in cols:
+                conn.execute("ALTER TABLE screen_runs ADD COLUMN coverage TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
@@ -63,15 +67,17 @@ class ScreenStore:
 
     def record_run(
         self, *, asof: date, universe_size: int, results: list[ScreenResult],
+        coverage: dict | None = None,
     ) -> str:
         run_id = f"screen-{asof.isoformat()}-{uuid4().hex[:8]}"
         passed = [r for r in results if r.passed]
         now = _now_iso()
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO screen_runs (run_id, asof, created_at, universe_size, passed_count)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (run_id, asof.isoformat(), now, universe_size, len(passed)),
+                "INSERT INTO screen_runs (run_id, asof, created_at, universe_size, passed_count, coverage)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, asof.isoformat(), now, universe_size, len(passed),
+                 json.dumps(coverage) if coverage is not None else None),
             )
             for result in passed:
                 already_pending = conn.execute(
@@ -122,7 +128,14 @@ class ScreenStore:
     def last_run(self) -> dict | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT run_id, asof, created_at, universe_size, passed_count"
+                "SELECT run_id, asof, created_at, universe_size, passed_count, coverage"
                 " FROM screen_runs ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        if d.get("coverage"):
+            d["coverage"] = json.loads(d["coverage"])
+        else:
+            d["coverage"] = None
+        return d

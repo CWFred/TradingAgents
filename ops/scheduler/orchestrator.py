@@ -21,6 +21,7 @@ from ops.universe.momentum import (
     find_momentum_leaders,
 )
 from ops.universe.sp500 import load_sp500_members
+from ops.universe import yf_pacing
 
 
 class Orchestrator:
@@ -78,6 +79,10 @@ class Orchestrator:
             events.daily_cycle_run_payload(asof_date=asof_date),
         )
 
+        # Discard fetch counters accumulated outside this cycle so the
+        # diagnostics below describe exactly one day's sweep.
+        yf_pacing.snapshot_and_reset()
+
         # Leaderboard is computed ONCE per tick: the exit engine reads held
         # names' ranks off it and the builder takes its head for entries.
         # A failure here (or anywhere in the exit step) must not kill the
@@ -103,6 +108,7 @@ class Orchestrator:
             excluded_symbols=self._cooldown_symbols(asof_date),
             momentum_leaders=leaderboard,
         )
+        self._emit_universe_diagnostics(asof_date, len(candidates))
         fresh_candidates = [c for c in candidates if c.symbol not in held]
         current_equity = self._broker.get_equity()
         live_cap = self._compute_live_cap()
@@ -198,6 +204,31 @@ class Orchestrator:
                     symbol=decision.symbol,
                     client_order_id=fill.client_order_id,
                     rule=decision.rule,
+                ),
+            )
+
+    def _emit_universe_diagnostics(self, asof_date, candidate_count: int) -> None:
+        stats = yf_pacing.snapshot_and_reset()
+        fetch_ok = sum(s["ok"] for s in stats.values())
+        fetch_failed = sum(s["failed"] for s in stats.values())
+        self._journal.record_event(
+            events.KIND_UNIVERSE_DIAGNOSTICS,
+            events.universe_diagnostics_payload(
+                asof_date=asof_date, candidates=candidate_count,
+                fetch_ok=fetch_ok, fetch_failed=fetch_failed, by_label=stats,
+            ),
+        )
+        total = fetch_ok + fetch_failed
+        # Majority fetch failures = a blind day even if a few candidates
+        # survived — a 96%-failed sweep with 2 survivors must still alarm.
+        if total > 0 and fetch_failed * 2 > total:
+            self._journal.record_event(
+                events.KIND_UNIVERSE_BLIND,
+                events.universe_blind_payload(
+                    asof_date=asof_date, fetch_ok=fetch_ok,
+                    fetch_failed=fetch_failed,
+                    detail=(f"majority fetch failures "
+                            f"({candidate_count} candidate(s) survived)"),
                 ),
             )
 

@@ -20,6 +20,8 @@ from typing import Callable
 
 import yfinance as yf
 
+from ops.universe.yf_pacing import call_paced
+
 
 @dataclass(frozen=True)
 class EarningsHit:
@@ -91,8 +93,10 @@ def _fetch_from_yfinance(symbol: str) -> EarningsHit | None:
     silently reported as external fetch failures."""
     import sys
     try:
-        t = yf.Ticker(symbol)
-        df = getattr(t, "earnings_dates", None)
+        df = call_paced(
+            lambda: getattr(yf.Ticker(symbol), "earnings_dates", None),
+            label="earnings",
+        )
     except Exception as exc:
         print(
             f"[earnings] skipped {symbol}: {type(exc).__name__}: {exc}",

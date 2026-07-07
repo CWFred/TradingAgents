@@ -101,6 +101,42 @@ def _run(config, *, dry_run=False, facts=None, triggers=None):
     )
 
 
+def test_current_pe_price_is_in_the_latest_eps_era():
+    """A split between the latest fiscal year end and asof must not deflate
+    the current-P/E leg: the asof price is expressed in the era of the
+    as-reported EPS (10:1 split on 2026-03-15 -> $20 close counts as $200)."""
+    ctx = PriceContext(closes=_price_ctx().closes,
+                       splits={date(2026, 3, 15): D("10")})
+    ni = run_mod._name_inputs(
+        _name("SPLT"), asof=ASOF,
+        facts_fetcher=lambda t: _facts_for_passer(),
+        triggers_finder=lambda t, *, asof, **kw: [],
+        price_context_fetcher=lambda s: ctx,
+    )
+    assert ni.price == D("200")
+
+
+def test_market_cap_rescale_is_split_immune():
+    """A split between the universe snapshot and asof must not change market
+    cap: snapshot $200/share, 4:1 split, adjusted close $50 (unchanged in
+    real terms) -> cap stays at the snapshot value."""
+    member = SmallcapMember(
+        symbol="SPLT", name="Splt Co", sector="Industrials", industry="Machinery",
+        market_cap=D("1000000000"), last_price=D("200"),
+    )
+    name = UniverseName(member=member, last_price=D("200"),
+                        adv_20d=D("5000000"), snapshot_at=date(2026, 4, 1))
+    closes = {d: D("50") for d in _price_ctx().closes}
+    ctx = PriceContext(closes=closes, splits={date(2026, 5, 1): D("4")})
+    ni = run_mod._name_inputs(
+        name, asof=ASOF,
+        facts_fetcher=lambda t: _facts_for_passer(),
+        triggers_finder=lambda t, *, asof, **kw: [],
+        price_context_fetcher=lambda s: ctx,
+    )
+    assert ni.market_cap == D("1000000000")
+
+
 def test_full_run_screens_stores_and_buys_baseline(config):
     summary = _run(config)
     assert summary.universe_size == 6
@@ -185,3 +221,30 @@ def test_silent_none_names_are_promoted_to_errors(config):
     symbols = [n.member.symbol for n in universe]
     for symbol in symbols:
         assert any(e.startswith(f"{symbol}: skipped") for e in summary.errors)
+
+
+def test_summary_carries_per_bar_coverage(config):
+    summary = _run(config)
+    assert summary.coverage  # six bar names
+    assert summary.coverage["fcf_yield"]["computed"] >= 1
+    assert set(summary.coverage) == {
+        "ev_ebit_vs_sector", "fcf_yield", "pe_vs_own_history",
+        "roic_5y", "debt_to_ebitda", "gross_margin_stability",
+    }
+
+
+def test_year_end_prices_are_split_unadjusted(config):
+    from ops.research.run import _name_inputs
+
+    ctx = _price_ctx()
+    # Rebuild with a 10:1 forward split newer than every fiscal year end.
+    ctx = PriceContext(closes=ctx.closes, splits={ASOF: Decimal("10")})
+    ni = _name_inputs(
+        _name("GOOD"), asof=ASOF,
+        facts_fetcher=lambda t: _facts_for_passer(),
+        triggers_finder=lambda t, *, asof, lookback_days=90, list_filings=None: [],
+        price_context_fetcher=lambda s: ctx,
+    )
+    assert ni is not None
+    # Every year-end price is 10x the adjusted 20 -> 200.
+    assert all(px == Decimal("200") for px in ni.year_end_prices.values())

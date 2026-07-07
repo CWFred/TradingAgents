@@ -91,6 +91,32 @@ def test_adv_below_floor_is_dropped(tmp_path):
     assert names == []
 
 
+def test_empty_universe_is_not_cached(tmp_path):
+    """An all-fail ADV pass (Yahoo rate-limiting) yields an empty universe;
+    caching it would poison every screen for a quarter."""
+    cache = tmp_path / "universe.json"
+    result = smallcap.build_smallcap_universe(
+        cache_path=cache,
+        members_loader=lambda: smallcap.load_smallcap_members(fetch=_rows),
+        metrics_fetcher=lambda s: None,  # every ADV fetch fails
+    )
+    assert result == []
+    assert not cache.exists()
+
+
+def test_cached_empty_universe_is_ignored_and_rebuilt(tmp_path):
+    """A poisoned (empty) cache from an older build must not be trusted."""
+    cache = tmp_path / "universe.json"
+    fresh = datetime.now(timezone.utc).isoformat()
+    cache.write_text(json.dumps({"built_at": fresh, "names": []}))
+    result = smallcap.build_smallcap_universe(
+        cache_path=cache,
+        members_loader=lambda: smallcap.load_smallcap_members(fetch=_rows),
+        metrics_fetcher=lambda s: (Decimal("25.50"), Decimal("3000000")),
+    )
+    assert [n.member.symbol for n in result] == ["GOOD"]
+
+
 def test_fetch_rejects_suspiciously_small_row_count(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):

@@ -23,7 +23,7 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -59,6 +59,10 @@ class UniverseName:
     member: SmallcapMember
     last_price: Decimal   # from the ADV pass (yfinance) — fresher than the snapshot
     adv_20d: Decimal
+    # When the snapshot prices were captured — the era anchor for rescaling
+    # market cap across splits. None (tests, hand-built) = assume no splits
+    # since snapshot.
+    snapshot_at: date | None = None
 
 
 def _default_cache_path() -> Path:
@@ -144,6 +148,7 @@ def _to_json(names: list[UniverseName]) -> str:
 
 
 def _from_json(data: dict) -> list[UniverseName]:
+    snapshot_at = datetime.fromisoformat(data["built_at"]).date()
     return [
         UniverseName(
             member=SmallcapMember(
@@ -153,6 +158,7 @@ def _from_json(data: dict) -> list[UniverseName]:
             ),
             last_price=Decimal(d["last_price"]),
             adv_20d=Decimal(d["adv_20d"]),
+            snapshot_at=snapshot_at,
         )
         for d in data["names"]
     ]
@@ -176,7 +182,11 @@ def build_smallcap_universe(
     if cache_path.exists():
         data = json.loads(cache_path.read_text())
         built_at = datetime.fromisoformat(data["built_at"])
-        if datetime.now(timezone.utc) - built_at < timedelta(days=max_age_days):
+        # An empty cached universe is a poisoned artifact of a failed build
+        # (e.g. a rate-limited ADV pass), never a real universe — rebuild.
+        if data["names"] and (
+            datetime.now(timezone.utc) - built_at < timedelta(days=max_age_days)
+        ):
             return _from_json(data)
     members = members_loader()
     by_symbol = {m.symbol: m for m in members}
@@ -189,10 +199,18 @@ def build_smallcap_universe(
         sorted(by_symbol), min_adv=MIN_ADV, min_price=MIN_PRICE,
         fetch_metrics=metrics_fetcher,
     )
+    built_on = datetime.now(timezone.utc).date()
     names = [
-        UniverseName(member=by_symbol[sym], last_price=price, adv_20d=adv)
+        UniverseName(member=by_symbol[sym], last_price=price, adv_20d=adv,
+                     snapshot_at=built_on)
         for sym, price, adv in liquid
     ]
+    if not names:
+        # Every name failing the ADV pass means the feed was down, not that
+        # the universe is empty — caching it would blind screens for a quarter.
+        print("[smallcap] empty universe (feed down?) — not caching",
+              file=sys.stderr)
+        return names
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(_to_json(names))
     return names

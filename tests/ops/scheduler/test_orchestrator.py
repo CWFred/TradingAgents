@@ -2,6 +2,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock
 
+from ops.universe import yf_pacing
+
 import pytest
 from ops.scheduler.orchestrator import Orchestrator
 from ops.broker.types import Order, OrderType, Side
@@ -666,3 +668,71 @@ def test_exit_close_position_no_such_position_journals_skip_not_check_error():
     ]
     assert len(skips) == 1
     assert "guardian race" in skips[0]["payload"]["reason"]
+
+
+# --- Task 3: Universe diagnostics + blindness alarm ---
+
+def _seed_pacing_failures(n: int) -> None:
+    from ops.universe import yf_pacing
+
+    for _ in range(n):
+        yf_pacing._count("earnings", ok=False)
+
+
+def test_daily_cycle_emits_universe_diagnostics(monkeypatch):
+    from ops import events
+
+    journal = _make_journal()
+    clock = {"now": _MON}
+    _pin_journal_clock(monkeypatch, clock)
+
+    def blind_universe_builder(**kwargs):
+        _seed_pacing_failures(10)
+        return []
+
+    orch = _make_orchestrator(
+        universe_builder=MagicMock(side_effect=blind_universe_builder),
+        journal=journal, now_fn=lambda: clock["now"],
+    )
+    orch.tick()
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert events.KIND_UNIVERSE_DIAGNOSTICS in kinds
+    assert events.KIND_UNIVERSE_BLIND in kinds  # 0 candidates, 100% failures
+
+
+def test_blind_alarm_fires_on_majority_failures_even_with_candidates():
+    """A 96%-failed sweep that still scrapes together 2 candidates is a blind
+    day: the alarm must not be gated on candidate_count == 0."""
+    from ops import events
+
+    journal = _make_journal()
+    orch = _make_orchestrator(journal=journal)
+    yf_pacing.snapshot_and_reset()  # clear leakage from other tests
+    _seed_pacing_failures(48)
+    yf_pacing._count("earnings", ok=True)
+    yf_pacing._count("earnings", ok=True)
+    orch._emit_universe_diagnostics(date(2026, 7, 6), candidate_count=2)
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert events.KIND_UNIVERSE_BLIND in kinds
+
+
+def test_no_blind_alarm_when_feed_healthy(monkeypatch):
+    from ops import events
+
+    journal = _make_journal()
+    clock = {"now": _MON}
+    _pin_journal_clock(monkeypatch, clock)
+
+    def healthy_universe_builder(**kwargs):
+        _seed_pacing_failures(0)  # no failures
+        yf_pacing._count("earnings", ok=True)  # healthy fetches
+        return []
+
+    orch = _make_orchestrator(
+        universe_builder=MagicMock(side_effect=healthy_universe_builder),
+        journal=journal, now_fn=lambda: clock["now"],
+    )
+    orch.tick()
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert events.KIND_UNIVERSE_DIAGNOSTICS in kinds
+    assert events.KIND_UNIVERSE_BLIND not in kinds

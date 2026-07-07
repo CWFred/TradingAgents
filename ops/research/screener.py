@@ -35,7 +35,7 @@ _ZERO = Decimal("0")
 class NameInputs:
     symbol: str
     sector: str
-    price: Decimal        # close on/before asof
+    price: Decimal        # asof close, in the latest reported fiscal year's share basis
     market_cap: Decimal   # snapshot cap rescaled to `price` by the caller
     fundamentals: Fundamentals
     triggers: tuple[Trigger, ...]

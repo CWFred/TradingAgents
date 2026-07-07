@@ -8,6 +8,7 @@ from typing import Callable
 import yfinance as yf
 
 from ops.universe.earnings import _safe_decimal
+from ops.universe.yf_pacing import call_paced
 
 
 def apply_deny_list(symbols: list[str], deny_list: frozenset[str]) -> list[str]:
@@ -46,8 +47,10 @@ def fetch_price_and_adv_from_yfinance(symbol: str) -> tuple[Decimal, Decimal] | 
     diagnostic-and-skip, not a whole-batch crash.
     """
     try:
-        t = yf.Ticker(symbol)
-        hist = t.history(period="20d", auto_adjust=False)
+        hist = call_paced(
+            lambda: yf.Ticker(symbol).history(period="20d", auto_adjust=False),
+            label="adv",
+        )
     except Exception as exc:
         print(
             f"[filters] skipped {symbol}: {type(exc).__name__}: {exc}",

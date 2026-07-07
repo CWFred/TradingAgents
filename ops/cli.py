@@ -22,7 +22,8 @@ from ops.pipeline_adapter import (
 from ops.position_guardian import PositionGuardian
 from ops.quotes import make_yfinance_quote_source
 from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
-from ops.universe import Candidate, CandidateSource, build_universe
+from ops.universe import Candidate, CandidateSource
+from ops.universe.composite import build_composite_universe
 from ops.universe.earnings import EarningsHit
 
 
@@ -37,6 +38,23 @@ def run():
     import sys
     from ops.main import run as _run
     sys.exit(_run())
+
+
+def _install_plist(rendered: str, output_path: str, log_dir: str) -> None:
+    """Write a rendered plist and print the (never-run) launchctl commands."""
+    import os
+    from pathlib import Path
+
+    output = Path(os.path.abspath(os.path.expanduser(output_path)))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
+    output.write_text(rendered)
+    click.echo(f"Wrote {output}")
+    click.echo(f"Logs will go to {log_dir}/")
+    click.echo("To load it (not done automatically), run:")
+    click.echo(f"  launchctl bootstrap gui/$(id -u) {output}")
+    click.echo("To unload it later:")
+    click.echo(f"  launchctl bootout gui/$(id -u) {output}")
 
 
 @cli.command("install-service")
@@ -66,21 +84,50 @@ def install_service(output_path: str, log_dir: str) -> None:
         venv_python=sys.executable,
         log_dir=log_dir,
     )
-    output = Path(os.path.abspath(os.path.expanduser(output_path)))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
-    output.write_text(rendered)
-    click.echo(f"Wrote {output}")
-    click.echo(f"Logs will go to {log_dir}/")
-    click.echo("To load the service (not done automatically), run:")
-    click.echo(f"  launchctl bootstrap gui/$(id -u) {output}")
-    click.echo("To unload it later:")
-    click.echo(f"  launchctl bootout gui/$(id -u) {output}")
+    _install_plist(rendered, output_path, log_dir)
     click.echo(
         "NOTE: launchd cannot start jobs on a sleeping laptop. Consider a "
         "wake schedule (your call to apply):\n"
         "  sudo pmset repeat wakeorpoweron MTWRF 09:20:00"
     )
+
+
+@cli.command("install-screen-service")
+@click.option("--output", "output_path",
+              default="~/Library/LaunchAgents/com.tradingagents.screen.plist",
+              show_default=True, type=click.Path(dir_okay=False),
+              help="Where to write the rendered screen launchd plist")
+@click.option("--log-dir", "log_dir",
+              default="~/.local/state/tradingagents/logs", show_default=True,
+              help="Directory for the screen job's stdout/stderr logs")
+def install_screen_service(output_path: str, log_dir: str) -> None:
+    """Render the weekly screen launchd plist and print the load command.
+
+    Writes the file only — never invokes launchctl."""
+    import os
+    import sys
+    from pathlib import Path
+
+    from ops.deploy import render_screen_plist
+
+    sec_edgar = os.environ.get("SEC_EDGAR_USER_AGENT", "").strip()
+    if not sec_edgar:
+        # An empty value baked into the plist makes every Saturday run die
+        # with EdgarNotConfiguredError before it can even notify.
+        raise click.ClickException(
+            "SEC_EDGAR_USER_AGENT is not set — the weekly screen would fail "
+            "on every run. Export it first (SEC fair-access format: "
+            "'Name email@example.com'), then re-run."
+        )
+    repo_root = str(Path(__file__).resolve().parents[1])
+    log_dir = os.path.abspath(os.path.expanduser(log_dir))
+    rendered = render_screen_plist(
+        python_path=sys.executable,
+        repo_dir=repo_root,
+        log_dir=log_dir,
+        sec_edgar_user_agent=sec_edgar,
+    )
+    _install_plist(rendered, output_path, log_dir)
 
 
 @cli.command("notify-once")
@@ -131,7 +178,9 @@ def status(journal_path: str | None) -> None:
               help="Screen and print only — no store writes, no baseline trades.")
 @click.option("--limit", default=None, type=int,
               help="Screen only the first N universe names (smoke runs).")
-def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None) -> None:
+@click.option("--notify", "do_notify", is_flag=True,
+              help="Send a Pushover summary (or a high-urgency alert on a blind sweep).")
+def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None, do_notify: bool = False) -> None:
     """Run the small/mid-cap fundamental screen + null-baseline portfolio."""
     from ops.research.run import run_screen
 
@@ -143,7 +192,23 @@ def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None) -> None:
             "uses TODAY's universe membership and TODAY's baseline fill prices "
             "— debug knob, not a backtest."
         )
-    summary = run_screen(config=config, asof=asof_date, dry_run=dry_run, limit=limit)
+    try:
+        summary = run_screen(config=config, asof=asof_date, dry_run=dry_run,
+                             limit=limit)
+    except Exception as exc:
+        # The unattended Saturday job's only signal is this push — a
+        # whole-run crash (Nasdaq 403, Edgar misconfig) must not be silent.
+        if do_notify:
+            from ops.notify.config import load_notify_config
+            from ops.notify.push import build_push_transport
+            from ops.notify.transport import NotifyMessage
+
+            build_push_transport(load_notify_config()).send(NotifyMessage(
+                title="screen FAILED",
+                body=f"{type(exc).__name__}: {exc}",
+                urgency="high",
+            ))
+        raise
     click.echo(f"screen run {summary.run_id or '(dry-run)'} asof {summary.asof}")
     click.echo(
         f"universe {summary.universe_size}, screened {summary.screened}, "
@@ -157,6 +222,69 @@ def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None) -> None:
             f"{len(summary.baseline['exits'])} exits, "
             f"{len(summary.baseline['skipped'])} skipped"
         )
+
+    for bar_name, counts in sorted(summary.coverage.items()):
+        total = counts["computed"] + counts["missing"]
+        pct = (100 * counts["computed"] // total) if total else 0
+        click.echo(f"  coverage {bar_name}: {counts['computed']}/{total} ({pct}%)")
+
+    # Blind = an empty universe (the 2026-07-06 incident mode: every fetch
+    # failed or the cache is poisoned) OR a majority of names erroring.
+    blind = (summary.universe_size == 0
+             or len(summary.errors) * 2 > summary.universe_size)
+    if do_notify:
+        from ops.notify.config import load_notify_config
+        from ops.notify.push import build_push_transport
+        from ops.notify.transport import NotifyMessage
+
+        transport = build_push_transport(load_notify_config())
+        if blind:
+            if summary.universe_size == 0:
+                body = "universe came back EMPTY (fetch failures?); results unusable"
+            else:
+                body = (f"{len(summary.errors)}/{summary.universe_size} names "
+                        "errored; results unusable")
+            transport.send(NotifyMessage(
+                title="screen BLIND", body=body, urgency="high",
+            ))
+        else:
+            transport.send(NotifyMessage(
+                title="screen complete",
+                body=(f"asof {summary.asof}: {len(summary.passed)} passed / "
+                      f"{summary.screened} screened / {len(summary.errors)} errors"),
+                urgency="normal",
+            ))
+    if blind:
+        raise SystemExit(2)
+
+
+@cli.group()
+def research() -> None:
+    """Long-horizon research sleeve commands."""
+
+
+@research.command("write-off")
+@click.argument("symbol")
+@click.option("--price", required=True,
+              help="Settlement price per share (deal price or last trade).")
+@click.option("--note", default=None, help="Why (e.g. 'acquired 2026-08-01 at $12.50').")
+def research_write_off(symbol: str, price: str, note: str | None) -> None:
+    """Resolve a delisted baseline position at a known price."""
+    from ops.research.baseline import write_off_position
+
+    config = load_config()
+    journal = Journal(config.baseline_journal_path)
+    try:
+        result = write_off_position(
+            journal=journal, symbol=symbol, price=Decimal(price),
+            starting_cash=config.baseline_starting_cash, note=note,
+        )
+    finally:
+        journal.close()
+    click.echo(
+        f"wrote off {result['quantity']} {result['symbol']} at {result['price']} "
+        f"(proceeds {result['proceeds']})"
+    )
 
 
 @cli.command("decide-once")
@@ -198,19 +326,37 @@ def decide_once(
                f"stop {cfg.per_position_stop_pct}")
     click.echo("")
 
-    # Universe
-    candidates = build_universe(asof_date=asof_date, config=cfg)
+    # Quote source — uses yfinance with 60s TTL
+    quote_source = make_yfinance_quote_source()
+
+    # Broker (needed before composite universe for held positions)
+    guarded = build_guarded_paper_broker(
+        config=cfg, journal=journal,
+        quote_source=quote_source,
+        starting_cash=cash,
+        start_of_day_equity=lambda: cash,    # naive — Plan 3 reads from journal
+        start_of_week_equity=lambda: cash,
+    )
+
+    # Universe — composite (both earnings and momentum sleeves)
+    held = {p.symbol for p in guarded.get_positions()}
+    candidates = build_composite_universe(
+        asof_date=asof_date, config=cfg,
+        held_symbols=frozenset(held),
+        free_slots=max(0, cfg.max_open_positions - len(held)),
+    )
     click.echo(f"## Universe ({len(candidates)})")
     if not candidates:
         click.echo("(no candidates — nothing to do today)")
     for c in candidates:
-        click.echo(f"  - {c.symbol}: price=${c.last_price} "
-                   f"earnings beat (EPS {c.earnings.eps_actual}/"
+        if c.earnings is not None:
+            why = (f"earnings beat (EPS {c.earnings.eps_actual}/"
                    f"{c.earnings.eps_estimate})")
+        else:
+            why = (f"momentum leader (rank {c.momentum.rank}, "
+                   f"6m {c.momentum.trailing_return_6m:+.0%})")
+        click.echo(f"  - {c.symbol}: price=${c.last_price} {why}")
     click.echo("")
-
-    # Quote source — uses yfinance with 60s TTL
-    quote_source = make_yfinance_quote_source()
 
     # Forced candidates (smoke testing): bypass the universe filters, never
     # the guardrails — a deny-listed forced symbol must be REJECTED below.
@@ -245,15 +391,6 @@ def decide_once(
         pipeline = StubPipelineAdapter(decisions)
     else:
         pipeline = TradingAgentsPipelineAdapter()
-
-    # Broker
-    guarded = build_guarded_paper_broker(
-        config=cfg, journal=journal,
-        quote_source=quote_source,
-        starting_cash=cash,
-        start_of_day_equity=lambda: cash,    # naive — Plan 3 reads from journal
-        start_of_week_equity=lambda: cash,
-    )
 
     # Strategy
     strategy = PostEarningsMomentumStrategy(config=cfg)

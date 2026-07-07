@@ -23,7 +23,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from ops import events
-from ops.broker.base import Broker, InsufficientFunds, QuoteUnavailable
+from ops.broker.base import Broker, InsufficientFunds, NoSuchPosition, QuoteUnavailable
 from ops.broker.types import Order, OrderType, Side
 from ops.journal import Journal
 
@@ -127,3 +127,53 @@ def update_baseline_portfolio(
         kind="baseline_run", equity=equity, cash=broker.get_cash(), at=now,
     )
     return {"buys": buys, "exits": exits, "skipped": skipped}
+
+
+def write_off_position(
+    *,
+    journal: Journal,
+    symbol: str,
+    price: Decimal,
+    starting_cash: Decimal,
+    note: str | None = None,
+) -> dict:
+    """Manually resolve a position the broker can no longer quote (delisted:
+    tender, acquisition, bankruptcy) by journaling a synthetic SELL at the
+    known settlement price. PaperBroker.close_position would quote and fail,
+    so the order+fill are written directly — replay reconstructs the cash.
+    """
+    from ops.broker.paper import PaperBroker
+
+    broker = PaperBroker.from_journal(
+        journal=journal,
+        quote_source=_no_quotes,
+        starting_cash=starting_cash,
+    )
+    position = next((p for p in broker.get_positions() if p.symbol == symbol.upper()), None)
+    if position is None:
+        raise NoSuchPosition(f"no baseline position in {symbol!r}")
+    proceeds = position.quantity * price
+    now = datetime.now(timezone.utc)
+    coid = f"baseline-writeoff-{now.date().isoformat()}-{symbol.upper()}-{uuid4().hex[:8]}"
+    journal.record_order(
+        client_order_id=coid, symbol=symbol.upper(), side=Side.SELL.value,
+        notional_dollars=proceeds, stop_loss_price=None,
+    )
+    journal.record_fill(
+        order_id=str(uuid4()), client_order_id=coid, symbol=symbol.upper(),
+        side=Side.SELL.value, quantity=position.quantity, price=price, filled_at=now,
+    )
+    journal.record_event(
+        events.KIND_BASELINE_WRITEOFF,
+        events.baseline_writeoff_payload(
+            symbol=symbol.upper(), quantity=position.quantity, price=price, note=note,
+        ),
+    )
+    return {
+        "symbol": symbol.upper(), "quantity": str(position.quantity),
+        "price": str(price), "proceeds": str(proceeds),
+    }
+
+
+def _no_quotes(symbol: str) -> Decimal:
+    raise AssertionError("write-off must never quote")

@@ -52,6 +52,9 @@ POLICY: dict[str, PolicyEntry] = {
     # monitoring outage is not a trading emergency — email, throttled.
     events.KIND_HEARTBEAT_ERROR: _EMAIL_THROTTLED,
     events.KIND_DAILY_SUMMARY: PolicyEntry(("push", "email"), "normal", None),
+    # The universe came back empty because the data feed was failing, not
+    # because the market was quiet (2026-07-06 incident) — worth a push.
+    events.KIND_UNIVERSE_BLIND: PolicyEntry(("push",), "high", None),
     # NOTE: audit-only kinds (events.AUDIT_ONLY — e.g.
     # journal_replay_orphan_sell, service_started) are intentionally
     # absent and must never be notified.

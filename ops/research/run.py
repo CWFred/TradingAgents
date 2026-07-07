@@ -38,6 +38,7 @@ class ScreenRunSummary:
     passed: tuple[str, ...]
     errors: tuple[str, ...]
     baseline: dict | None
+    coverage: dict[str, dict[str, int]]
 
 
 def _name_inputs(
@@ -57,10 +58,25 @@ def _name_inputs(
         return None
     # Rescale the snapshot market cap to the as-of price: shares from the
     # snapshot, price from now — keeps cheapness bars honest between the
-    # quarterly universe refresh and a weekly screen run.
-    market_cap = name.member.market_cap * price / name.member.last_price
+    # quarterly universe refresh and a weekly screen run. Both legs must be
+    # in the snapshot's share basis (era_end) or a split in between scales
+    # the cap by the split ratio.
+    asof_price_snapshot_era = ctx.unadjusted_close_on_or_before(
+        asof, era_end=name.snapshot_at,
+    )
+    market_cap = (
+        name.member.market_cap * asof_price_snapshot_era / name.member.last_price
+    )
     facts = facts_fetcher(symbol)
     fundamentals = compute_fundamentals(symbol, facts, asof=asof)
+    # The current-P/E leg divides by as-reported EPS (the latest fiscal
+    # year's share basis), so its price must be in that era too — a split
+    # after the fiscal year end otherwise understates current P/E by the
+    # split ratio while the historical median stays correct.
+    if fundamentals.eps_history:
+        price = ctx.unadjusted_close_on_or_before(
+            asof, era_end=fundamentals.eps_history[-1].fiscal_year_end,
+        )
     triggers = list(triggers_finder(symbol, asof=asof))
     selloff = find_selloff_trigger(
         symbol, ctx.recent_closes(asof=asof, days=SELLOFF_LOOKBACK_DAYS), asof=asof,
@@ -70,7 +86,7 @@ def _name_inputs(
     year_end_prices = {
         yv.fiscal_year_end: px
         for yv in fundamentals.eps_history
-        if (px := ctx.close_on_or_before(yv.fiscal_year_end)) is not None
+        if (px := ctx.unadjusted_close_on_or_before(yv.fiscal_year_end)) is not None
     }
     return NameInputs(
         symbol=symbol,
@@ -136,12 +152,19 @@ def run_screen(
     results = screen_universe(inputs, asof=asof)
     passed = tuple(r.symbol for r in results if r.passed)
 
+    coverage: dict[str, dict[str, int]] = {}
+    for result in results:
+        for bar in (*result.valuation_bars, *result.quality_bars):
+            slot = coverage.setdefault(bar.name, {"computed": 0, "missing": 0})
+            slot["missing" if bar.detail.startswith("missing:") else "computed"] += 1
+
     run_id = None
     baseline_summary = None
     if not dry_run:
         store = ScreenStore(config.screen_store_path)
         run_id = store.record_run(
             asof=asof, universe_size=len(universe), results=results,
+            coverage=coverage,
         )
         try:
             with Journal(config.baseline_journal_path) as baseline_journal:
@@ -168,4 +191,5 @@ def run_screen(
         passed=passed,
         errors=tuple(errors),
         baseline=baseline_summary,
+        coverage=coverage,
     )

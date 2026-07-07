@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tradingagents.screen</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{{VENV_PYTHON}}</string>
+		<string>-m</string>
+		<string>ops.cli</string>
+		<string>screen</string>
+		<string>--notify</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>{{REPO_ROOT}}</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>OPS_NOTIFY_ENABLED</key>
+		<string>1</string>
+		<key>SEC_EDGAR_USER_AGENT</key>
+		<string>{{SEC_EDGAR_USER_AGENT}}</string>
+	</dict>
+	<!-- Batch job: NOT a service — no KeepAlive. Runs Saturday 10:00 local. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Weekday</key>
+		<integer>6</integer>
+		<key>Hour</key>
+		<integer>10</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>{{LOG_DIR}}/screen.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>{{LOG_DIR}}/screen.err.log</string>
+</dict>
+</plist>

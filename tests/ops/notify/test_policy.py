@@ -162,6 +162,10 @@ SAMPLE_BUILDER_ARGS: dict[str, dict] = {
     ),
     events.KIND_EXIT_UNKNOWN_PROVENANCE: dict(symbol="AAPL"),
     events.KIND_DAILY_CYCLE_RUN: dict(asof_date=date(2026, 7, 3)),
+    events.KIND_UNIVERSE_BLIND: dict(
+        asof_date="2026-07-06", fetch_ok=0, fetch_failed=10,
+        detail="empty universe with majority fetch failures",
+    ),
 }
 
 

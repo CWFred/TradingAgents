@@ -51,3 +51,52 @@ def test_close_on_or_before_respects_max_gap():
     ctx = _ctx()
     oldest = min(ctx.closes)
     assert ctx.close_on_or_before(oldest - timedelta(days=30)) is None
+
+
+def test_unadjusted_close_reverses_forward_split():
+    # 10:1 forward split on 2026-06-01. Yahoo shows pre-split closes divided
+    # by 10; as-traded price was 10x the adjusted figure.
+    ctx = PriceContext(
+        closes={date(2026, 5, 15): Decimal("10"), date(2026, 6, 15): Decimal("95")},
+        splits={date(2026, 6, 1): Decimal("10")},
+    )
+    assert ctx.unadjusted_close_on_or_before(date(2026, 5, 15)) == Decimal("100")
+    # After the split there is nothing to undo.
+    assert ctx.unadjusted_close_on_or_before(date(2026, 6, 15)) == Decimal("95")
+
+
+def test_unadjusted_close_reverses_reverse_split():
+    # 1:10 reverse split (ratio 0.1): busted small cap trading at $1 becomes
+    # $10; Yahoo scales history UP; as-traded was the low price.
+    ctx = PriceContext(
+        closes={date(2026, 5, 15): Decimal("10")},
+        splits={date(2026, 6, 1): Decimal("0.1")},
+    )
+    assert ctx.unadjusted_close_on_or_before(date(2026, 5, 15)) == Decimal("1.0")
+
+
+def test_unadjusted_equals_adjusted_without_splits():
+    ctx = PriceContext(closes={date(2026, 5, 15): Decimal("42")})
+    assert ctx.unadjusted_close_on_or_before(date(2026, 5, 15)) == Decimal("42")
+
+
+def test_multiple_future_splits_compound():
+    ctx = PriceContext(
+        closes={date(2024, 12, 31): Decimal("5")},
+        splits={date(2025, 6, 1): Decimal("2"), date(2026, 6, 1): Decimal("3")},
+    )
+    assert ctx.unadjusted_close_on_or_before(date(2024, 12, 31)) == Decimal("30")
+
+
+def test_era_end_anchors_split_factor_to_that_era():
+    # 10:1 split on 2026-03-15, AFTER the fiscal year end 2025-12-31 but
+    # before asof: today's $50 close is worth $500 in FY-2025 share basis.
+    ctx = PriceContext(
+        closes={date(2026, 7, 3): Decimal("50")},
+        splits={date(2026, 3, 15): Decimal("10")},
+    )
+    assert ctx.unadjusted_close_on_or_before(
+        date(2026, 7, 3), era_end=date(2025, 12, 31)) == Decimal("500")
+    # An era ending after the split has nothing to undo.
+    assert ctx.unadjusted_close_on_or_before(
+        date(2026, 7, 3), era_end=date(2026, 4, 1)) == Decimal("50")

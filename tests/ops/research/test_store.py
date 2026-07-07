@@ -71,3 +71,10 @@ def test_last_run_summary(store):
     assert run["universe_size"] == 100
     assert run["passed_count"] == 1
     assert run["asof"] == "2026-07-01"
+
+
+def test_record_run_persists_coverage(store):
+    coverage = {"fcf_yield": {"computed": 5, "missing": 1}}
+    store.record_run(asof=ASOF, universe_size=6, results=[_result("AAA")], coverage=coverage)
+    run = store.last_run()
+    assert run["coverage"] == coverage

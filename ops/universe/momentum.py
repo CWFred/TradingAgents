@@ -16,6 +16,7 @@ from typing import Callable
 import yfinance as yf
 
 from ops.universe.earnings import _safe_decimal
+from ops.universe.yf_pacing import call_paced
 
 # ~6 months of trading days for the ranking signal — deliberately between
 # 3mo (noisier, higher turnover) and 12mo (sluggish). Named so it is easy
@@ -46,8 +47,10 @@ def fetch_closes_and_volumes_from_yfinance(
     poison both the return and the SMA. Only the yfinance I/O is wrapped
     in try/except (same policy as filters.py)."""
     try:
-        t = yf.Ticker(symbol)
-        hist = t.history(period=_HISTORY_PERIOD, auto_adjust=False)
+        hist = call_paced(
+            lambda: yf.Ticker(symbol).history(period=_HISTORY_PERIOD, auto_adjust=False),
+            label="momentum",
+        )
     except Exception as exc:
         print(
             f"[momentum] skipped {symbol}: {type(exc).__name__}: {exc}",
