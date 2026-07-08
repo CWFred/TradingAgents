@@ -478,6 +478,41 @@ def research_monitor() -> None:
         click.echo(f"  error: {err}")
 
 
+@research.command("trade")
+def research_trade() -> None:
+    """Run the daily research-sleeve trade step once (mechanical entries/exits)."""
+    from datetime import date
+
+    from ops.journal import Journal
+    from ops.quotes import make_yfinance_quote_source
+    from ops.research.trading import trade_research_sleeve
+    from tradingagents.memos.store import MemoStore
+
+    config = load_config()
+    with Journal(config.journal_path) as journal:
+        from ops import events as ops_events
+
+        if journal.has_event_today(ops_events.KIND_RESEARCH_TRADE_RUN):
+            click.echo("note: a trade run was already recorded today; running again")
+        with Journal(config.research_journal_path) as research_journal:
+            outcome = trade_research_sleeve(
+                memo_store=MemoStore(config.memo_store_path),
+                research_journal=research_journal,
+                main_journal=journal,
+                quote_source=make_yfinance_quote_source(),
+                starting_cash=config.research_starting_cash,
+                asof=date.today(),
+            )
+    click.echo(
+        f"trade {outcome.asof}: entered {outcome.entered}, exited {outcome.exited}, "
+        f"{len(outcome.skipped)} skipped"
+    )
+    for s in outcome.skipped:
+        click.echo(f"  skipped: {s}")
+    for err in outcome.errors:
+        click.echo(f"  error: {err}")
+
+
 @cli.command("decide-once")
 @click.option("--date", "as_of", required=True,
               type=click.DateTime(formats=["%Y-%m-%d"]),

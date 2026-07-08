@@ -506,3 +506,48 @@ def test_research_monitor_tick_records_error_instead_of_raising(tmp_path):
     _research_monitor_tick(journal, config)  # must not raise
     kinds = [c.args[0] for c in journal.record_event.call_args_list]
     assert events.KIND_RESEARCH_MONITOR_ERROR in kinds
+
+
+def test_research_trade_job_registered_and_gated(tmp_path):
+    from unittest.mock import MagicMock
+    from ops.main import _start_full_scheduler
+
+    journal = MagicMock()
+    journal.has_event_today.return_value = True
+    sched = _start_full_scheduler(
+        MagicMock(), MagicMock(), MagicMock(), journal, MagicMock(),
+        config=MagicMock(),
+    )
+    try:
+        job = sched.get_job("research_trade")
+        assert job is not None
+        job.func()  # gate returns early; must not raise
+    finally:
+        sched.shutdown(wait=False)
+
+
+def test_research_trade_job_absent_without_config():
+    from unittest.mock import MagicMock
+    from ops.main import _start_full_scheduler
+
+    sched = _start_full_scheduler(
+        MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+    )
+    try:
+        assert sched.get_job("research_trade") is None
+    finally:
+        sched.shutdown(wait=False)
+
+
+def test_research_trade_tick_records_error_instead_of_raising(tmp_path):
+    from unittest.mock import MagicMock
+    from ops import events
+    from ops.main import _research_trade_tick
+
+    journal = MagicMock()
+    journal.has_event_today.return_value = False
+    config = MagicMock()
+    config.research_journal_path = object()  # guaranteed failure downstream
+    _research_trade_tick(journal, config)  # must not raise
+    kinds = [c.args[0] for c in journal.record_event.call_args_list]
+    assert events.KIND_RESEARCH_TRADE_ERROR in kinds
