@@ -11,9 +11,13 @@ Two-stage design for small context windows (spec Phase B):
   code assembles the Memo and validate_memo gates storage. One retry with
   the validation errors fed back, then the hit is marked failed.
 
-Deliberately NOT an agentic tool loop: local models loop on tools (see
-docs/ds4-backend.md gotchas). The LLM only ever answers bounded prompts;
-Python decides what gets read.
+Deliberately a deterministic pipeline, NOT an agentic tool loop: the LLM only
+ever answers bounded structured-output prompts and Python decides what gets
+read. This is a leaner, memo-native design — NOT a workaround for weak models.
+ds4 runs the full multi-agent tool loop fine (measured); the brain is kept
+separate because it is faster, cheaper, and emits a validated memo directly.
+See docs/research_pipelines.md for the head-to-head evidence and why the
+momentum graph and this brain are two producers on one shared spine.
 """
 
 from __future__ import annotations
