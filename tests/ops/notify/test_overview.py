@@ -123,11 +123,15 @@ def _seed_full_day(main_journal, research_journal, baseline_journal, memo_store)
         at=NOW,
     )
 
-    # --- research journal ---
+    # --- research journal (only position_opened/closed + the research_run
+    # equity snapshot actually live here -- see trading.py:142/215) ---
     research_journal.record_equity_snapshot(
         kind="research_run", equity=Decimal("5000"), cash=Decimal("1000"), at=NOW,
     )
-    research_journal.record_event(
+    # --- main journal: Phase C (ops/research/monitor.py) and Phase D
+    # (ops/research/trading.py:272) both record onto the daemon's main
+    # journal, not the research journal. ---
+    main_journal.record_event(
         events.KIND_RESEARCH_MONITOR_RUN,
         events.research_monitor_run_payload(
             asof="2026-07-07", memos_checked=5, falsifiers_evaluated=3, tripped=1,
@@ -135,7 +139,7 @@ def _seed_full_day(main_journal, research_journal, baseline_journal, memo_store)
         ),
         at=NOW,
     )
-    research_journal.record_event(
+    main_journal.record_event(
         events.KIND_FALSIFIER_TRIPPED,
         events.falsifier_tripped_payload(
             memo_id="m-abc", ticker="ABC", falsifier_index="0",
@@ -144,14 +148,14 @@ def _seed_full_day(main_journal, research_journal, baseline_journal, memo_store)
         ),
         at=NOW,
     )
-    research_journal.record_event(
+    main_journal.record_event(
         events.KIND_RESEARCH_ESCALATION,
         events.research_escalation_payload(
             ticker="ABC", memo_id="m-abc", reason="falsifier tripped", hit_id=1,
         ),
         at=NOW,
     )
-    research_journal.record_event(
+    main_journal.record_event(
         events.KIND_RESOLUTION_DUE,
         events.resolution_due_payload(
             memo_id="m-xyz", ticker="XYZ", thesis_type="value", status="open",
@@ -159,7 +163,7 @@ def _seed_full_day(main_journal, research_journal, baseline_journal, memo_store)
         ),
         at=NOW,
     )
-    research_journal.record_event(
+    main_journal.record_event(
         events.KIND_RESEARCH_TRADE_RUN,
         events.research_trade_run_payload(
             asof="2026-07-07", entered=["DEF"], exited=[],
@@ -248,6 +252,85 @@ def test_full_day_research_section(stores):
         {"symbol": "DEF", "memo_id": "m-def", "tier": "high"}
     ]
     assert r["positions_closed"] == []
+
+
+def test_research_events_are_read_from_the_main_journal(stores):
+    """Phase C (ops/research/monitor.py) and Phase D (ops/research/trading.py
+    line 272) both record research_monitor_run/falsifier_tripped/
+    research_trade_run on the MAIN journal, not the research journal -- the
+    research journal only ever gets research_position_opened/closed and the
+    research_run equity snapshot. This seeds production-accurately (main
+    journal only, research journal left empty of these kinds) and asserts
+    the research section still surfaces them -- it must not silently read an
+    empty research-journal slice instead."""
+    main_journal, research_journal, baseline_journal, memo_store = stores
+    main_journal.record_event(
+        events.KIND_RESEARCH_MONITOR_RUN,
+        events.research_monitor_run_payload(
+            asof="2026-07-07", memos_checked=5, falsifiers_evaluated=3, tripped=1,
+            unevaluable=0, escalations=1, resolution_due=1, catalyst_due=0, errors=[],
+        ),
+        at=NOW,
+    )
+    main_journal.record_event(
+        events.KIND_FALSIFIER_TRIPPED,
+        events.falsifier_tripped_payload(
+            memo_id="m-abc", ticker="ABC", falsifier_index="0",
+            description="d", metric="drawdown_from_cost_pct",
+            observed="-40", threshold="-30", consecutive_periods=1,
+        ),
+        at=NOW,
+    )
+    main_journal.record_event(
+        events.KIND_RESEARCH_TRADE_RUN,
+        events.research_trade_run_payload(
+            asof="2026-07-07", entered=["DEF"], exited=[],
+            skipped=["GHI: quote unavailable"], equity="5000", cash="1000",
+        ),
+        at=NOW,
+    )
+    report = build_daily_overview(
+        main_journal=main_journal, baseline_journal=baseline_journal,
+        research_journal=research_journal, memo_store=memo_store,
+        config=OpsConfig(), now=NOW,
+    )
+    r = report["research"]
+    assert r["monitor"]["counts"] == {
+        "memos_checked": 5, "falsifiers_evaluated": 3, "tripped": 1,
+        "unevaluable": 0, "escalations": 1, "resolution_due": 1, "catalyst_due": 0,
+    }
+    assert r["monitor"]["tripped"] == ["ABC"]
+    assert r["trades"] == {
+        "entered": ["DEF"], "exited": [], "skipped": ["GHI: quote unavailable"],
+        "equity": Decimal("5000"), "cash": Decimal("1000"),
+    }
+    assert report["quiet"] is False
+
+
+def test_research_error_anomalies_are_read_from_the_main_journal(stores):
+    """research_monitor_error/research_trade_error (ops/main.py's
+    _research_monitor_tick/_research_trade_tick) are recorded on the same
+    `journal` param as research_monitor_run/research_trade_run -- the main
+    journal, not the research journal -- so the anomalies section must read
+    them from main_by_kind too."""
+    main_journal, research_journal, baseline_journal, memo_store = stores
+    main_journal.record_event(
+        events.KIND_RESEARCH_MONITOR_ERROR,
+        events.research_monitor_error_payload(error="boom"),
+        at=NOW,
+    )
+    main_journal.record_event(
+        events.KIND_RESEARCH_TRADE_ERROR,
+        events.research_trade_error_payload(error="kaboom"),
+        at=NOW,
+    )
+    report = build_daily_overview(
+        main_journal=main_journal, baseline_journal=baseline_journal,
+        research_journal=research_journal, memo_store=memo_store,
+        config=OpsConfig(), now=NOW,
+    )
+    kinds = {a["kind"] for a in report["anomalies"]}
+    assert kinds == {events.KIND_RESEARCH_MONITOR_ERROR, events.KIND_RESEARCH_TRADE_ERROR}
 
 
 def test_full_day_baseline_and_header_and_anomalies(stores):

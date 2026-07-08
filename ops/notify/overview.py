@@ -58,15 +58,19 @@ _MAIN_ANOMALY_KINDS = (
     events.KIND_EXIT_CHECK_ERROR,
     events.KIND_HEARTBEAT_ERROR,
     events.KIND_BROKER_UNREACHABLE,
-)
-_RESEARCH_ANOMALY_KINDS = (
+    # research_monitor_error/research_trade_error are recorded on the MAIN
+    # journal, not the research journal -- both _research_monitor_tick and
+    # _research_trade_tick (ops/main.py) record onto the daemon's `journal`
+    # param, which is the main journal, same as research_monitor_run and
+    # research_trade_run.
     events.KIND_RESEARCH_MONITOR_ERROR,
     events.KIND_RESEARCH_TRADE_ERROR,
 )
-# No baseline-journal kind matches the plan's "*_error"/explicit-name list
-# today (baseline_quote_failure is a near-miss but not literally an
-# "_error" kind or one of the named anomalies) -- kept empty rather than
-# widening the spec on our own judgment call.
+# No research- or baseline-journal kind matches the plan's
+# "*_error"/explicit-name list today (baseline_quote_failure is a near-miss
+# but not literally an "_error" kind or one of the named anomalies) -- kept
+# empty rather than widening the spec on our own judgment call.
+_RESEARCH_ANOMALY_KINDS: tuple[str, ...] = ()
 _BASELINE_ANOMALY_KINDS: tuple[str, ...] = ()
 
 
@@ -164,7 +168,9 @@ def _momentum_section(
 
 
 def _research_section(
-    by_kind: dict[str, list[dict[str, Any]]], memos_today: list[Any],
+    main_by_kind: dict[str, list[dict[str, Any]]],
+    research_by_kind: dict[str, list[dict[str, Any]]],
+    memos_today: list[Any],
 ) -> dict[str, Any]:
     # Buy/pass recommendation is not a stored field (per the plan) — status
     # (open/passed/resolved) is the closest proxy available at write time.
@@ -178,7 +184,13 @@ def _research_section(
         for m in memos_today
     ]
 
-    monitor_runs = by_kind.get(events.KIND_RESEARCH_MONITOR_RUN, [])
+    # research_monitor_run/falsifier_tripped/research_escalation/
+    # resolution_due/catalyst_due (Phase C, ops/research/monitor.py) and
+    # research_trade_run (Phase D, ops/research/trading.py:272) are all
+    # recorded on the MAIN journal, not the research journal — only
+    # research_position_opened/closed (and the research_run equity snapshot,
+    # read separately in the header) live in the research journal.
+    monitor_runs = main_by_kind.get(events.KIND_RESEARCH_MONITOR_RUN, [])
     monitor_counts: dict[str, int] | None = None
     if monitor_runs:
         p = monitor_runs[-1]["payload"]
@@ -192,16 +204,20 @@ def _research_section(
             "catalyst_due": p["catalyst_due"],
         }
 
-    tripped = [ev["payload"]["ticker"] for ev in by_kind.get(events.KIND_FALSIFIER_TRIPPED, [])]
+    tripped = [
+        ev["payload"]["ticker"] for ev in main_by_kind.get(events.KIND_FALSIFIER_TRIPPED, [])
+    ]
     escalations = [
-        ev["payload"]["ticker"] for ev in by_kind.get(events.KIND_RESEARCH_ESCALATION, [])
+        ev["payload"]["ticker"] for ev in main_by_kind.get(events.KIND_RESEARCH_ESCALATION, [])
     ]
     resolution_due = [
-        ev["payload"]["ticker"] for ev in by_kind.get(events.KIND_RESOLUTION_DUE, [])
+        ev["payload"]["ticker"] for ev in main_by_kind.get(events.KIND_RESOLUTION_DUE, [])
     ]
-    catalyst_due = [ev["payload"]["ticker"] for ev in by_kind.get(events.KIND_CATALYST_DUE, [])]
+    catalyst_due = [
+        ev["payload"]["ticker"] for ev in main_by_kind.get(events.KIND_CATALYST_DUE, [])
+    ]
 
-    trade_runs = by_kind.get(events.KIND_RESEARCH_TRADE_RUN, [])
+    trade_runs = main_by_kind.get(events.KIND_RESEARCH_TRADE_RUN, [])
     trades: dict[str, Any] | None = None
     if trade_runs:
         tp = trade_runs[-1]["payload"]
@@ -219,7 +235,7 @@ def _research_section(
             "memo_id": ev["payload"]["memo_id"],
             "tier": ev["payload"]["conviction_tier"],
         }
-        for ev in by_kind.get(events.KIND_RESEARCH_POSITION_OPENED, [])
+        for ev in research_by_kind.get(events.KIND_RESEARCH_POSITION_OPENED, [])
     ]
     positions_closed = [
         {
@@ -227,7 +243,7 @@ def _research_section(
             "memo_id": ev["payload"]["memo_id"],
             "reason": ev["payload"]["reason"],
         }
-        for ev in by_kind.get(events.KIND_RESEARCH_POSITION_CLOSED, [])
+        for ev in research_by_kind.get(events.KIND_RESEARCH_POSITION_CLOSED, [])
     ]
 
     return {
@@ -359,7 +375,7 @@ def build_daily_overview(
     memos_today = [m for m in memo_store.list() if m.created_at >= day_start]
 
     momentum = _momentum_section(main_journal, main_by_kind, day_start)
-    research = _research_section(research_by_kind, memos_today)
+    research = _research_section(main_by_kind, research_by_kind, memos_today)
     baseline = _baseline_section(baseline_by_kind)
     anomalies = _anomalies_section(main_by_kind, research_by_kind, baseline_by_kind)
     header = _header_section(when, main_journal, research_journal, baseline_journal)
