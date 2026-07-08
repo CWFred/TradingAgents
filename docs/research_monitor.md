@@ -71,3 +71,7 @@ _default_baseline_journal_path), not the ops journal above:
 
     sqlite3 ${XDG_STATE_HOME:-~/.local/state}/tradingagents/baseline_journal.sqlite \
       "SELECT at, kind, payload FROM events WHERE kind IN ('baseline_quote_failure', 'baseline_auto_writeoff') ORDER BY id DESC LIMIT 20"
+
+## Connecting to the trading step
+
+Escalations and resolution-due events feed the trading step (research_trade at 16:25): memos stage entries on creation, exit on resolution or falsifier trip. See docs/research_trading.md and the `ops research resolve` command for the resolution workflow.
