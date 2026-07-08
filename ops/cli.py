@@ -567,6 +567,37 @@ def research_resolve(memo_id: str, outcome_label: str, narrative: str,
     )
 
 
+@research.command("report")
+@click.option("--output", "output_path", default=None,
+              type=click.Path(dir_okay=False),
+              help="Write the markdown report to this file instead of stdout.")
+def research_report(output_path: str | None) -> None:
+    """Quarterly calibration report: corpus stats, outcome 2x2, scenario
+    calibration, bought-vs-passed, sleeve-vs-baseline, per-model attribution.
+
+    Reads ONLY the memo store and the research/baseline journals — no
+    broker, no quotes — so it is safe to run any time (day one included)."""
+    from ops.research.report import build_report, format_report
+    from tradingagents.memos.store import MemoStore
+
+    config = load_config()
+    memo_store = MemoStore(config.memo_store_path)
+    with (
+        Journal(config.research_journal_path) as research_journal,
+        Journal(config.baseline_journal_path) as baseline_journal,
+    ):
+        report = build_report(
+            memo_store=memo_store, research_journal=research_journal,
+            baseline_journal=baseline_journal,
+        )
+    rendered = format_report(report)
+    if output_path is not None:
+        with open(output_path, "w") as f:
+            f.write(rendered + "\n")
+    else:
+        click.echo(rendered)
+
+
 @cli.command("decide-once")
 @click.option("--date", "as_of", required=True,
               type=click.DateTime(formats=["%Y-%m-%d"]),
