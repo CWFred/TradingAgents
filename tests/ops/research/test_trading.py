@@ -116,6 +116,32 @@ def test_exit_on_falsifier_trip(env):
     assert outcome.entered == []
 
 
+def test_no_reentry_after_falsifier_exit_on_later_run(env):
+    memo_store, research_journal, main_journal = env
+    memo_store.save(_memo("WIDG"))
+    _trade(env)  # day0: enter
+    memo_id = memo_store.list(ticker="WIDG")[0].memo_id
+    main_journal.record_event(
+        events.KIND_FALSIFIER_TRIPPED,
+        events.falsifier_tripped_payload(
+            memo_id=memo_id, ticker="WIDG", falsifier_index="0",
+            description="d", metric="drawdown_from_cost_pct",
+            observed="-31.0", threshold="-30.0", consecutive_periods=1,
+        ),
+    )
+    outcome = _trade(env)  # day1: exit on the falsifier trip
+    assert outcome.exited == ["WIDG"]
+    # day2 (a later run): the memo is still "open" (falsifier trip doesn't
+    # resolve it), but the position lifecycle for this memo is done — it
+    # must not re-enter.
+    outcome2 = _trade(env)
+    assert outcome2.entered == []
+    assert any("WIDG" in s and "already had a position" in s for s in outcome2.skipped)
+    # day3: still no re-entry.
+    outcome3 = _trade(env)
+    assert outcome3.entered == []
+
+
 def test_exit_on_target_hit_and_resolution(env):
     memo_store, research_journal, _ = env
     memo_store.save(_memo("WIDG", targets=(15.0, 20.0)))

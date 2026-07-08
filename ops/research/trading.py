@@ -11,7 +11,13 @@ discretion computed here.
 Exits run before entries so a name whose memo just resolved (or whose
 falsifier just tripped) frees its sizing room in the very same run, and a
 symbol closed this run is never immediately re-bought from the same open
-memo (that would just be a same-run wash).
+memo (that would just be a same-run wash). One memo = one position
+lifecycle: a memo whose ``memo_id`` already carries a
+``research_position_closed`` event never re-enters, even in a later run —
+a falsifier trip or target-hit exit does not resolve the memo, so without
+this guard the very next run would re-buy it and immediately re-trip the
+same historical falsifier or target, thrashing enter/exit until a human
+resolves the memo.
 
 Third-ledger isolation: this module opens/replays only the RESEARCH journal
 (``research_journal``, via ``PaperBroker.from_journal``). ``main_journal`` is
@@ -162,6 +168,15 @@ def _entry_pass(
     for memo in memos:
         ticker = memo.ticker
         if ticker in held or ticker in exited:
+            continue
+
+        if research_journal.count_events(
+            events.KIND_RESEARCH_POSITION_CLOSED,
+            payload_equals={"memo_id": memo.memo_id},
+        ) > 0:
+            outcome.skipped.append(
+                f"{ticker}: memo already had a position (closed)"
+            )
             continue
 
         cost_by_symbol, _total_cost = cost_basis(broker.get_positions())
