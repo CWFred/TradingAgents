@@ -19,6 +19,15 @@ class StrategyOrder:
     pipeline: PipelineResult
 
 
+@dataclass(frozen=True)
+class AnalyzedDecision:
+    """One analyzed candidate's pipeline verdict, BUY or not. Collected via
+    propose_orders' optional decision_sink so callers can journal a
+    per-name audit trail without changing the returned order list."""
+    candidate: Candidate
+    pipeline: PipelineResult
+
+
 class Strategy(Protocol):
     def propose_orders(
         self,
@@ -28,4 +37,5 @@ class Strategy(Protocol):
         current_equity: Decimal,
         asof_date: date,
         live_max_position_cap: Decimal | None = None,
+        decision_sink: list[AnalyzedDecision] | None = None,
     ) -> list[StrategyOrder]: ...

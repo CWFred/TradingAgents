@@ -716,6 +716,94 @@ def test_blind_alarm_fires_on_majority_failures_even_with_candidates():
     assert events.KIND_UNIVERSE_BLIND in kinds
 
 
+# --- Task 1: analysis_decision journaled for every analyzed name ---
+
+def _fake_strategy_recording_decisions(decisions_by_symbol):
+    """Mimics the real strategy's decision_sink contract closely enough for
+    orchestrator tests: for every candidate handed to propose_orders, looks
+    up its decision, appends an AnalyzedDecision to decision_sink (when
+    given one), and returns a StrategyOrder only for the BUYs."""
+    from ops.pipeline_adapter import PipelineDecision, PipelineResult
+    from ops.strategy.base import AnalyzedDecision
+
+    def propose_orders(*, candidates, pipeline, current_equity, asof_date,
+                        live_max_position_cap=None, decision_sink=None):
+        out = []
+        for cand in candidates:
+            decision = decisions_by_symbol.get(cand.symbol, PipelineDecision.HOLD)
+            result = PipelineResult(symbol=cand.symbol, date=asof_date, decision=decision)
+            if decision_sink is not None:
+                decision_sink.append(AnalyzedDecision(candidate=cand, pipeline=result))
+            if decision == PipelineDecision.BUY:
+                out.append(_strategy_order_for_candidate(cand))
+        return out
+
+    strat = MagicMock()
+    strat.propose_orders.side_effect = propose_orders
+    return strat
+
+
+def test_tick_journals_analysis_decision_for_every_analyzed_name(tmp_path):
+    from ops import events
+    from ops.journal import Journal
+    from ops.config import OpsConfig
+    from ops.pipeline_adapter import PipelineDecision
+
+    j = Journal(str(tmp_path / "j.sqlite"))
+    broker = _fake_broker()
+    nvda = _momentum_candidate("NVDA", rank=1)
+    aapl = _momentum_candidate("AAPL", rank=2)
+    strat = _fake_strategy_recording_decisions(
+        {"NVDA": PipelineDecision.BUY, "AAPL": PipelineDecision.HOLD},
+    )
+    universe = MagicMock(side_effect=lambda **kwargs: [nvda, aapl])
+    orch = Orchestrator(
+        broker=broker,
+        universe_builder=universe,
+        strategy=strat,
+        pipeline_adapter=_fake_pipeline(),
+        calendar=_fake_calendar(is_open=True), journal=j,
+        config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
+    )
+    orch.tick()
+    evts = [e for e in j.read_events() if e["kind"] == events.KIND_ANALYSIS_DECISION]
+    assert len(evts) == 2
+    by_symbol = {e["payload"]["symbol"]: e["payload"] for e in evts}
+    assert by_symbol["NVDA"]["decision"] == "BUY"
+    assert by_symbol["NVDA"]["source"] == "MOMENTUM"
+    assert by_symbol["NVDA"]["rank"] == 1
+    assert by_symbol["AAPL"]["decision"] == "HOLD"
+    assert by_symbol["AAPL"]["rank"] == 2
+    # BUY still resulted in exactly one order placed.
+    broker.place_order.assert_called_once()
+
+
+def test_tick_no_analysis_decision_when_no_candidates(tmp_path):
+    """Empty candidate list -> nothing analyzed -> no analysis_decision events."""
+    from ops import events
+    from ops.journal import Journal
+    from ops.config import OpsConfig
+
+    j = Journal(str(tmp_path / "j.sqlite"))
+    broker = _fake_broker()
+    orch = Orchestrator(
+        broker=broker,
+        universe_builder=_fake_universe([]),
+        strategy=_fake_strategy([]),
+        pipeline_adapter=_fake_pipeline(),
+        calendar=_fake_calendar(is_open=True), journal=j,
+        config=OpsConfig(),
+        members_loader=lambda: [],
+        momentum_finder=lambda members, asof_date: [],
+        closes_fetch=lambda s: None,
+    )
+    orch.tick()
+    assert all(e["kind"] != events.KIND_ANALYSIS_DECISION for e in j.read_events())
+
+
 def test_no_blind_alarm_when_feed_healthy(monkeypatch):
     from ops import events
 

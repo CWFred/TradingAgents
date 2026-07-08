@@ -114,6 +114,16 @@ KIND_RESEARCH_TRADE_ERROR = "research_trade_error"
 KIND_RESEARCH_POSITION_OPENED = "research_position_opened"
 KIND_RESEARCH_POSITION_CLOSED = "research_position_closed"
 
+# Momentum sleeve: per-name pipeline verdict (BUY/HOLD/SELL), one per
+# analyzed candidate regardless of whether it turned into an order.
+KIND_ANALYSIS_DECISION = "analysis_decision"
+
+# --- Daily overview delivery (DO-Task 3) ---
+# Cross-sleeve "everything that happened today" digest: weekday post-close +
+# Saturday evening daemon job, plus `ops digest` on demand.
+KIND_DAILY_OVERVIEW = "daily_overview"
+KIND_DAILY_OVERVIEW_ERROR = "daily_overview_error"
+
 # Kinds deliberately NOT notified. Everything here is an audit trail the
 # operator reads via `ops status` or sqlite, not a push/email — either
 # because it fires during normal operation (service lifecycle, replay
@@ -159,6 +169,15 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_RESEARCH_TRADE_ERROR,
     KIND_RESEARCH_POSITION_OPENED,
     KIND_RESEARCH_POSITION_CLOSED,
+    # Per-name momentum pipeline verdict: audit trail, not a push — the BUY
+    # case already notifies via position_opened/fill.
+    KIND_ANALYSIS_DECISION,
+    # Daily overview delivery: audit record of the once-per-day cross-sleeve
+    # digest run. The push itself is a direct Pushover call inside the tick
+    # (see ops/main.py::_daily_overview_tick), not routed through the notify
+    # dispatcher/POLICY table, so this gate event is audit-only.
+    KIND_DAILY_OVERVIEW,
+    KIND_DAILY_OVERVIEW_ERROR,
 })
 
 
@@ -632,6 +651,32 @@ def research_position_closed_payload(
     }
 
 
+def analysis_decision_payload(
+    *, symbol: str, decision: str, source: str, asof: str, rank: int | None = None,
+) -> dict[str, Any]:
+    """Momentum sleeve per-name pipeline verdict. `decision` is one of
+    "BUY"/"HOLD"/"SELL"; `rank` is omitted (not None) when the candidate
+    has no momentum payload (an earnings-only candidate)."""
+    payload: dict[str, Any] = {
+        "symbol": symbol, "decision": decision, "source": source, "asof": asof,
+    }
+    if rank is not None:
+        payload["rank"] = rank
+    return payload
+
+
+def daily_overview_payload(*, date: str, headline: str, path: str) -> dict[str, Any]:
+    """Daily overview gate event: audit record of a completed run (once-per-
+    day gate for _daily_overview_tick). The push itself is a direct Pushover
+    call in the tick, not routed through the notify dispatcher/POLICY table
+    — this payload is metadata only."""
+    return {"date": date, "headline": headline, "path": path}
+
+
+def daily_overview_error_payload(*, error: str) -> dict[str, Any]:
+    return {"error": error}
+
+
 # Kind -> builder registry: the enforcement test walks this to prove every
 # POLICY kind has a builder and every builder's kind has been classified
 # (POLICY or AUDIT_ONLY). Register every new builder here.
@@ -689,4 +734,7 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_RESEARCH_TRADE_ERROR: research_trade_error_payload,
     KIND_RESEARCH_POSITION_OPENED: research_position_opened_payload,
     KIND_RESEARCH_POSITION_CLOSED: research_position_closed_payload,
+    KIND_ANALYSIS_DECISION: analysis_decision_payload,
+    KIND_DAILY_OVERVIEW: daily_overview_payload,
+    KIND_DAILY_OVERVIEW_ERROR: daily_overview_error_payload,
 }

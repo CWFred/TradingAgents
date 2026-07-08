@@ -11,6 +11,7 @@ memos feed the calibration report.
 |---|---|---|---|
 | research_trade | ops daemon (APScheduler) | 16:25 ET mon-fri | entries by tier; exits on memo resolution, falsifier trip, or price target |
 | research_monitor | ops daemon (APScheduler) | 16:20 ET mon-fri | falsifiers, drawdown, catalysts, resolution-due (happens before trading) |
+| daily_overview | ops daemon (APScheduler) | 16:35 ET mon-fri, Sat 18:00 ET | cross-sleeve "everything that happened today" incl. research trades/memos/monitor — see docs/daily_overview.md |
 | ops research resolve | manual | — | record resolution outcome and exit price for a closed position |
 | ops research report | manual only | — | quarterly calibration report on resolved memos; no daemon job runs this |
 

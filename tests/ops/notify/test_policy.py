@@ -342,3 +342,34 @@ def test_phase_d_trading_kinds_registered():
         events.KIND_RESEARCH_POSITION_OPENED, events.KIND_RESEARCH_POSITION_CLOSED,
     ):
         assert kind in events.BUILDERS
+
+
+def test_analysis_decision_kind_registered():
+    from ops import events
+    from ops.notify.policy import POLICY
+
+    assert events.KIND_ANALYSIS_DECISION in events.AUDIT_ONLY
+    assert events.KIND_ANALYSIS_DECISION not in POLICY
+    assert events.KIND_ANALYSIS_DECISION in events.BUILDERS
+
+
+def test_daily_overview_kinds_registered():
+    """DO-Task 3: both daily_overview kinds are audit-only — the push itself
+    is a direct Pushover call inside _daily_overview_tick, not routed
+    through the notify dispatcher/POLICY table."""
+    from ops import events
+    from ops.notify.policy import POLICY
+
+    for kind in (events.KIND_DAILY_OVERVIEW, events.KIND_DAILY_OVERVIEW_ERROR):
+        assert kind in events.AUDIT_ONLY
+        assert kind not in POLICY
+        assert kind in events.BUILDERS
+
+    payload = events.daily_overview_payload(
+        date="2026-07-08", headline="2026-07-08: quiet day", path="/tmp/overview-2026-07-08.md",
+    )
+    assert payload == {
+        "date": "2026-07-08", "headline": "2026-07-08: quiet day",
+        "path": "/tmp/overview-2026-07-08.md",
+    }
+    assert events.daily_overview_error_payload(error="boom") == {"error": "boom"}

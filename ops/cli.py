@@ -306,6 +306,62 @@ def screen(asof_dt: datetime | None, dry_run: bool, limit: int | None, do_notify
         raise SystemExit(2)
 
 
+@cli.command("digest")
+@click.option("--date", "digest_date", default=None,
+              type=click.DateTime(formats=["%Y-%m-%d"]),
+              help="Overview for this date (YYYY-MM-DD); default today.")
+@click.option("--output", "output_path", default=None,
+              type=click.Path(dir_okay=False),
+              help="Write the markdown to this file instead of stdout.")
+@click.option("--push/--no-push", "do_push", default=False,
+              help="Also push the headline via Pushover (off by default).")
+def digest(digest_date: datetime | None, output_path: str | None, do_push: bool) -> None:
+    """Cross-sleeve daily overview: momentum + research + baseline + anomalies.
+
+    Manual/debug companion to the daemon's weekday-16:35/Saturday-18:00
+    `daily_overview` job — reads all three journals + the memo store, same as
+    the daemon, but deliberately does NOT record the gate event, so running
+    this never suppresses the daemon's own scheduled run."""
+    from ops.notify.overview import (
+        build_daily_overview,
+        format_daily_overview,
+        overview_headline,
+    )
+    from ops.trading_time import TRADING_TZ
+    from tradingagents.memos.store import MemoStore
+
+    config = load_config()
+    # Attach the ET trading-tz directly to the parsed midnight (rather than
+    # reinterpreting through UTC) so trading_day_start resolves exactly the
+    # requested calendar date, DST-safe.
+    now = digest_date.replace(tzinfo=TRADING_TZ) if digest_date is not None else None
+    memo_store = MemoStore(config.memo_store_path)
+    with (
+        Journal(config.journal_path) as main_journal,
+        Journal(config.baseline_journal_path) as baseline_journal,
+        Journal(config.research_journal_path) as research_journal,
+    ):
+        report = build_daily_overview(
+            main_journal=main_journal, baseline_journal=baseline_journal,
+            research_journal=research_journal, memo_store=memo_store,
+            config=config, now=now,
+        )
+    rendered = format_daily_overview(report)
+    if output_path is not None:
+        with open(output_path, "w") as f:
+            f.write(rendered + "\n")
+    else:
+        click.echo(rendered)
+    if do_push:
+        from ops.notify.config import load_notify_config
+        from ops.notify.push import build_push_transport
+        from ops.notify.transport import NotifyMessage
+
+        build_push_transport(load_notify_config()).send(NotifyMessage(
+            title="Daily overview", body=overview_headline(report),
+        ))
+
+
 @cli.group()
 def research() -> None:
     """Long-horizon research sleeve commands."""

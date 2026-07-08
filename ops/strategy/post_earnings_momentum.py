@@ -16,7 +16,7 @@ from uuid import uuid4
 from ops.broker.types import Order, OrderType, Side
 from ops.config import OpsConfig
 from ops.pipeline_adapter import PipelineAdapter, PipelineDecision
-from ops.strategy.base import StrategyOrder
+from ops.strategy.base import AnalyzedDecision, StrategyOrder
 from ops.universe import Candidate, CandidateSource
 
 
@@ -58,6 +58,7 @@ class PostEarningsMomentumStrategy:
         current_equity: Decimal,
         asof_date: date,
         live_max_position_cap: Decimal | None = None,
+        decision_sink: list[AnalyzedDecision] | None = None,
     ) -> list[StrategyOrder]:
         notional = _quantize_money(current_equity * self._cfg.per_position_cap_pct)
         if live_max_position_cap is not None:
@@ -67,6 +68,8 @@ class PostEarningsMomentumStrategy:
         out: list[StrategyOrder] = []
         for cand in candidates:
             result = pipeline.propagate(cand.symbol, asof_date)
+            if decision_sink is not None:
+                decision_sink.append(AnalyzedDecision(candidate=cand, pipeline=result))
             if result.decision != PipelineDecision.BUY:
                 continue
             order = Order(

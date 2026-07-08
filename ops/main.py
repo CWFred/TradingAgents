@@ -372,6 +372,85 @@ def _research_monitor_tick(journal: Journal, config) -> None:
         )
 
 
+def _overview_path(when: date) -> str:
+    """`${XDG_STATE_HOME:-~/.local/state}/tradingagents/overviews/overview-YYYY-MM-DD.md`
+    — mirrors the base-dir logic in ops/config.py's _default_*_path helpers."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(
+        os.path.expanduser(base), "tradingagents", "overviews",
+        f"overview-{when.isoformat()}.md",
+    )
+
+
+def _daily_overview_tick(journal: Journal, config) -> None:
+    """Scheduler-safe wrapper around the cross-sleeve daily overview: gate on
+    the run-summary event (restart-safe once-per-day, same pattern as
+    _research_monitor_tick — registered twice, weekday + Saturday, so the
+    gate is what makes the double registration safe), write the markdown
+    file, push the headline, then record the gate event. Errors are recorded
+    as events rather than raising — raising would kill the APScheduler job.
+
+    The push is wrapped in its own try/except: a push failure must not
+    prevent the file (already written) or the gate event (recorded right
+    after) — only the catch-all below may turn a failure into
+    KIND_DAILY_OVERVIEW_ERROR, and it must never do so for a push-only
+    failure once the file is safely on disk."""
+    try:
+        if journal.has_event_today(events.KIND_DAILY_OVERVIEW):
+            return
+        from ops.notify.overview import (
+            build_daily_overview,
+            format_daily_overview,
+            overview_headline,
+        )
+        from tradingagents.memos.store import MemoStore
+
+        memo_store = MemoStore(config.memo_store_path)
+        with (
+            Journal(config.baseline_journal_path) as baseline_journal,
+            Journal(config.research_journal_path) as research_journal,
+        ):
+            report = build_daily_overview(
+                main_journal=journal, baseline_journal=baseline_journal,
+                research_journal=research_journal, memo_store=memo_store,
+                config=config,
+            )
+        rendered = format_daily_overview(report)
+        headline = overview_headline(report)
+        path = _overview_path(report["date"])
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(rendered + "\n")
+
+        try:
+            from ops.notify.config import load_notify_config
+
+            notify_cfg = load_notify_config()
+            if notify_cfg.notify_enabled:
+                from ops.notify.push import build_push_transport
+                from ops.notify.transport import NotifyMessage
+
+                build_push_transport(notify_cfg).send(
+                    NotifyMessage(title="Daily overview", body=headline)
+                )
+        except Exception as exc:  # noqa: BLE001 - push failure must not block the gate event
+            print(f"daily overview push error: {exc}", file=sys.stderr)
+
+        journal.record_event(
+            events.KIND_DAILY_OVERVIEW,
+            events.daily_overview_payload(
+                date=report["date"].isoformat(), headline=headline, path=path,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - deliberately broad, see above
+        journal.record_event(
+            events.KIND_DAILY_OVERVIEW_ERROR,
+            events.daily_overview_error_payload(
+                error=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+
+
 def _research_trade_tick(journal: Journal, config) -> None:
     """Scheduler-safe wrapper around the Phase D research-sleeve trade step:
     gate on the run-summary event (restart-safe once-per-day, same pattern as
@@ -502,6 +581,16 @@ def _start_full_scheduler(
             lambda: _research_trade_tick(journal, config),
             CronTrigger(hour=16, minute=25, day_of_week="mon-fri"),
             id="research_trade", max_instances=1, misfire_grace_time=300,
+        )
+        sched.add_job(
+            lambda: _daily_overview_tick(journal, config),
+            CronTrigger(hour=16, minute=35, day_of_week="mon-fri"),
+            id="daily_overview", max_instances=1, misfire_grace_time=600,
+        )
+        sched.add_job(
+            lambda: _daily_overview_tick(journal, config),
+            CronTrigger(hour=18, minute=0, day_of_week="sat"),
+            id="daily_overview_saturday", max_instances=1, misfire_grace_time=600,
         )
     if heartbeat_job is not None:
         sched.add_job(

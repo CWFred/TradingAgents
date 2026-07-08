@@ -551,3 +551,106 @@ def test_research_trade_tick_records_error_instead_of_raising(tmp_path):
     _research_trade_tick(journal, config)  # must not raise
     kinds = [c.args[0] for c in journal.record_event.call_args_list]
     assert events.KIND_RESEARCH_TRADE_ERROR in kinds
+
+
+def test_daily_overview_jobs_registered_and_callable(tmp_path):
+    """DO-Task 3: the overview job is registered TWICE — mon-fri under id
+    'daily_overview' and Saturday (after the noon research brain) under
+    'daily_overview_saturday' — mirroring research_monitor/research_trade's
+    config-guarded registration. The once-per-day gate makes the double
+    registration safe."""
+    from unittest.mock import MagicMock
+    from ops.main import _start_full_scheduler
+
+    journal = MagicMock()
+    journal.has_event_today.return_value = True  # gate returns early; must not raise
+    config = MagicMock()
+    sched = _start_full_scheduler(
+        MagicMock(), MagicMock(), MagicMock(), journal, MagicMock(), config=config,
+    )
+    try:
+        weekday_job = sched.get_job("daily_overview")
+        saturday_job = sched.get_job("daily_overview_saturday")
+        assert weekday_job is not None
+        assert saturday_job is not None
+        weekday_job.func()  # gate returns early; must not raise
+        saturday_job.func()  # gate returns early; must not raise
+    finally:
+        sched.shutdown(wait=False)
+
+
+def test_daily_overview_jobs_absent_without_config():
+    from unittest.mock import MagicMock
+    from ops.main import _start_full_scheduler
+
+    sched = _start_full_scheduler(
+        MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+    )
+    try:
+        assert sched.get_job("daily_overview") is None
+        assert sched.get_job("daily_overview_saturday") is None
+    finally:
+        sched.shutdown(wait=False)
+
+
+def test_daily_overview_tick_records_error_instead_of_raising(tmp_path):
+    from unittest.mock import MagicMock
+    from ops import events
+    from ops.main import _daily_overview_tick
+
+    journal = MagicMock()
+    journal.has_event_today.return_value = False
+    config = MagicMock()
+    config.memo_store_path = str(tmp_path / "memos.sqlite")
+    config.baseline_journal_path = object()  # guaranteed TypeError downstream
+    _daily_overview_tick(journal, config)  # must not raise
+    kinds = [c.args[0] for c in journal.record_event.call_args_list]
+    assert events.KIND_DAILY_OVERVIEW_ERROR in kinds
+    # And the gate event must NOT have been recorded on the error path.
+    assert events.KIND_DAILY_OVERVIEW not in kinds
+
+
+def test_daily_overview_tick_writes_file_and_records_gate_event(tmp_path, monkeypatch):
+    """Happy path against real (empty) journals + memo store: the tick must
+    write the markdown file under ${XDG_STATE_HOME}/tradingagents/overviews/
+    and record exactly the gate event (a quiet day, no push configured)."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.delenv("OPS_NOTIFY_ENABLED", raising=False)
+    from datetime import date
+    from ops import events
+    from ops.config import OpsConfig
+    from ops.main import _daily_overview_tick
+
+    journal = Journal(str(tmp_path / "main.sqlite"))
+    config = OpsConfig(
+        journal_path=journal.path,
+        baseline_journal_path=str(tmp_path / "baseline.sqlite"),
+        research_journal_path=str(tmp_path / "research.sqlite"),
+        memo_store_path=str(tmp_path / "memos.sqlite"),
+    )
+    try:
+        _daily_overview_tick(journal, config)
+        expected_path = (
+            tmp_path / "tradingagents" / "overviews"
+            / f"overview-{date.today().isoformat()}.md"
+        )
+        assert expected_path.exists()
+        assert "Daily overview" in expected_path.read_text()
+
+        gate_events = [e for e in journal.read_events() if e["kind"] == events.KIND_DAILY_OVERVIEW]
+        assert len(gate_events) == 1
+        assert gate_events[0]["payload"]["path"] == str(expected_path)
+
+        error_events = [
+            e for e in journal.read_events() if e["kind"] == events.KIND_DAILY_OVERVIEW_ERROR
+        ]
+        assert error_events == []
+
+        # Gate: a second call today is a no-op (no duplicate gate event).
+        _daily_overview_tick(journal, config)
+        gate_events_again = [
+            e for e in journal.read_events() if e["kind"] == events.KIND_DAILY_OVERVIEW
+        ]
+        assert len(gate_events_again) == 1
+    finally:
+        journal.close()

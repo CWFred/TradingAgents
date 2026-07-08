@@ -117,12 +117,14 @@ class Orchestrator:
         # is torn down when the session exits, freeing its resident memory
         # between ticks. Bringing it up is lazy inside propagate().
         with self._pipeline_adapter.session():
+            decisions: list = []
             proposals = self._strategy.propose_orders(
                 candidates=fresh_candidates,
                 pipeline=self._pipeline_adapter,
                 current_equity=current_equity,
                 asof_date=asof_date,
                 live_max_position_cap=live_cap,
+                decision_sink=decisions,
             )
             for proposal in proposals:
                 try:
@@ -140,6 +142,18 @@ class Orchestrator:
                         entry_date=asof_date,
                         client_order_id=proposal.order.client_order_id,
                         entry_rank=cand.momentum.rank if cand.momentum else None,
+                    ),
+                )
+            for decision in decisions:
+                cand = decision.candidate
+                self._journal.record_event(
+                    events.KIND_ANALYSIS_DECISION,
+                    events.analysis_decision_payload(
+                        symbol=cand.symbol,
+                        decision=decision.pipeline.decision.value,
+                        source=cand.source.value,
+                        asof=asof_date.isoformat(),
+                        rank=cand.momentum.rank if cand.momentum else None,
                     ),
                 )
 

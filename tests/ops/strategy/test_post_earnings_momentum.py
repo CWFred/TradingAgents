@@ -167,6 +167,43 @@ def test_live_max_position_cap_none_uses_normal_notional():
     assert orders[0].order.notional_dollars == Decimal("30.00")
 
 
+def test_decision_sink_receives_every_analyzed_candidate():
+    """decision_sink, when passed, collects one entry per analyzed candidate
+    (BUY or not) while the returned orders still only contain the BUYs."""
+    cfg = OpsConfig()
+    strat = PostEarningsMomentumStrategy(config=cfg)
+    pipe = StubPipelineAdapter({
+        "AAPL": PipelineDecision.BUY, "MSFT": PipelineDecision.HOLD,
+    })
+    sink: list = []
+    orders = strat.propose_orders(
+        candidates=[_candidate("AAPL"), _candidate("MSFT")], pipeline=pipe,
+        current_equity=Decimal("250"), asof_date=date(2026, 6, 30),
+        decision_sink=sink,
+    )
+    assert len(orders) == 1
+    assert orders[0].order.symbol == "AAPL"
+    assert len(sink) == 2
+    symbols = {d.candidate.symbol for d in sink}
+    assert symbols == {"AAPL", "MSFT"}
+    decisions_by_symbol = {d.candidate.symbol: d.pipeline.decision for d in sink}
+    assert decisions_by_symbol["AAPL"] == PipelineDecision.BUY
+    assert decisions_by_symbol["MSFT"] == PipelineDecision.HOLD
+
+
+def test_decision_sink_none_by_default_is_unaffected():
+    """No sink passed -> existing behavior exactly (no side effects, no
+    required list, no attribute errors)."""
+    cfg = OpsConfig()
+    strat = PostEarningsMomentumStrategy(config=cfg)
+    pipe = StubPipelineAdapter({"AAPL": PipelineDecision.BUY})
+    orders = strat.propose_orders(
+        candidates=[_candidate("AAPL")], pipeline=pipe,
+        current_equity=Decimal("250"), asof_date=date(2026, 6, 30),
+    )
+    assert len(orders) == 1
+
+
 def test_momentum_candidate_gets_momentum_reason():
     cand = Candidate(
         symbol="NVDA", source=CandidateSource.MOMENTUM,
