@@ -22,7 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -372,6 +372,36 @@ def _research_monitor_tick(journal: Journal, config) -> None:
         )
 
 
+def _research_trade_tick(journal: Journal, config) -> None:
+    """Scheduler-safe wrapper around the Phase D research-sleeve trade step:
+    gate on the run-summary event (restart-safe once-per-day, same pattern as
+    _research_monitor_tick), and record errors as events rather than raising
+    — raising would kill the APScheduler job."""
+    try:
+        if journal.has_event_today(events.KIND_RESEARCH_TRADE_RUN):
+            return
+        from ops.quotes import make_yfinance_quote_source
+        from ops.research.trading import trade_research_sleeve
+        from tradingagents.memos.store import MemoStore
+
+        with Journal(config.research_journal_path) as research_journal:
+            trade_research_sleeve(
+                memo_store=MemoStore(config.memo_store_path),
+                research_journal=research_journal,
+                main_journal=journal,
+                quote_source=make_yfinance_quote_source(),
+                starting_cash=config.research_starting_cash,
+                asof=date.today(),
+            )
+    except Exception as exc:  # noqa: BLE001 - deliberately broad, see above
+        journal.record_event(
+            events.KIND_RESEARCH_TRADE_ERROR,
+            events.research_trade_error_payload(
+                error=f"{type(exc).__name__}: {exc}",
+            ),
+        )
+
+
 # Dead-man's switch tuning (A1.3). Staleness is 3x the guardian poll
 # interval: one slow pass must not flap the external check, but a loop
 # that has missed three consecutive polls is wedged and must look dead.
@@ -467,6 +497,11 @@ def _start_full_scheduler(
             lambda: _research_monitor_tick(journal, config),
             CronTrigger(hour=16, minute=20, day_of_week="mon-fri"),
             id="research_monitor", max_instances=1, misfire_grace_time=300,
+        )
+        sched.add_job(
+            lambda: _research_trade_tick(journal, config),
+            CronTrigger(hour=16, minute=25, day_of_week="mon-fri"),
+            id="research_trade", max_instances=1, misfire_grace_time=300,
         )
     if heartbeat_job is not None:
         sched.add_job(

@@ -108,6 +108,12 @@ KIND_RESEARCH_MONITOR_ERROR = "research_monitor_error"
 KIND_BASELINE_QUOTE_FAILURE = "baseline_quote_failure"
 KIND_BASELINE_AUTO_WRITEOFF = "baseline_auto_writeoff"
 
+# --- Research sleeve trading (Phase D) ---
+KIND_RESEARCH_TRADE_RUN = "research_trade_run"
+KIND_RESEARCH_TRADE_ERROR = "research_trade_error"
+KIND_RESEARCH_POSITION_OPENED = "research_position_opened"
+KIND_RESEARCH_POSITION_CLOSED = "research_position_closed"
+
 # Kinds deliberately NOT notified. Everything here is an audit trail the
 # operator reads via `ops status` or sqlite, not a push/email — either
 # because it fires during normal operation (service lifecycle, replay
@@ -149,6 +155,10 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_RESEARCH_MONITOR_ERROR,
     KIND_BASELINE_QUOTE_FAILURE,
     KIND_BASELINE_AUTO_WRITEOFF,
+    # Research sleeve trading: audit trail of trades executed by research sleeve.
+    KIND_RESEARCH_TRADE_ERROR,
+    KIND_RESEARCH_POSITION_OPENED,
+    KIND_RESEARCH_POSITION_CLOSED,
 })
 
 
@@ -579,6 +589,49 @@ def universe_blind_payload(
     }
 
 
+def research_trade_run_payload(
+    *, asof: str, entered: list[str], exited: list[str], skipped: list[str],
+    equity: str, cash: str,
+) -> dict[str, Any]:
+    """Research sleeve execution: symbols traded and current balances.
+    equity/cash are stringified to match journal storage convention."""
+    return {
+        "asof": asof, "entered": entered, "exited": exited,
+        "skipped": skipped, "equity": equity, "cash": cash,
+    }
+
+
+def research_trade_error_payload(*, error: str) -> dict[str, Any]:
+    """Research sleeve trading error: execution or connection failure."""
+    return {"error": error}
+
+
+def research_position_opened_payload(
+    *, symbol: str, memo_id: str, conviction_tier: str, entry_date: str,
+    client_order_id: str, notional: str,
+) -> dict[str, Any]:
+    """Research position lifecycle: journal provenance record.
+    symbol/memo_id are strings for json_extract / latest_event_payload_by_symbol
+    compatibility; entry_date and notional are stringified."""
+    return {
+        "symbol": symbol, "memo_id": memo_id, "conviction_tier": conviction_tier,
+        "entry_date": entry_date, "client_order_id": client_order_id,
+        "notional": notional,
+    }
+
+
+def research_position_closed_payload(
+    *, symbol: str, memo_id: str, reason: str, exit_date: str, price: str,
+) -> dict[str, Any]:
+    """Research position closed: audit trail of exits.
+    symbol/memo_id are strings for json_extract compatibility; price is
+    stringified to match journal storage convention."""
+    return {
+        "symbol": symbol, "memo_id": memo_id, "reason": reason,
+        "exit_date": exit_date, "price": price,
+    }
+
+
 # Kind -> builder registry: the enforcement test walks this to prove every
 # POLICY kind has a builder and every builder's kind has been classified
 # (POLICY or AUDIT_ONLY). Register every new builder here.
@@ -632,4 +685,8 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_RESEARCH_MONITOR_ERROR: research_monitor_error_payload,
     KIND_BASELINE_QUOTE_FAILURE: baseline_quote_failure_payload,
     KIND_BASELINE_AUTO_WRITEOFF: baseline_auto_writeoff_payload,
+    KIND_RESEARCH_TRADE_RUN: research_trade_run_payload,
+    KIND_RESEARCH_TRADE_ERROR: research_trade_error_payload,
+    KIND_RESEARCH_POSITION_OPENED: research_position_opened_payload,
+    KIND_RESEARCH_POSITION_CLOSED: research_position_closed_payload,
 }

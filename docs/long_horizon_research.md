@@ -145,10 +145,10 @@ alongside post-earnings momentum).
 5. ✅ Thesis-type-aware memo pipeline (ops/research/brain.py; two-stage, deterministic orchestration) — debate prompts per sleeve
 6. ✅ Monitoring loop: mechanical falsifier checks + `due_for_resolution`
    scheduling, escalation to full re-analysis on trip or −30% drawdown
-7. Sizing layer on the existing guardrails engine (tier caps, sector ≤25%,
-   single name ≤10% at cost)
-8. Later: similar-situation embedding lookup over the resolved corpus;
-   quarterly calibration report (stated probabilities vs realized)
+7. ✅ Sizing layer on the existing guardrails engine (tier caps, sector ≤25%,
+   single name ≤10% at cost); trading step with memo-driven entries/exits
+   and third-ledger isolation (see docs/research_trading.md)
+8. 🟨 Quarterly calibration report (stated probabilities vs realized); embedding lookup over resolved corpus deferred until n≥30
 
 Two full years of paper trading before real money — not only to prove the
 strategy, but to build the human pattern recognition needed to spot when the

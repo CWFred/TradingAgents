@@ -36,6 +36,13 @@ def _default_baseline_journal_path() -> str:
     return os.path.join(os.path.expanduser(base), "tradingagents", "baseline_journal.sqlite")
 
 
+def _default_research_journal_path() -> str:
+    """Research (third ledger) paper portfolio journal — separate DB from the
+    baseline and trading journals."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(os.path.expanduser(base), "tradingagents", "research_journal.sqlite")
+
+
 def _default_screen_store_path() -> str:
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     return os.path.join(os.path.expanduser(base), "tradingagents", "research_screen.sqlite")
@@ -77,6 +84,8 @@ class OpsConfig:
     live_fill_gate_count: int = 20
     baseline_journal_path: str = field(default_factory=_default_baseline_journal_path)
     baseline_starting_cash: Decimal = Decimal("100000")
+    research_journal_path: str = field(default_factory=_default_research_journal_path)
+    research_starting_cash: Decimal = Decimal("100000")
     screen_store_path: str = field(default_factory=_default_screen_store_path)
     memo_store_path: str = field(default_factory=_default_memo_store_path)
     research_evidence_model: str = _DEFAULT_RESEARCH_MODEL
@@ -145,6 +154,10 @@ class OpsConfig:
         if self.baseline_starting_cash <= 0:
             raise ValueError(
                 f"baseline_starting_cash must be > 0, got {self.baseline_starting_cash}"
+            )
+        if self.research_starting_cash <= 0:
+            raise ValueError(
+                f"research_starting_cash must be > 0, got {self.research_starting_cash}"
             )
         from ops.research.models import parse_model_spec
 
@@ -230,6 +243,14 @@ def load_config() -> OpsConfig:
     baseline_starting_cash = _env_decimal("OPS_BASELINE_STARTING_CASH")
     if baseline_starting_cash is not None:
         kwargs["baseline_starting_cash"] = baseline_starting_cash
+
+    research_journal_path = os.environ.get("OPS_RESEARCH_JOURNAL_PATH")
+    if research_journal_path is not None:
+        kwargs["research_journal_path"] = research_journal_path
+
+    research_starting_cash = _env_decimal("OPS_RESEARCH_STARTING_CASH")
+    if research_starting_cash is not None:
+        kwargs["research_starting_cash"] = research_starting_cash
 
     screen_store_path = os.environ.get("OPS_SCREEN_STORE_PATH")
     if screen_store_path is not None:

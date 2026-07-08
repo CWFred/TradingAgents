@@ -183,6 +183,10 @@ SAMPLE_BUILDER_ARGS: dict[str, dict] = {
         ticker="TSLA", memo_id="memo-4", reason="conflicting_signals",
         hit_id=42,
     ),
+    events.KIND_RESEARCH_TRADE_RUN: dict(
+        asof="2026-07-03", entered=["AAPL", "MSFT"], exited=["GOOGL"],
+        skipped=["TSLA"], equity="50000.00", cash="12500.00",
+    ),
 }
 
 
@@ -317,5 +321,24 @@ def test_phase_c_monitoring_kinds_registered():
         events.KIND_CATALYST_DUE, events.KIND_RESEARCH_ESCALATION,
         events.KIND_RESEARCH_MONITOR_RUN, events.KIND_RESEARCH_MONITOR_ERROR,
         events.KIND_BASELINE_QUOTE_FAILURE, events.KIND_BASELINE_AUTO_WRITEOFF,
+    ):
+        assert kind in events.BUILDERS
+
+
+def test_phase_d_trading_kinds_registered():
+    from ops import events
+    from ops.notify.policy import POLICY
+
+    assert POLICY[events.KIND_RESEARCH_TRADE_RUN].urgency == "normal"
+    for kind in (
+        events.KIND_RESEARCH_TRADE_ERROR,
+        events.KIND_RESEARCH_POSITION_OPENED,
+        events.KIND_RESEARCH_POSITION_CLOSED,
+    ):
+        assert kind in events.AUDIT_ONLY
+        assert kind not in POLICY
+    for kind in (
+        events.KIND_RESEARCH_TRADE_RUN, events.KIND_RESEARCH_TRADE_ERROR,
+        events.KIND_RESEARCH_POSITION_OPENED, events.KIND_RESEARCH_POSITION_CLOSED,
     ):
         assert kind in events.BUILDERS

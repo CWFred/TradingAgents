@@ -379,6 +379,7 @@ def research_run(max_names: int, do_notify: bool = False) -> None:
                     outcome = research_hit(
                         hit, evidence_llm=evidence_llm, thesis_llm=thesis_llm,
                         memo_store=memo_store,
+                        thesis_model_spec=config.research_thesis_model,
                     )
                 except ResearchError:
                     raise  # configuration problem: abort the whole batch
@@ -475,6 +476,126 @@ def research_monitor() -> None:
     )
     for err in outcome.errors:
         click.echo(f"  error: {err}")
+
+
+@research.command("trade")
+def research_trade() -> None:
+    """Run the daily research-sleeve trade step once (mechanical entries/exits)."""
+    from datetime import date
+
+    from ops.journal import Journal
+    from ops.quotes import make_yfinance_quote_source
+    from ops.research.trading import trade_research_sleeve
+    from tradingagents.memos.store import MemoStore
+
+    config = load_config()
+    with Journal(config.journal_path) as journal:
+        from ops import events as ops_events
+
+        if journal.has_event_today(ops_events.KIND_RESEARCH_TRADE_RUN):
+            click.echo("note: a trade run was already recorded today; running again")
+        with Journal(config.research_journal_path) as research_journal:
+            outcome = trade_research_sleeve(
+                memo_store=MemoStore(config.memo_store_path),
+                research_journal=research_journal,
+                main_journal=journal,
+                quote_source=make_yfinance_quote_source(),
+                starting_cash=config.research_starting_cash,
+                asof=date.today(),
+            )
+    click.echo(
+        f"trade {outcome.asof}: entered {outcome.entered}, exited {outcome.exited}, "
+        f"{len(outcome.skipped)} skipped"
+    )
+    for s in outcome.skipped:
+        click.echo(f"  skipped: {s}")
+    for err in outcome.errors:
+        click.echo(f"  error: {err}")
+
+
+@research.command("resolve")
+@click.argument("memo_id")
+@click.option("--label", "outcome_label", required=True,
+              type=click.Choice([
+                  "thesis_right_made_money", "thesis_right_lost_money",
+                  "thesis_wrong_made_money", "thesis_wrong_lost_money",
+              ]),
+              help="Right/wrong process crossed with made/lost money — human judgment call.")
+@click.option("--narrative", required=True,
+              help="What actually happened, and whether the reasoning was sound.")
+@click.option("--exit-price", "exit_price", default=None, type=float,
+              help="Explicit exit price; overrides the sell-fill/current-close ladder.")
+def research_resolve(memo_id: str, outcome_label: str, narrative: str,
+                      exit_price: float | None) -> None:
+    """Resolve a memo: the arithmetic is computed, the human supplies only
+    the outcome label and the narrative."""
+    from ops.journal import Journal
+    from ops.research.resolution import ResolutionError, compute_resolution_numbers
+    from tradingagents.memos.schema import Resolution
+    from tradingagents.memos.store import MemoStore
+
+    config = load_config()
+    memo_store = MemoStore(config.memo_store_path)
+    memo = memo_store.get(memo_id)
+    if memo is None:
+        raise click.ClickException(f"no memo with id {memo_id!r}")
+    if memo.status == "resolved":
+        raise click.ClickException(f"memo {memo_id!r} is already resolved")
+
+    with Journal(config.research_journal_path) as research_journal:
+        try:
+            numbers = compute_resolution_numbers(
+                memo, research_journal=research_journal, exit_price=exit_price,
+            )
+        except ResolutionError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    resolution = Resolution(
+        **numbers, outcome_label=outcome_label,
+        falsifiers_tripped=[], catalysts_realized=[], narrative=narrative,
+    )
+    try:
+        resolved = memo_store.resolve(memo_id, resolution)
+    except (KeyError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"resolved {resolved.ticker} ({memo_id}): {outcome_label} — "
+        f"exit {numbers['exit_price']}, realized {numbers['realized_return_pct']:+.1%} "
+        f"vs benchmark {numbers['benchmark_return_pct']:+.1%} "
+        f"over {numbers['holding_days']}d"
+    )
+
+
+@research.command("report")
+@click.option("--output", "output_path", default=None,
+              type=click.Path(dir_okay=False),
+              help="Write the markdown report to this file instead of stdout.")
+def research_report(output_path: str | None) -> None:
+    """Quarterly calibration report: corpus stats, outcome 2x2, scenario
+    calibration, bought-vs-passed, sleeve-vs-baseline, per-model attribution.
+
+    Reads ONLY the memo store and the research/baseline journals — no
+    broker, no quotes — so it is safe to run any time (day one included)."""
+    from ops.research.report import build_report, format_report
+    from tradingagents.memos.store import MemoStore
+
+    config = load_config()
+    memo_store = MemoStore(config.memo_store_path)
+    with (
+        Journal(config.research_journal_path) as research_journal,
+        Journal(config.baseline_journal_path) as baseline_journal,
+    ):
+        report = build_report(
+            memo_store=memo_store, research_journal=research_journal,
+            baseline_journal=baseline_journal,
+        )
+    rendered = format_report(report)
+    if output_path is not None:
+        with open(output_path, "w") as f:
+            f.write(rendered + "\n")
+    else:
+        click.echo(rendered)
 
 
 @cli.command("decide-once")

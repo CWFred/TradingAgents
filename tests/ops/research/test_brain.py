@@ -225,6 +225,27 @@ def test_structured_output_unsupported_raises_research_error(memo_store):
         _run(NoStructured(), FakeLLM([]), memo_store)
 
 
+def test_authored_by_model_recorded(memo_store):
+    thesis_llm = FakeLLM(["bear case", _draft()])
+    outcome = research_hit(
+        _hit(), evidence_llm=_good_evidence_llm(), thesis_llm=thesis_llm,
+        memo_store=memo_store,
+        list_filings=lambda ticker, **kw: FILINGS,
+        fetch_text=lambda f, **kw: TEXTS[f.accession_number],
+        price_fetcher=_price_fetcher, today=TODAY,
+        thesis_model_spec="openai_compatible:deepseek-v4-flash@http://127.0.0.1:8000/v1",
+    )
+    assert outcome.status == "researched"
+    memo = memo_store.get(outcome.memo_id)
+    assert memo.authored_by_model == "openai_compatible:deepseek-v4-flash@http://127.0.0.1:8000/v1"
+
+
+def test_authored_by_model_defaults_empty(memo_store):
+    thesis_llm = FakeLLM(["bear case", _draft()])
+    outcome = _run(_good_evidence_llm(), thesis_llm, memo_store)
+    assert memo_store.get(outcome.memo_id).authored_by_model == ""
+
+
 def test_past_memos_feed_precedents(memo_store):
     # Seed a prior memo; the new draft may cite its id and validation passes.
     thesis_llm1 = FakeLLM(["bear", _draft()])

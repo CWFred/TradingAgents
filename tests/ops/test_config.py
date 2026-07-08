@@ -200,3 +200,24 @@ def test_research_model_env_overrides(monkeypatch):
 def test_malformed_research_model_rejected():
     with pytest.raises(ValueError):
         OpsConfig(research_thesis_model="not-a-spec")
+
+
+def test_research_journal_env_overrides(monkeypatch):
+    monkeypatch.setenv("OPS_RESEARCH_JOURNAL_PATH", "/tmp/research.sqlite")
+    monkeypatch.setenv("OPS_RESEARCH_STARTING_CASH", "50000")
+    config = load_config()
+    assert config.research_journal_path == "/tmp/research.sqlite"
+    assert config.research_starting_cash == Decimal("50000")
+
+
+def test_research_journal_defaults(monkeypatch):
+    monkeypatch.delenv("OPS_RESEARCH_JOURNAL_PATH", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", "/tmp/state")
+    config = load_config()
+    assert config.research_journal_path == "/tmp/state/tradingagents/research_journal.sqlite"
+    assert config.research_starting_cash == Decimal("100000")
+
+
+def test_nonpositive_research_cash_rejected():
+    with pytest.raises(ValueError):
+        OpsConfig(research_starting_cash=Decimal("0"))

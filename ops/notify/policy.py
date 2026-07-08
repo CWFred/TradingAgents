@@ -63,6 +63,8 @@ POLICY: dict[str, PolicyEntry] = {
     events.KIND_CATALYST_DUE: _PUSH_ONLY,
     # Research monitoring: critical issue detected by monitor, escalation needed.
     events.KIND_RESEARCH_ESCALATION: PolicyEntry(("push",), "high", None),
+    # Research sleeve trading: the user learns the sleeve traded (Phase D).
+    events.KIND_RESEARCH_TRADE_RUN: _PUSH_ONLY,
     # NOTE: audit-only kinds (events.AUDIT_ONLY — e.g.
     # journal_replay_orphan_sell, service_started) are intentionally
     # absent and must never be notified.
@@ -124,6 +126,13 @@ def render(kind: str, payload: dict) -> NotifyMessage:
     elif kind == events.KIND_RESEARCH_ESCALATION:
         title = f"Research escalation: {payload.get('ticker')}"
         body = f"Memo {payload.get('memo_id')}: {payload.get('reason')}"
+    elif kind == events.KIND_RESEARCH_TRADE_RUN:
+        entered = payload.get("entered", [])
+        exited = payload.get("exited", [])
+        title = "Research sleeve traded"
+        body = (f"Asof {payload.get('asof')}: entered {entered}; "
+                f"exited {exited}; equity ${payload.get('equity')}; "
+                f"cash ${payload.get('cash')}")
     else:
         title = _title(kind)
         body = _kv_body(payload) or kind
