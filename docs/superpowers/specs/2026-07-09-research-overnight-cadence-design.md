@@ -103,23 +103,24 @@ both the CLI and the overnight tick share it. New parameters:
 The existing `ops research run --max-names N` behavior is preserved for manual
 use (no deadline, name-capped).
 
-### 4. Per-symbol research TTL (7 days, configurable)
+### 4. Per-symbol research TTL (7 days, configurable) — keyed on last screened
 
-Enforced at **screen-enqueue** time. In `ScreenStore.record_run` (and
-`enqueue_hit`), in addition to the existing "skip already-pending" rule, skip any
-symbol that already has a **memo newer than `research_memo_ttl_days`** (default
-7). Implementation reads the memo store for the symbol's most recent memo date;
-`record_run` gains an injected predicate/callback so `ScreenStore` need not import
-`MemoStore` directly (keeps the store's dependency surface clean). This prevents
-the deterministic 3-day screen from re-queueing and re-researching names already
-studied this window. Complements — does not replace — the existing "one memo =
-one position lifecycle" trading dedup.
+Enforced at **screen-enqueue** time, entirely within `ScreenStore` (no
+`MemoStore` dependency). In `record_run` (and `enqueue_hit`), in addition to the
+existing "skip already-pending" rule, skip any symbol that already has **any
+`screen_hit` whose `created_at` is newer than `research_screen_ttl_days`**
+(default 7), regardless of that hit's status. This means a name screened in the
+last week is not re-queued — whether it produced a memo, is still pending, or
+*failed* research — which is exactly "don't reanalyze the same securities in the
+same week." A single indexed query on `screen_hits(symbol, created_at)`.
+Complements — does not replace — the existing "one memo = one position lifecycle"
+trading dedup.
 
 ### 5. Config (ops/config.py)
 
 - `research_screen_interval_days: int = 3`
 - `research_drain_deadline_hour: int = 8`  (local, America/New_York)
-- `research_memo_ttl_days: int = 7`
+- `research_screen_ttl_days: int = 7`  (skip symbols screened within this window)
 
 All env-overridable via the existing `_env_*` pattern, all validated (> 0;
 deadline hour in 0–23).
@@ -158,8 +159,8 @@ weekday 16:25 (existing)
 
 ## Testing
 
-- **TTL:** `record_run` with a symbol whose latest memo is 3 days old → skipped;
-  8 days old → enqueued; no memo → enqueued.
+- **TTL:** `record_run` with a symbol whose most recent `screen_hit` is 3 days
+  old → skipped (any status); 8 days old → enqueued; never screened → enqueued.
 - **3-day screen gate:** `last_run` None / 2 days / 3 days → screen runs on
   None and ≥3, skips at 2.
 - **Deadline drain:** fake clock past deadline after N names → stops between
