@@ -112,6 +112,8 @@ KIND_BASELINE_AUTO_WRITEOFF = "baseline_auto_writeoff"
 # --- Research sleeve trading (Phase D) ---
 KIND_RESEARCH_TRADE_RUN = "research_trade_run"
 KIND_RESEARCH_TRADE_ERROR = "research_trade_error"
+KIND_RESEARCH_DRAIN_RUN = "research_drain_run"
+KIND_RESEARCH_DRAIN_ERROR = "research_drain_error"
 KIND_RESEARCH_POSITION_OPENED = "research_position_opened"
 KIND_RESEARCH_POSITION_CLOSED = "research_position_closed"
 
@@ -171,6 +173,8 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_BASELINE_AUTO_WRITEOFF,
     # Research sleeve trading: audit trail of trades executed by research sleeve.
     KIND_RESEARCH_TRADE_ERROR,
+    KIND_RESEARCH_DRAIN_RUN,
+    KIND_RESEARCH_DRAIN_ERROR,
     KIND_RESEARCH_POSITION_OPENED,
     KIND_RESEARCH_POSITION_CLOSED,
     # Per-name momentum pipeline verdict: audit trail, not a push — the BUY
@@ -635,6 +639,25 @@ def research_trade_error_payload(*, error: str) -> dict[str, Any]:
     return {"error": error}
 
 
+def research_drain_run_payload(
+    *, asof: str, screened_this_run: bool, researched: int, failed: int,
+    still_pending: int, hit_deadline: bool,
+) -> dict[str, Any]:
+    """Overnight research drain summary: whether a screen refilled the queue
+    this run, how the drain resolved, and whether it stopped on the deadline
+    (rather than emptying the queue)."""
+    return {
+        "asof": asof, "screened_this_run": screened_this_run,
+        "researched": researched, "failed": failed,
+        "still_pending": still_pending, "hit_deadline": hit_deadline,
+    }
+
+
+def research_drain_error_payload(*, error: str) -> dict[str, Any]:
+    """Overnight drain aborted (screen or backend failure)."""
+    return {"error": error}
+
+
 def research_position_opened_payload(
     *, symbol: str, memo_id: str, conviction_tier: str, entry_date: str,
     client_order_id: str, notional: str,
@@ -743,6 +766,8 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_BASELINE_AUTO_WRITEOFF: baseline_auto_writeoff_payload,
     KIND_RESEARCH_TRADE_RUN: research_trade_run_payload,
     KIND_RESEARCH_TRADE_ERROR: research_trade_error_payload,
+    KIND_RESEARCH_DRAIN_RUN: research_drain_run_payload,
+    KIND_RESEARCH_DRAIN_ERROR: research_drain_error_payload,
     KIND_RESEARCH_POSITION_OPENED: research_position_opened_payload,
     KIND_RESEARCH_POSITION_CLOSED: research_position_closed_payload,
     KIND_ANALYSIS_DECISION: analysis_decision_payload,
