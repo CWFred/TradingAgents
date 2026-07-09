@@ -4,6 +4,11 @@ Phase B of docs/superpowers/specs/2026-07-06-finish-research-system-design.md.
 Turns pending screen hits (see docs/research_screener.md) into structured
 memos in the memo store. Local models only.
 
+> **Not sure how this relates to the momentum multi-agent graph?** See
+> `docs/research_pipelines.md` — two producers (this brain + the momentum
+> graph) on one shared spine, with the measured head-to-head that says why
+> they're kept separate.
+
 ## Configuration
 
 | Env | Default | Meaning |
