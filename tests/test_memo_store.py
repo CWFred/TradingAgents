@@ -226,6 +226,46 @@ def test_memo_without_authored_by_model_deserializes(tmp_path):
     assert loaded.authored_by_model == ""
 
 
+def test_memo_status_accepts_vetting_lifecycle_values():
+    """pending_vetting and rejected are valid memo statuses (graph-vetting funnel)."""
+    memo = _value_memo(status="pending_vetting")
+    assert memo.status == "pending_vetting"
+    memo2 = _value_memo(status="rejected")
+    assert memo2.status == "rejected"
+
+
+def test_vetting_result_round_trips_on_memo():
+    from tradingagents.memos.schema import VettingResult
+
+    vetting = VettingResult(
+        verdict="confirm", rating="Buy", conviction_before="starter",
+        conviction_after="high", added_falsifier_indices=[2, 3],
+        rationale="judge liked it", vetted_by_model="openai_compatible:ds4",
+    )
+    memo = _value_memo(vetting=vetting)
+    restored = Memo.model_validate_json(memo.model_dump_json())
+    assert restored.vetting is not None
+    assert restored.vetting.verdict == "confirm"
+    assert restored.vetting.rating == "Buy"
+    assert restored.vetting.conviction_before == "starter"
+    assert restored.vetting.conviction_after == "high"
+    assert restored.vetting.added_falsifier_indices == [2, 3]
+
+
+def test_vetting_result_reject_needs_no_conviction_after():
+    from tradingagents.memos.schema import VettingResult
+
+    vetting = VettingResult(
+        verdict="reject", rating="Hold", conviction_before="medium",
+        rationale="debate found the thesis weak",
+    )
+    assert vetting.conviction_after is None
+
+
+def test_memo_vetting_defaults_none():
+    assert _value_memo().vetting is None
+
+
 def test_default_memo_store_path_env_override(monkeypatch):
     from tradingagents.memos.store import default_memo_store_path
 

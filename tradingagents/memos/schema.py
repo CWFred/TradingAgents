@@ -41,7 +41,14 @@ from pydantic import BaseModel, Field
 
 ThesisType = Literal["value", "event"]
 ConvictionTier = Literal["starter", "medium", "high"]
-MemoStatus = Literal["open", "passed", "resolved"]
+# Lifecycle: the brain writes a buy thesis as ``pending_vetting``; the graph
+# vetting stage adjudicates it to ``open`` (tradeable) or ``rejected`` (never
+# traded, kept as corpus). ``passed`` = the brain itself declined to buy
+# (shadow-tracked). Only ``open`` memos trade — graph confirmation is a
+# required gate purely by construction.
+MemoStatus = Literal["pending_vetting", "open", "rejected", "passed", "resolved"]
+
+VettingVerdict = Literal["confirm", "reject"]
 
 # Right/wrong process crossed with good/bad outcome. The off-diagonal labels
 # are the ones that teach the most: "thesis_wrong_made_money" is luck, not
@@ -207,6 +214,39 @@ class Resolution(BaseModel):
     )
 
 
+class VettingResult(BaseModel):
+    """Provenance of the graph-vetting adjudication (funnel stage 2).
+
+    Report-time provenance only — never a sizing input (mirrors
+    ``authored_by_model``). ``rating`` is the graph's native 5-tier word
+    (Buy/Overweight/Hold/Underweight/Sell); the verdict/conviction mapping
+    from that rating lives in ``ops/research/vetting.py``, not here.
+    """
+
+    verdict: VettingVerdict
+    rating: str = Field(
+        description="The graph's native 5-tier rating word that drove the verdict."
+    )
+    conviction_before: ConvictionTier = Field(
+        description="The brain's conviction tier at vetting time."
+    )
+    conviction_after: ConvictionTier | None = Field(
+        default=None,
+        description="Graph-mapped conviction applied on confirm; None on reject.",
+    )
+    added_falsifier_indices: list[int] = Field(
+        default_factory=list,
+        description="Indices into Memo.falsifiers appended by the risk-debate extraction.",
+    )
+    rationale: str = Field(
+        default="", description="Short judge-decision summary explaining the verdict."
+    )
+    vetted_by_model: str = Field(
+        default="", description="Model spec of the graph that vetted this memo."
+    )
+    vetted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class Memo(BaseModel):
     """A structured investment memo — the unit of research output and of learning."""
 
@@ -253,6 +293,14 @@ class Memo(BaseModel):
             "Model spec (provider:model[@base_url]) of the thesis stage that "
             "authored this memo; empty for memos predating attribution. "
             "Report-time attribution only — never a sizing or monitoring input."
+        ),
+    )
+
+    vetting: VettingResult | None = Field(
+        default=None,
+        description=(
+            "Graph-vetting adjudication provenance; None for memos that have "
+            "not been vetted (including pre-funnel memos). Never a sizing input."
         ),
     )
 
