@@ -809,6 +809,275 @@ def test_overnight_tick_records_error_event_not_raises(monkeypatch, tmp_path):
         assert journal.has_event_today(main_mod.events.KIND_RESEARCH_DRAIN_ERROR)
 
 
+class _FakeBackend:
+    """Managed-backend double with ensure_up/shutdown counters, shared across
+    the tick via a build_managed_backend monkeypatch that returns one instance."""
+
+    def __init__(self):
+        self.ensure_up_calls = 0
+        self.shutdown_calls = 0
+
+    def ensure_up(self):
+        self.ensure_up_calls += 1
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+
+
+def _pending_vetting_memo(ticker="ACME"):
+    """A minimal brain-buy memo in the pending_vetting state, mirroring the
+    fixture in tests/ops/research/test_vetting.py."""
+    from datetime import date
+
+    from tradingagents.memos.schema import (
+        EvidenceItem, Falsifier, Memo, ValueThesis,
+    )
+
+    return Memo(
+        ticker=ticker, as_of_date=date(2026, 7, 1), thesis_type="value",
+        thesis="cheap for a fixable reason",
+        evidence=[EvidenceItem(claim="c", source_type="filing", source_ref="0001:mdna")],
+        value_block=ValueThesis(
+            why_cheap="segment decline", change_trigger="new CEO",
+            normalized_earnings_view="2x", quality_assessment="net cash",
+        ),
+        conviction_tier="starter", entry_price_ref=10.0,
+        price_target_low=15.0, price_target_high=20.0,
+        expected_holding_months=12, must_be_true=["m"],
+        falsifiers=[Falsifier(description="margin collapse",
+                              check_type="fundamental", metric="gross_margin_pct",
+                              operator="<", threshold=30.0)],
+        status="pending_vetting",
+    )
+
+
+def test_overnight_tick_vets_after_drain_and_records_event(monkeypatch, tmp_path):
+    """Vetting runs after the drain, inside the same backend bracket, with the
+    same deadline, and records research_vetting_run."""
+    import ops.main as main_mod
+    from datetime import date as _date
+    from ops.config import load_config
+    from ops.research.drain import DrainSummary
+    from ops.research.store import ScreenStore
+    from ops.research.vetting import VettingSummary
+    from tradingagents.memos.store import MemoStore
+
+    monkeypatch.setenv("OPS_JOURNAL_PATH", str(tmp_path / "j.sqlite"))
+    monkeypatch.setenv("OPS_SCREEN_STORE_PATH", str(tmp_path / "screen.sqlite"))
+    monkeypatch.setenv("OPS_MEMO_STORE_PATH", str(tmp_path / "memos.sqlite"))
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "T t@e.com")
+    monkeypatch.setattr("ops.research.models.build_stage_llm", lambda s: f"llm:{s}")
+
+    backend = _FakeBackend()
+    monkeypatch.setattr(main_mod, "build_managed_backend", lambda c: backend)
+
+    # Seed the vetting queue with one pending_vetting memo.
+    MemoStore(str(tmp_path / "memos.sqlite")).save(_pending_vetting_memo())
+
+    def _fake_screen(**kw):
+        ScreenStore(str(tmp_path / "screen.sqlite")).enqueue_hit(
+            "AAPL", asof=_date.today(), payload={"symbol": "AAPL"}, source="screen",
+        )
+
+    monkeypatch.setattr("ops.research.run.run_screen", _fake_screen)
+
+    drain_kw = {}
+
+    def _fake_drain(**kw):
+        drain_kw.update(kw)
+        return DrainSummary(3, 0, 0, False)
+
+    monkeypatch.setattr("ops.research.drain.drain_pending", _fake_drain)
+
+    sentinel_adapter = object()
+    vet_kw = {}
+
+    def _fake_vet(**kw):
+        vet_kw.update(kw)
+        return VettingSummary(vetted=1, confirmed=1, rejected=0, failed=0,
+                              still_pending=0, hit_deadline=False)
+
+    monkeypatch.setattr("ops.research.vetting.vet_pending", _fake_vet)
+
+    config = load_config()
+    with Journal(str(tmp_path / "j.sqlite")) as journal:
+        main_mod._research_overnight_tick(
+            journal, config,
+            vet_adapter_factory=lambda backend: sentinel_adapter,
+        )
+
+        # vet_pending got the drain's deadline and the sentinel adapter.
+        assert vet_kw["adapter"] is sentinel_adapter
+        assert vet_kw["deadline"] == drain_kw["deadline"]
+
+        assert journal.has_event_today(main_mod.events.KIND_RESEARCH_DRAIN_RUN)
+        assert journal.has_event_today(main_mod.events.KIND_RESEARCH_VETTING_RUN)
+
+        # ONE managed-backend bracket for both stages.
+        assert backend.shutdown_calls == 1
+
+
+def test_overnight_tick_vet_only_night_runs_vetting_without_drain(monkeypatch, tmp_path):
+    """Empty screen queue + non-empty vetting queue: the drain records its
+    zero event and vetting still runs (a backlog night)."""
+    import ops.main as main_mod
+    from datetime import date
+    from ops.config import load_config
+    from ops.research.store import ScreenStore
+    from ops.research.vetting import VettingSummary
+    from tradingagents.memos.store import MemoStore
+
+    monkeypatch.setenv("OPS_JOURNAL_PATH", str(tmp_path / "j.sqlite"))
+    monkeypatch.setenv("OPS_SCREEN_STORE_PATH", str(tmp_path / "screen.sqlite"))
+    monkeypatch.setenv("OPS_MEMO_STORE_PATH", str(tmp_path / "memos.sqlite"))
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "T t@e.com")
+    monkeypatch.setattr("ops.research.models.build_stage_llm", lambda s: f"llm:{s}")
+
+    backend = _FakeBackend()
+    monkeypatch.setattr(main_mod, "build_managed_backend", lambda c: backend)
+
+    # Recent screen -> not due; no pending hits -> empty screen queue.
+    store = ScreenStore(str(tmp_path / "screen.sqlite"))
+    store.record_run(asof=date.today(), universe_size=0, results=[])
+    assert store.pending_hits() == []
+
+    # Non-empty vetting queue.
+    MemoStore(str(tmp_path / "memos.sqlite")).save(_pending_vetting_memo())
+
+    seen = []
+    monkeypatch.setattr("ops.research.run.run_screen",
+                        lambda **kw: seen.append("screen"))
+    monkeypatch.setattr("ops.research.drain.drain_pending",
+                        lambda **kw: seen.append("drain"))
+
+    def _fake_vet(**kw):
+        seen.append("vet")
+        return VettingSummary(vetted=1, confirmed=0, rejected=1, failed=0,
+                              still_pending=0, hit_deadline=False)
+
+    monkeypatch.setattr("ops.research.vetting.vet_pending", _fake_vet)
+
+    config = load_config()
+    with Journal(str(tmp_path / "j.sqlite")) as journal:
+        main_mod._research_overnight_tick(
+            journal, config, vet_adapter_factory=lambda backend: object(),
+        )
+
+        assert seen == ["vet"]  # no screen, no drain — vet-only backlog night
+        drain_events = [
+            e for e in journal.read_events()
+            if e["kind"] == main_mod.events.KIND_RESEARCH_DRAIN_RUN
+        ]
+        assert len(drain_events) == 1
+        assert drain_events[0]["payload"]["researched"] == 0
+        assert drain_events[0]["payload"]["still_pending"] == 0
+        assert journal.has_event_today(main_mod.events.KIND_RESEARCH_VETTING_RUN)
+
+
+def test_overnight_tick_both_queues_empty_skips_backend(monkeypatch, tmp_path):
+    """Extends the empty-queue-skips-backend guarantee to the vetting queue:
+    ds4 must not spin when BOTH queues are empty."""
+    import ops.main as main_mod
+    from datetime import date
+    from ops.config import load_config
+    from ops.research.store import ScreenStore
+
+    monkeypatch.setenv("OPS_JOURNAL_PATH", str(tmp_path / "j.sqlite"))
+    monkeypatch.setenv("OPS_SCREEN_STORE_PATH", str(tmp_path / "screen.sqlite"))
+    monkeypatch.setenv("OPS_MEMO_STORE_PATH", str(tmp_path / "memos.sqlite"))
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "T t@e.com")
+
+    def _no_backend(c):
+        raise AssertionError("ds4 backend must not be built when both queues are empty")
+
+    monkeypatch.setattr(main_mod, "build_managed_backend", _no_backend)
+
+    def _no_vet(**kw):
+        raise AssertionError("vet_pending must not run when the vetting queue is empty")
+
+    monkeypatch.setattr("ops.research.vetting.vet_pending", _no_vet)
+
+    # Recent screen -> not due; no pending hits; memo store left empty.
+    store = ScreenStore(str(tmp_path / "screen.sqlite"))
+    store.record_run(asof=date.today(), universe_size=0, results=[])
+    assert store.pending_hits() == []
+
+    config = load_config()
+    with Journal(str(tmp_path / "j.sqlite")) as journal:
+        main_mod._research_overnight_tick(journal, config)
+
+        drain_events = [
+            e for e in journal.read_events()
+            if e["kind"] == main_mod.events.KIND_RESEARCH_DRAIN_RUN
+        ]
+        assert len(drain_events) == 1
+        assert drain_events[0]["payload"]["researched"] == 0
+        vetting_events = [
+            e for e in journal.read_events()
+            if e["kind"] == main_mod.events.KIND_RESEARCH_VETTING_RUN
+        ]
+        assert vetting_events == []
+        error_events = [
+            e for e in journal.read_events()
+            if e["kind"] == main_mod.events.KIND_RESEARCH_DRAIN_ERROR
+        ]
+        assert error_events == []
+
+
+def test_overnight_tick_vetting_error_recorded_not_raised(monkeypatch, tmp_path):
+    """A vetting-stage failure records research_vetting_error, keeps the
+    drain's success event, and still shuts the backend down."""
+    import ops.main as main_mod
+    from datetime import date as _date
+    from ops.config import load_config
+    from ops.research.drain import DrainSummary
+    from ops.research.store import ScreenStore
+    from tradingagents.memos.store import MemoStore
+
+    monkeypatch.setenv("OPS_JOURNAL_PATH", str(tmp_path / "j.sqlite"))
+    monkeypatch.setenv("OPS_SCREEN_STORE_PATH", str(tmp_path / "screen.sqlite"))
+    monkeypatch.setenv("OPS_MEMO_STORE_PATH", str(tmp_path / "memos.sqlite"))
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "T t@e.com")
+    monkeypatch.setattr("ops.research.models.build_stage_llm", lambda s: f"llm:{s}")
+
+    backend = _FakeBackend()
+    monkeypatch.setattr(main_mod, "build_managed_backend", lambda c: backend)
+
+    MemoStore(str(tmp_path / "memos.sqlite")).save(_pending_vetting_memo())
+
+    def _fake_screen(**kw):
+        ScreenStore(str(tmp_path / "screen.sqlite")).enqueue_hit(
+            "AAPL", asof=_date.today(), payload={"symbol": "AAPL"}, source="screen",
+        )
+
+    monkeypatch.setattr("ops.research.run.run_screen", _fake_screen)
+    monkeypatch.setattr("ops.research.drain.drain_pending",
+                        lambda **kw: DrainSummary(3, 0, 0, False))
+    monkeypatch.setattr("ops.research.vetting.vet_pending",
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError("kaboom")))
+
+    config = load_config()
+    with Journal(str(tmp_path / "j.sqlite")) as journal:
+        # Must not raise.
+        main_mod._research_overnight_tick(
+            journal, config, vet_adapter_factory=lambda backend: object(),
+        )
+
+        # Drain's success event survives.
+        assert journal.has_event_today(main_mod.events.KIND_RESEARCH_DRAIN_RUN)
+        # Vetting error is recorded, not raised.
+        vetting_errors = [
+            e for e in journal.read_events()
+            if e["kind"] == main_mod.events.KIND_RESEARCH_VETTING_ERROR
+        ]
+        assert len(vetting_errors) == 1
+        assert vetting_errors[0]["payload"]["error"] == "RuntimeError: kaboom"
+        # No successful vetting event.
+        assert not journal.has_event_today(main_mod.events.KIND_RESEARCH_VETTING_RUN)
+        # Backend still torn down.
+        assert backend.shutdown_calls == 1
+
+
 def test_full_scheduler_registers_overnight_job():
     """Mirrors test_research_trade_job_registered_and_gated — a MagicMock
     journal/config is enough to verify registration without touching the
