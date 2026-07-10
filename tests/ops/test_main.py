@@ -1095,3 +1095,34 @@ def test_full_scheduler_registers_overnight_job():
         assert job is not None
     finally:
         sched.shutdown(wait=False)
+
+
+def test_full_scheduler_registers_gc_reap_job():
+    """The hourly GC pass reaps per-thread library state stranded by dead
+    tool-executor threads (yfinance's peewee tz-cache connection and
+    curl_cffi session hold fds until a gen-2 collection). Without it the
+    daemon accumulates fds toward errno 24 during market-hours analyses
+    (observed live 2026-07-09/10)."""
+    from unittest.mock import MagicMock
+    from ops.main import _start_full_scheduler
+
+    sched = _start_full_scheduler(
+        MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+        config=MagicMock(),
+    )
+    try:
+        job = sched.get_job("gc_reap")
+        assert job is not None
+    finally:
+        sched.shutdown(wait=False)
+
+
+def test_gc_reap_tick_runs_a_full_collection(monkeypatch):
+    import gc
+
+    from ops import main as main_mod
+
+    calls = []
+    monkeypatch.setattr(gc, "collect", lambda: calls.append(True) or 0)
+    main_mod._gc_reap_tick()
+    assert calls == [True]

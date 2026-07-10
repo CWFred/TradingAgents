@@ -765,6 +765,11 @@ def _start_full_scheduler(
             CronTrigger(hour=18, minute=0, day_of_week="sat"),
             id="daily_overview_saturday", max_instances=1, misfire_grace_time=600,
         )
+    sched.add_job(
+        _gc_reap_tick,
+        IntervalTrigger(minutes=60),
+        id="gc_reap", max_instances=1, misfire_grace_time=300,
+    )
     if heartbeat_job is not None:
         sched.add_job(
             heartbeat_job,
@@ -773,6 +778,26 @@ def _start_full_scheduler(
         )
     sched.start()
     return sched
+
+
+def _gc_reap_tick() -> None:
+    """Hourly full GC pass: reap per-thread library state stranded by dead
+    worker threads.
+
+    LangChain's ToolNode runs each analysis's parallel tool batches on
+    short-lived executor threads, and yfinance keeps per-thread state in
+    thread-locals — a peewee sqlite connection to its tz cache (two fds)
+    plus curl_cffi session connections (CLOSE_WAIT sockets once Yahoo
+    idle-closes them). When those threads die the state is unreachable but
+    holds its fds until a generation-2 collection, and a long-lived, mostly
+    idle daemon reaches gen-2 too rarely on its own: observed live as
+    errno-24 fd exhaustion after ~6h of market-hours analyses
+    (2026-07-09/10, ~+45 fds per analyzed name). A full collect in an idle
+    process costs milliseconds; the raised plist NumberOfFiles limit stays
+    as defense-in-depth."""
+    import gc
+
+    gc.collect()
 
 
 def _start_guardian_only(
