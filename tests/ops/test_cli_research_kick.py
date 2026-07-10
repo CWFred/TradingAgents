@@ -12,6 +12,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("OPS_SCREEN_STORE_PATH", str(tmp_path / "screen.sqlite"))
     monkeypatch.setenv("OPS_MEMO_STORE_PATH", str(tmp_path / "memos.sqlite"))
     monkeypatch.setenv("OPS_RESEARCH_JOURNAL_PATH", str(tmp_path / "rj.sqlite"))
+    monkeypatch.setenv("OPS_JOURNAL_PATH", str(tmp_path / "journal.sqlite"))
     monkeypatch.delenv("OPS_LLM_MANAGED_BACKEND", raising=False)
     monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "Test Suite test@example.com")
     monkeypatch.setattr("ops.research.models.build_stage_llm", lambda spec: f"llm:{spec}")
@@ -35,8 +36,7 @@ def test_kick_runs_screen_drain_trade_in_order(env, monkeypatch):
     class _NoBackend:
         def ensure_up(self): pass
         def shutdown(self): pass
-    monkeypatch.setattr("ops.cli.build_managed_backend", lambda cfg: _NoBackend(),
-                        raising=False)
+    monkeypatch.setattr("ops.llm_backend.build_managed_backend", lambda cfg: _NoBackend())
 
     runner = CliRunner()
     result = runner.invoke(cli_mod.cli, ["research", "kick"])
