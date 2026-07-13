@@ -86,11 +86,11 @@ short journal only.
 - **Replay.** `from_journal` replays SHORT/COVER fills symmetrically to
   BUY/SELL (same notional-from-order-row discipline, same orphan-event
   journaling for a COVER with no prior SHORT).
-- **Stops invert.** A short's stop sits *above* entry. `Order.stop_pct`
-  requires a negative value (long convention), so the short broker takes
-  `stop_pct` as a positive entry-relative value on SHORT orders and
-  resolves it at fill time (e.g. `+0.25` → cover if price rises 25% above
-  fill). Validation moves from `Order.__post_init__` to a side-aware check.
+- **Stops invert — and live in the trade step, not the broker.** A short's
+  stop sits *above* entry. Like the research sleeve (whose orders never set
+  `stop_pct`; sell rules are memo-driven), the short sleeve enforces its
+  hard stop in the trade step from the position's average entry price.
+  `Order.stop_pct` stays long-only; SHORT/COVER orders reject it.
 - **Unrealized P&L** for a short position: `(avg_entry − current) /
   avg_entry` (sign-flipped from long).
 
@@ -107,10 +107,13 @@ trigger** — the mirror of "cheap AND change trigger". Bars (tunable
 constants in `ops/research/short_screen.py`):
 
 - EV/EBIT > 20× or EBIT ≤ 0 with market cap > $500M
-- FCF yield < 2% (or negative)
-- debt/EBITDA > 4×
+- net debt/EBITDA > 4×
 - gross margin declining ≥ 3pp year-over-year
 - pass = expensive/deteriorating on ≥ 2 bars
+
+(All three computable from the `Fundamentals` fields the long screen and
+metrics registry already use; an FCF-yield bar can be added later if the
+fundamentals layer grows an FCF series.)
 
 Red-flag triggers (≥ 1 required, 90-day lookback):
 
@@ -244,7 +247,10 @@ the existing `Memo` schema with `thesis_type="event"`,
 **insider memo store**, status `open`, `vetting=None`. Evidence cites the
 Form 4 accessions; falsifiers restate the mechanical exits. The memo NEVER
 gates the trade — if authoring fails, the trade stands and an error event
-is journaled. At exit the memo is resolved mechanically (realized vs
+is journaled. Timing: the trade fills at the post-close tick, but the memo
+is authored the following night *inside the shared overnight window* — ds4
+must never be spun up outside that bracket (it is the sole guard against
+two models holding ds4 at once). At exit the memo is resolved mechanically (realized vs
 benchmark over the window, outcome label). This is what feeds the corpus at
 high speed and lets calibration reporting later compare LLM-authored
 conviction against a sleeve where conviction was never consulted.
@@ -255,9 +261,10 @@ conviction against a sleeve where conviction was never consulted.
 
 New `OpsConfig` fields, each with `OPS_*` env override, validated > 0 where
 money: `short_journal_path`, `short_memo_store_path`,
-`short_starting_cash` (default $10,000), `insider_journal_path`,
-`insider_memo_store_path`, `insider_signal_store_path`,
-`insider_starting_cash` (default $10,000).
+`short_screen_store_path` (the short screen keeps its own pending-hits
+queue, same isolation logic as the memo stores), `short_starting_cash`
+(default $10,000), `insider_journal_path`, `insider_memo_store_path`,
+`insider_signal_store_path`, `insider_starting_cash` (default $10,000).
 
 ## Measurement
 
