@@ -50,6 +50,10 @@ from tradingagents.memos.schema import (
 # "Overweight" (spec default is the two-row table).
 CONFIRM_TIERS: dict[str, ConvictionTier] = {"Buy": "high", "Overweight": "medium"}
 
+# Inverted map for the short sleeve: the graph rates the STOCK (its brief is
+# neutral, no prompt changes) — a bearish rating is what confirms a short.
+SHORT_CONFIRM_TIERS: dict[str, ConvictionTier] = {"Sell": "high", "Underweight": "medium"}
+
 MAX_DEBATE_CHARS = 12000
 MAX_RATIONALE_CHARS = 2000
 
@@ -149,13 +153,18 @@ def extract_risk_falsifiers(
 
 def vet_memo(
     memo: Memo, *, adapter, falsifier_llm, memo_store, vetted_by_model: str = "",
+    confirm_tiers: dict[str, ConvictionTier] = CONFIRM_TIERS,
 ) -> VetOutcome:
-    """Run the graph over one memo and persist the adjudication."""
+    """Run the graph over one memo and persist the adjudication.
+
+    ``confirm_tiers`` selects the rating->tier map: the default long map, or
+    SHORT_CONFIRM_TIERS when adjudicating short memos.
+    """
     brief = build_research_brief(memo)
     result = adapter.propagate(memo.ticker, memo.as_of_date, research_context=brief)
     rating = (result.rating or "").strip()
     rationale = str(result.raw.get("final_trade_decision", ""))[:MAX_RATIONALE_CHARS]
-    tier = CONFIRM_TIERS.get(rating)
+    tier = confirm_tiers.get(rating)
     outcome = VetOutcome(
         ticker=memo.ticker, memo_id=memo.memo_id, verdict="reject", rating=rating,
     )
@@ -203,6 +212,7 @@ def vet_pending(
     should_stop: Callable[[], bool] | None = None,
     now: Callable[[], datetime] = _utcnow,
     echo: Callable[[str], None] = lambda msg: None,
+    confirm_tiers: dict[str, ConvictionTier] = CONFIRM_TIERS,
 ) -> VettingSummary:
     """Vet the pending_vetting queue oldest-first until deadline/stop/empty."""
     memos = memo_store.pending_vetting_memos()
@@ -218,6 +228,7 @@ def vet_pending(
             outcome = vet_memo(
                 memo, adapter=adapter, falsifier_llm=falsifier_llm,
                 memo_store=memo_store, vetted_by_model=vetted_by_model,
+                confirm_tiers=confirm_tiers,
             )
         except Exception as exc:  # noqa: BLE001 - one bad name must not strand the queue
             failed += 1

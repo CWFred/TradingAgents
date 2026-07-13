@@ -6,8 +6,8 @@ import pytest
 
 from ops.pipeline_adapter import StubPipelineAdapter
 from ops.research.vetting import (
-    CONFIRM_TIERS, FalsifierBatch, VettingSummary, extract_risk_falsifiers,
-    vet_memo, vet_pending,
+    CONFIRM_TIERS, SHORT_CONFIRM_TIERS, FalsifierBatch, VettingSummary,
+    extract_risk_falsifiers, vet_memo, vet_pending,
 )
 from tradingagents.memos.schema import EvidenceItem, Falsifier, Memo, ValueThesis
 from tradingagents.memos.store import MemoStore
@@ -100,6 +100,34 @@ def test_confirm_promotes_with_mapped_conviction(store, rating, tier):
     assert got.vetting.conviction_before == "starter"
     assert got.vetting.conviction_after == tier
     assert got.vetting.vetted_by_model == "graph:ds4"
+
+
+def test_short_confirm_map_is_the_spec_table():
+    assert SHORT_CONFIRM_TIERS == {"Sell": "high", "Underweight": "medium"}
+
+
+@pytest.mark.parametrize("rating,tier", [("Sell", "high"), ("Underweight", "medium")])
+def test_inverted_map_confirms_a_short_on_bearish_ratings(store, rating, tier):
+    memo = _memo()
+    store.save(memo)
+    adapter = StubPipelineAdapter(ratings={"ACME": rating})
+    outcome = vet_memo(memo, adapter=adapter, falsifier_llm=NoFalsifierLLM(),
+                       memo_store=store, confirm_tiers=SHORT_CONFIRM_TIERS)
+    assert outcome.verdict == "confirm"
+    got = store.get(memo.memo_id)
+    assert got.status == "open"
+    assert got.conviction_tier == tier
+
+
+@pytest.mark.parametrize("rating", ["Buy", "Overweight", "Hold", ""])
+def test_inverted_map_rejects_bullish_ratings(store, rating):
+    memo = _memo()
+    store.save(memo)
+    adapter = StubPipelineAdapter(ratings={"ACME": rating})
+    outcome = vet_memo(memo, adapter=adapter, falsifier_llm=NoFalsifierLLM(),
+                       memo_store=store, confirm_tiers=SHORT_CONFIRM_TIERS)
+    assert outcome.verdict == "reject"
+    assert store.get(memo.memo_id).status == "rejected"
 
 
 @pytest.mark.parametrize("rating", ["Hold", "Underweight", "Sell", "", "garbage"])
