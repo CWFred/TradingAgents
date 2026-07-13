@@ -64,6 +64,46 @@ function ageLabel(seconds) {
   return Math.round(s / 3600) + "h";
 }
 
+// ---- display formatting for Decimal strings ---------------------------------
+// Money/qty arrive as full-precision Decimal strings. Display-rounding is done
+// by string surgery (never parseFloat): a float round-trip could misrepresent
+// the books; trimming digits for the eye cannot.
+
+function roundDecStr(s, dp) {
+  s = String(s);
+  const neg = s.startsWith("-") || s.startsWith("−");
+  if (neg) s = s.slice(1);
+  if (!/^\d+(\.\d*)?$/.test(s)) return null;   // non-numeric: caller shows raw
+  let [i, f = ""] = s.split(".");
+  if (f.length <= dp) return { neg: neg, i: i, f: f.padEnd(dp, "0") };
+  // Round half-up at the cut, carrying through the integer part if needed.
+  const digits = (i + f.slice(0, dp)).split("");
+  if (f.charCodeAt(dp) >= 53 /* '5' */) {
+    let k = digits.length - 1;
+    while (k >= 0 && digits[k] === "9") { digits[k] = "0"; k--; }
+    if (k < 0) digits.unshift("1"); else digits[k] = String(+digits[k] + 1);
+  }
+  const all = digits.join("");
+  const cut = all.length - dp;
+  return { neg: neg, i: all.slice(0, cut).replace(/^0+(?=\d)/, ""), f: all.slice(cut) };
+}
+
+function fmtMoney(s) {
+  if (s == null) return "—";
+  const r = roundDecStr(s, 2);
+  if (!r) return String(s);
+  const grouped = r.i.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return (r.neg ? "−$" : "$") + grouped + "." + r.f;
+}
+
+function fmtQty(s) {
+  if (s == null) return "—";
+  const r = roundDecStr(s, 4);
+  if (!r) return String(s);
+  const f = r.f.replace(/0+$/, "");
+  return (r.neg ? "−" : "") + r.i + (f ? "." + f : "");
+}
+
 // ---- fetch + polling loop --------------------------------------------------
 
 async function fetchJSON(url) {
@@ -220,14 +260,18 @@ function sleeveCard(name, s) {
     card.appendChild(el("div", { class: "chip", text: "unavailable: " + s.error }));
     return card;
   }
-  // req 8: equity is a money string — display exactly as received.
-  card.appendChild(el("div", { class: "sleeve-equity num", text: s.equity == null ? "—" : s.equity }));
+  // Equity display-rounds to cents (string surgery, no float); the raw
+  // full-precision figure stays one hover away in the tooltip.
+  const eq = el("div", { class: "sleeve-equity num", text: fmtMoney(s.equity) });
+  if (s.equity != null) eq.setAttribute("title", s.equity);
+  card.appendChild(eq);
 
   const row = el("div", { class: "sleeve-row" });
   row.appendChild(pnlSpan(s.day_pnl_pct));
   const spark = sparkline(s.series);
   if (spark) row.appendChild(spark);
   card.appendChild(row);
+  card.appendChild(el("div", { class: "sleeve-cash muted num", text: "cash " + fmtMoney(s.cash) }));
   return card;
 }
 
@@ -274,21 +318,48 @@ function sparkline(series) {
   return svg;
 }
 
+// Positions live in one small expandable panel per sleeve. The DOM is rebuilt
+// every poll, so each <details>' open state must survive in posOpen, not in
+// the elements themselves.
+const posOpen = { momentum: false, research: false, baseline: false };
+
 function renderPositions(node, sleeves, names) {
-  const rows = [];
+  clear(node);
   for (const name of names) {
     const s = sleeves[name];
-    if (isError(s)) continue;
-    for (const p of s.positions || []) rows.push([name, p.symbol, p.quantity, p.entry, p.stop]);
+    const details = el("details", { class: "pos-group" });
+    details.open = !!posOpen[name];
+    details.addEventListener("toggle", () => { posOpen[name] = details.open; });
+
+    const summary = el("summary");
+    summary.appendChild(el("span", { class: "pos-name", text: name }));
+    details.appendChild(summary);
+
+    if (isError(s)) {
+      summary.appendChild(el("span", { class: "pos-count chip", text: "unavailable" }));
+      node.appendChild(details);
+      continue;
+    }
+    const positions = s.positions || [];
+    summary.appendChild(el("span", {
+      class: "pos-count num",
+      text: positions.length + (positions.length === 1 ? " position" : " positions"),
+    }));
+
+    const body = el("div", { class: "pos-body scroll-x" });
+    if (positions.length === 0) {
+      body.appendChild(el("span", { class: "chip", text: "no open positions" }));
+    } else {
+      const rows = positions.map((p) => [
+        p.symbol, fmtQty(p.quantity), fmtMoney(p.entry),
+        p.stop == null ? null : fmtMoney(p.stop),
+      ]);
+      body.appendChild(simpleTable(["symbol", "qty", "entry", "stop"], rows,
+        { 1: true, 2: true, 3: true }));
+    }
+    details.appendChild(body);
+    node.appendChild(details);
   }
-  if (rows.length === 0) return chip(node, "no open positions");
-  const table = simpleTable(
-    ["sleeve", "symbol", "qty", "entry", "stop"],
-    rows,
-    { 2: true, 3: true, 4: true }        // right-align numeric columns
-  );
-  clear(node);
-  node.appendChild(table);
 }
 
 function renderFills(node, sleeves, names) {
@@ -297,7 +368,7 @@ function renderFills(node, sleeves, names) {
     const s = sleeves[name];
     if (isError(s)) continue;
     for (const f of s.fills_today || []) {
-      rows.push([fmtTime(f.filled_at), name, f.side, f.symbol, f.quantity, f.price]);
+      rows.push([fmtTime(f.filled_at), name, f.side, f.symbol, fmtQty(f.quantity), fmtMoney(f.price)]);
     }
   }
   if (rows.length === 0) return chip(node, "no fills today");

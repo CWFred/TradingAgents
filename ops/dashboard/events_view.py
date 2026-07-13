@@ -11,6 +11,7 @@ import json
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 from ops.dashboard.snapshot import ro_conn
@@ -18,13 +19,32 @@ from ops.dashboard.snapshot import ro_conn
 _MAX_FALLBACK = 200
 
 
+def _dec_display(v: Any, dp: int, *, strip: bool) -> str:
+    """Display-trim a Decimal-ish value to dp places (half-up). Journal
+    quantities carry full paper-fill precision (25+ digits); the feed is for
+    eyes, not accounting. Non-numeric input falls back to str(v) — rendering
+    must never raise."""
+    try:
+        d = Decimal(str(v)).quantize(Decimal(1).scaleb(-dp), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return str(v)
+    s = format(d, "f")
+    if strip and "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s
+
+
+def _fmt_qty(v: Any) -> str:
+    return _dec_display(v, 4, strip=True) if v is not None else "?"
+
+
 def _fmt_money(v: Any) -> str:
-    return f"${v}" if v is not None else "$?"
+    return f"${_dec_display(v, 2, strip=False)}" if v is not None else "$?"
 
 
 _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "fill": lambda p: (
-        f"{str(p.get('side', '?')).upper()} {p.get('quantity', '?')} "
+        f"{str(p.get('side', '?')).upper()} {_fmt_qty(p.get('quantity', '?'))} "
         f"{p.get('symbol', '?')} @ {_fmt_money(p.get('price'))}"),
     "order_rejected": lambda p: (
         f"Order rejected: {p.get('symbol', '?')} — "

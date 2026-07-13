@@ -168,6 +168,43 @@ td.n, th.n { text-align: right; }
 .pnl.flat  { color: var(--muted); }
 .spark { display: block; }
 
+.sleeve-cash { font-size: 12px; margin-top: 6px; }
+
+/* --- per-sleeve position groups: small panels, expand for the table --- */
+.pos-groups { display: flex; flex-direction: column; gap: 8px; }
+.pos-group {
+  border: 1px solid var(--border);
+  border-top: 1px solid var(--border);  /* beat the generic details rule */
+  border-radius: 6px;
+  padding: 0;
+  background: var(--bg);
+}
+.pos-group summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  list-style: none;
+  color: var(--text);
+}
+.pos-group summary::-webkit-details-marker { display: none; }
+.pos-group summary::before {
+  content: "▸";
+  color: var(--muted);
+  font-size: 11px;
+  transition: transform 0.12s ease;
+}
+.pos-group[open] summary::before { transform: rotate(90deg); }
+.pos-group summary:hover { color: var(--accent); }
+.pos-group .pos-name {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.pos-group .pos-count { margin-left: auto; color: var(--muted); font-size: 12px; }
+.pos-group .pos-body { padding: 0 10px 8px; }
+
 /* --- feed --- */
 .feed { display: flex; flex-direction: column; }
 .event {
