@@ -106,7 +106,7 @@ class EquitySnapshot:
 
 
 class Journal:
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, readonly: bool = False):
         self._path = path
         # Non-reentrant: no Journal method ever calls another Journal method,
         # so a plain Lock (not RLock) cannot deadlock against itself. Journal
@@ -115,6 +115,20 @@ class Journal:
         # it while delegating to inner broker + journal writes) wrapping
         # (Journal._lock inner) — never the reverse. See ops/broker/guarded.py.
         self._lock = threading.Lock()
+        if readonly:
+            # mode=ro is the dashboard's hard guarantee: this connection
+            # can never hold a write lock, run migrations, or create the
+            # file. Missing file → sqlite3.OperationalError, never a
+            # silently-created empty journal. as_uri() handles path
+            # escaping (spaces, '#') that a hand-built f-string would not.
+            uri = Path(path).resolve().as_uri() + "?mode=ro"
+            self._conn = sqlite3.connect(
+                uri, uri=True, isolation_level=None, check_same_thread=False,
+            )
+            # Force the lazy open now so a missing file raises here, in the
+            # constructor, rather than on the first query.
+            self._conn.execute("SELECT 1 FROM sqlite_master LIMIT 1")
+            return
         # Create the parent directory on open (not at import time) — the
         # default journal_path now lives under an XDG state directory
         # (~/.local/state/tradingagents/) that may not exist yet on first
