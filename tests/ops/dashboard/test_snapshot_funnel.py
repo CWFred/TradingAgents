@@ -42,7 +42,7 @@ def test_memo_counts_and_open_list(tmp_path):
     cfg = _config(tmp_path)
     _seed_memos_raw(cfg.memo_store_path)
     ScreenStore(cfg.screen_store_path)  # empty but present
-    Journal(cfg.research_journal_path).close()
+    Journal(cfg.journal_path).close()
     funnel = build_snapshot(cfg)["funnel"]
     assert funnel["memos"]["by_status"] == {"open": 2, "passed": 1, "rejected": 1}
     assert [m["ticker"] for m in funnel["memos"]["open"]] == ["TK1", "TK0"]  # newest first
@@ -56,7 +56,7 @@ def test_screener_last_run_and_hit_counts(tmp_path):
     # asof: date + results: list[ScreenResult] and MINTS the run_id; there
     # are no run_id/passed_count/hits kwargs. Assert against the returned id.
     run_id = store.record_run(asof=date(2026, 7, 11), universe_size=500, results=[])
-    Journal(cfg.research_journal_path).close()
+    Journal(cfg.journal_path).close()
     funnel = build_snapshot(cfg)["funnel"]
     assert funnel["screener"]["last_run"]["run_id"] == run_id
     assert funnel["screener"]["last_run"]["universe_size"] == 500
@@ -66,7 +66,9 @@ def test_overnight_runs_and_signals(tmp_path):
     cfg = _config(tmp_path)
     _seed_memos_raw(cfg.memo_store_path)
     ScreenStore(cfg.screen_store_path)
-    with Journal(cfg.research_journal_path) as j:
+    # Overnight/monitor events live in the MAIN ops journal (the service's
+    # ticks write there); the research journal holds only sleeve money.
+    with Journal(cfg.journal_path) as j:
         j.record_event(events.KIND_RESEARCH_VETTING_RUN, {"vetted": 3, "passed": 1})
         j.record_event(events.KIND_FALSIFIER_TRIPPED, {"memo_id": "m0"})
     funnel = build_snapshot(cfg)["funnel"]
