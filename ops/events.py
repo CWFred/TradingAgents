@@ -118,6 +118,16 @@ KIND_RESEARCH_TRADE_ERROR = "research_trade_error"
 KIND_RESEARCH_DRAIN_RUN = "research_drain_run"
 KIND_RESEARCH_DRAIN_ERROR = "research_drain_error"
 KIND_RESEARCH_VETTING_RUN = "research_vetting_run"
+
+# --- Short sleeve (mirrors the research set; payload builders are shared
+# aliases since the shapes are identical) ---
+KIND_SHORT_TRADE_RUN = "short_trade_run"
+KIND_SHORT_TRADE_ERROR = "short_trade_error"
+KIND_SHORT_DRAIN_RUN = "short_drain_run"
+KIND_SHORT_DRAIN_ERROR = "short_drain_error"
+KIND_SHORT_VETTING_RUN = "short_vetting_run"
+KIND_SHORT_POSITION_OPENED = "short_position_opened"
+KIND_SHORT_POSITION_CLOSED = "short_position_closed"
 KIND_RESEARCH_VETTING_ERROR = "research_vetting_error"
 KIND_RESEARCH_POSITION_OPENED = "research_position_opened"
 KIND_RESEARCH_POSITION_CLOSED = "research_position_closed"
@@ -185,6 +195,14 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_RESEARCH_VETTING_ERROR,
     KIND_RESEARCH_POSITION_OPENED,
     KIND_RESEARCH_POSITION_CLOSED,
+    # Short sleeve: same audit discipline as the research set (the
+    # short_trade_run push is the one notified kind, via POLICY).
+    KIND_SHORT_TRADE_ERROR,
+    KIND_SHORT_DRAIN_RUN,
+    KIND_SHORT_DRAIN_ERROR,
+    KIND_SHORT_VETTING_RUN,
+    KIND_SHORT_POSITION_OPENED,
+    KIND_SHORT_POSITION_CLOSED,
     # Per-name momentum pipeline verdict: audit trail, not a push — the BUY
     # case already notifies via position_opened/fill.
     KIND_ANALYSIS_DECISION,
@@ -709,6 +727,17 @@ def research_position_closed_payload(
         "symbol": symbol, "memo_id": memo_id, "reason": reason,
         "exit_date": exit_date, "price": price,
     }
+
+
+# Short-sleeve payloads share the research shapes exactly; aliases keep the
+# producers honest (one shape, two kinds) without duplicating builders.
+short_trade_run_payload = research_trade_run_payload
+short_trade_error_payload = research_trade_error_payload
+short_drain_run_payload = research_drain_run_payload
+short_drain_error_payload = research_drain_error_payload
+short_vetting_run_payload = research_vetting_run_payload
+short_position_opened_payload = research_position_opened_payload
+short_position_closed_payload = research_position_closed_payload
 
 
 def analysis_decision_payload(
