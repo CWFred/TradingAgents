@@ -109,6 +109,15 @@ class OpsConfig:
             "tradingagents", "research.paused",
         )
     )
+    # Guardian liveness file: the guardian best-effort-touches this at the
+    # start of every pass; the (separate-process) dashboard reads its mtime.
+    # A file, not a journal event: one event/minute forever is noise.
+    guardian_liveness_path: str = field(
+        default_factory=lambda: os.path.join(
+            os.path.expanduser(os.environ.get("XDG_STATE_HOME") or "~/.local/state"),
+            "tradingagents", "guardian.alive",
+        )
+    )
     # Cost dial: max full-pipeline (LLM) analyses per day; risk is capped separately.
     daily_analysis_budget: int = 8
     # Exit engine (spec Component 6). Entry is top-daily_analysis_budget;

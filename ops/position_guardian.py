@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 from ops import events
 from ops.broker.base import BrokerError, QuoteUnavailable
@@ -72,6 +73,7 @@ class PositionGuardian:
         # scheduled?", which overnight/weekend and even crashing passes
         # still answer yes to — only a wedged or dead loop must look dead.
         self.last_pass_started_at = time.monotonic()
+        self._touch_liveness()
         try:
             return self._check_stops_once_impl()
         except Exception as exc:
@@ -82,6 +84,21 @@ class PositionGuardian:
                 ),
             )
             return []
+
+    def _touch_liveness(self) -> None:
+        # Best-effort by hard rule: the guardian is the last line of
+        # defence on real money — no filesystem problem may ever stop a
+        # stop-loss pass. getattr: configs constructed before this field
+        # existed (old pickles/tests) must not crash the guardian either.
+        path = getattr(self._cfg, "guardian_liveness_path", None)
+        if not path:
+            return
+        try:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.touch()
+        except OSError:
+            pass
 
     def _check_stops_once_impl(self) -> list[StopAction]:
         if self._market_open is not None and not self._market_open():

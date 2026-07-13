@@ -12,8 +12,11 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 _TEMPLATE_PATH = Path(__file__).with_name("com.tradingagents.ops.plist.template")
+_DASHBOARD_TEMPLATE_PATH = Path(__file__).with_name(
+    "com.tradingagents.dashboard.plist.template")
 
 SERVICE_LABEL = "com.tradingagents.ops"
+DASHBOARD_LABEL = "com.tradingagents.dashboard"
 DEFAULT_PLIST_PATH = "~/Library/LaunchAgents/com.tradingagents.ops.plist"
 DEFAULT_LOG_DIR = "~/.local/state/tradingagents/logs"
 
@@ -37,6 +40,17 @@ def render_launchd_plist(
 ) -> str:
     """Render the always-on ops service launchd plist template."""
     return _render(_TEMPLATE_PATH, {
+        "REPO_ROOT": repo_root,
+        "VENV_PYTHON": venv_python,
+        "LOG_DIR": log_dir,
+    })
+
+
+def render_dashboard_plist(
+    *, repo_root: str, venv_python: str, log_dir: str,
+) -> str:
+    """Render the read-only dashboard sibling agent's plist."""
+    return _render(_DASHBOARD_TEMPLATE_PATH, {
         "REPO_ROOT": repo_root,
         "VENV_PYTHON": venv_python,
         "LOG_DIR": log_dir,

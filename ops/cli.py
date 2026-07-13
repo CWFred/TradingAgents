@@ -85,6 +85,14 @@ def install_service(output_path: str, log_dir: str) -> None:
         log_dir=log_dir,
     )
     _install_plist(rendered, output_path, log_dir)
+
+    from ops.deploy import render_dashboard_plist
+
+    dash_output = str(Path(os.path.abspath(os.path.expanduser(output_path)))
+                      .with_name("com.tradingagents.dashboard.plist"))
+    rendered_dash = render_dashboard_plist(
+        repo_root=repo_root, venv_python=sys.executable, log_dir=log_dir)
+    _install_plist(rendered_dash, dash_output, log_dir)
     click.echo(
         "NOTE: launchd cannot start jobs on a sleeping laptop. Consider a "
         "wake schedule (your call to apply):\n"
@@ -129,6 +137,22 @@ def status(journal_path: str | None) -> None:
         click.echo(format_status(build_status(journal, load_config())))
     finally:
         journal.close()
+
+
+@cli.command("dashboard")
+@click.option("--port", default=None, type=int,
+              help="Port on 127.0.0.1 (default: $OPS_DASHBOARD_PORT or 8321)")
+def dashboard(port: int | None) -> None:
+    """Serve the read-only local ops dashboard (127.0.0.1 only).
+
+    Observes the journals, memo store, and screen store via mode=ro
+    reads — no broker, no writes, no network. Runs in the foreground;
+    launchd owns backgrounding (see install-service)."""
+    import sys
+
+    from ops.dashboard.server import serve
+
+    sys.exit(serve(port=port))
 
 
 @cli.command()

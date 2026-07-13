@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tradingagents.dashboard</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{{VENV_PYTHON}}</string>
+		<string>-m</string>
+		<string>ops.cli</string>
+		<string>dashboard</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>{{REPO_ROOT}}</string>
+	<!-- No EnvironmentVariables dict: the dashboard reads the same state dir
+	     as the ops service by default and is read-only end to end. Set
+	     OPS_DASHBOARD_PORT here only if the default 127.0.0.1:8321 ever
+	     needs to change. -->
+	<!-- Restart on crash or nonzero exit; ThrottleInterval keeps a
+	     start-time failure (e.g. port already bound) from hot-looping. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>Crashed</key>
+		<true/>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>{{LOG_DIR}}/dashboard.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>{{LOG_DIR}}/dashboard.err.log</string>
+</dict>
+</plist>

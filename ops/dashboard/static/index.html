@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ops dashboard</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <!-- Fixed disconnected banner (requirement 2): shown only on fetch failure. -->
+  <div id="disconnected" class="disconnected" hidden></div>
+
+  <header class="strip">
+    <div id="health" class="health-strip"></div>
+    <div id="market" class="market-strip"></div>
+  </header>
+
+  <!-- Health-condition alert banner (requirement 3): STOPPED/STALE/halts/paused. -->
+  <div id="banner" class="banner" hidden></div>
+
+  <main class="grid">
+    <section class="col col-left">
+      <div class="panel">
+        <h2>Sleeves</h2>
+        <div id="sleeves" class="sleeves"></div>
+      </div>
+      <div class="panel">
+        <h2>Positions</h2>
+        <div id="positions" class="scroll-x"></div>
+      </div>
+      <div class="panel">
+        <h2>Fills today</h2>
+        <div id="fills" class="scroll-x"></div>
+      </div>
+      <div class="panel">
+        <h2>Research funnel</h2>
+        <div id="funnel"></div>
+      </div>
+    </section>
+
+    <section class="col col-right">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Activity feed</h2>
+          <label class="filter">kind
+            <select id="feed-filter"><option value="">all</option></select>
+          </label>
+        </div>
+        <div id="feed" class="feed scroll-y"></div>
+      </div>
+      <div class="panel">
+        <h2>Overnight</h2>
+        <div id="overnight"></div>
+      </div>
+      <div class="panel">
+        <h2>Anomalies (7d)</h2>
+        <div id="anomalies" class="scroll-x"></div>
+      </div>
+      <div class="panel">
+        <h2>Logs</h2>
+        <div id="logs"></div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
