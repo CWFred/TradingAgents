@@ -478,3 +478,91 @@ def test_module_has_no_broker_network_or_llm_imports():
             f"ops/notify/overview.py imports {module!r} -- must stay pure "
             "read-and-render (no quotes/network/LLM/broker)"
         )
+
+
+# --- short sleeve section ----------------------------------------------------
+
+def test_short_section_not_configured_without_journal(stores):
+    main_journal, research_journal, baseline_journal, memo_store = stores
+    report = build_daily_overview(
+        main_journal=main_journal, baseline_journal=baseline_journal,
+        research_journal=research_journal, memo_store=memo_store,
+        config=OpsConfig(), now=NOW,
+    )
+    assert report["short"]["configured"] is False
+    assert report["header"]["short"] is None
+    assert "Not configured" in format_daily_overview(report)
+
+
+def test_short_section_full_day(stores, tmp_path):
+    main_journal, research_journal, baseline_journal, memo_store = stores
+    with Journal(str(tmp_path / "short.sqlite")) as short_journal:
+        short_journal.record_equity_snapshot(
+            kind="short_run", equity=Decimal("10160"), cash=Decimal("10480"), at=NOW,
+        )
+        short_journal.record_event(
+            events.KIND_SHORT_POSITION_OPENED,
+            events.short_position_opened_payload(
+                symbol="GHST", memo_id="m-1", conviction_tier="starter",
+                entry_date="2026-07-07", client_order_id="c-1", notional="100",
+            ),
+            at=NOW,
+        )
+        short_journal.record_event(
+            events.KIND_SHORT_POSITION_CLOSED,
+            events.short_position_closed_payload(
+                symbol="BURN", memo_id="m-0", reason="target hit",
+                exit_date="2026-07-07", price="24",
+            ),
+            at=NOW,
+        )
+        main_journal.record_event(
+            events.KIND_SHORT_TRADE_RUN,
+            events.short_trade_run_payload(
+                asof="2026-07-07", entered=["GHST"], exited=["BURN"],
+                skipped=[], equity="10160.00", cash="10480.00",
+            ),
+            at=NOW,
+        )
+        main_journal.record_event(
+            events.KIND_SHORT_DRAIN_RUN,
+            events.short_drain_run_payload(
+                asof="2026-07-07", screened_this_run=True, researched=2,
+                failed=0, still_pending=1, hit_deadline=False,
+            ),
+            at=NOW,
+        )
+        report = build_daily_overview(
+            main_journal=main_journal, baseline_journal=baseline_journal,
+            research_journal=research_journal, memo_store=memo_store,
+            config=OpsConfig(), now=NOW, short_journal=short_journal,
+        )
+    s = report["short"]
+    assert s["configured"] is True
+    assert s["trades"]["entered"] == ["GHST"]
+    assert s["trades"]["equity"] == Decimal("10160.00")
+    assert s["overnight"]["researched"] == 2
+    assert s["positions_opened"] == [
+        {"symbol": "GHST", "memo_id": "m-1", "tier": "starter"}]
+    assert s["positions_closed"] == [
+        {"symbol": "BURN", "memo_id": "m-0", "reason": "target hit"}]
+    assert report["header"]["short"]["equity"] == Decimal("10160")
+    assert report["quiet"] is False
+    rendered = format_daily_overview(report)
+    assert "## Short sleeve" in rendered and "GHST" in rendered
+
+
+def test_short_trade_error_is_an_anomaly(stores):
+    main_journal, research_journal, baseline_journal, memo_store = stores
+    main_journal.record_event(
+        events.KIND_SHORT_TRADE_ERROR,
+        events.short_trade_error_payload(error="RuntimeError: feed down"),
+        at=NOW,
+    )
+    report = build_daily_overview(
+        main_journal=main_journal, baseline_journal=baseline_journal,
+        research_journal=research_journal, memo_store=memo_store,
+        config=OpsConfig(), now=NOW,
+    )
+    kinds = [a["kind"] for a in report["anomalies"]]
+    assert events.KIND_SHORT_TRADE_ERROR in kinds

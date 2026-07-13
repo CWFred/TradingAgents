@@ -284,11 +284,12 @@ def digest(digest_date: datetime | None, output_path: str | None, do_push: bool)
         Journal(config.journal_path) as main_journal,
         Journal(config.baseline_journal_path) as baseline_journal,
         Journal(config.research_journal_path) as research_journal,
+        Journal(config.short_journal_path) as short_journal,
     ):
         report = build_daily_overview(
             main_journal=main_journal, baseline_journal=baseline_journal,
             research_journal=research_journal, memo_store=memo_store,
-            config=config, now=now,
+            config=config, now=now, short_journal=short_journal,
         )
     rendered = format_daily_overview(report)
     if output_path is not None:

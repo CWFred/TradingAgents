@@ -410,11 +410,12 @@ def _daily_overview_tick(journal: Journal, config) -> None:
         with (
             Journal(config.baseline_journal_path) as baseline_journal,
             Journal(config.research_journal_path) as research_journal,
+            Journal(config.short_journal_path) as short_journal,
         ):
             report = build_daily_overview(
                 main_journal=journal, baseline_journal=baseline_journal,
                 research_journal=research_journal, memo_store=memo_store,
-                config=config,
+                config=config, short_journal=short_journal,
             )
         rendered = format_daily_overview(report)
         headline = overview_headline(report)
