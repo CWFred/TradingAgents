@@ -9,6 +9,8 @@ from enum import Enum
 class Side(str, Enum):
     BUY = "BUY"
     SELL = "SELL"
+    SHORT = "SHORT"    # sell-to-open; ShortPaperBroker only
+    COVER = "COVER"    # buy-to-close; ShortPaperBroker only
 
 
 class OrderType(str, Enum):
@@ -40,8 +42,14 @@ class Order:
             raise ValueError("notional_dollars must be positive")
         if self.order_type == OrderType.LIMIT and self.limit_price is None:
             raise ValueError("LIMIT order requires limit_price")
-        if self.stop_pct is not None and self.stop_pct >= 0:
-            raise ValueError("stop_pct must be negative (entry-relative, e.g. -0.08)")
+        if self.stop_pct is not None:
+            if self.side in (Side.SHORT, Side.COVER):
+                raise ValueError(
+                    "stop_pct is not supported on SHORT/COVER orders; the short "
+                    "trade step enforces stops from average entry price"
+                )
+            if self.stop_pct >= 0:
+                raise ValueError("stop_pct must be negative (entry-relative, e.g. -0.08)")
 
 
 @dataclass(frozen=True)
