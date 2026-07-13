@@ -166,6 +166,14 @@ td.n, th.n { text-align: right; }
 .pnl.green { color: var(--green); }
 .pnl.red   { color: var(--red); }
 .pnl.flat  { color: var(--muted); }
+.pnls { display: flex; gap: 10px; align-items: baseline; }
+.pnl-pair { display: inline-flex; gap: 4px; align-items: baseline; }
+.pnl-lbl {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
 .spark { display: block; }
 
 .sleeve-cash { font-size: 12px; margin-top: 6px; }

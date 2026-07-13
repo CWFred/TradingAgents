@@ -179,12 +179,14 @@ def _one_sleeve(path: str, now: datetime) -> dict[str, Any]:
     PaperBroker.from_journal replay with a refuse-quotes guard, exactly like
     ops.status. CASH and equity/day P&L come from the equity-snapshot table.
 
-    Cash is deliberately NOT taken from replay: baseline and research
-    services seed their cash from config in memory and never journal a seed
-    cash-adjustment, so replaying from 0 drives their cash negative (a BUY
-    fill with no offsetting seed). Replay-from-0 cash is a momentum-only
-    convention; the equity snapshot carries the correct cash for all sleeves,
-    so it is the single source of truth here.
+    Cash source depends on what the ledger records. Replay cash is
+    trustworthy only when the journal carries the cash BASIS — a seed
+    cash-adjustment plus fills, as the momentum service journals — and then
+    it is also intraday-fresh (a buy moves it immediately). Baseline and
+    research seed cash from config in memory and never journal it, so their
+    replay-from-0 cash is fiction; for them the latest equity snapshot's
+    journaled cash is the best available (correct, but only as fresh as the
+    last snapshot).
     """
     from ops.broker.paper import PaperBroker
     from ops.trading_time import trading_day_start
@@ -193,6 +195,7 @@ def _one_sleeve(path: str, now: datetime) -> dict[str, Any]:
     with Journal(path, readonly=True) as j:
         snaps = j.read_equity_snapshots()
         fills = j.read_fills()
+        has_cash_basis = bool(j.read_cash_adjustments())
         replay = PaperBroker.from_journal(
             journal=j, quote_source=_refuse_quotes, starting_cash=Decimal("0"))
         positions = [
@@ -200,6 +203,7 @@ def _one_sleeve(path: str, now: datetime) -> dict[str, Any]:
              "entry": p.avg_entry_price, "stop": p.stop_loss_price}
             for p in replay.get_positions()
         ]
+        replay_cash = replay.get_cash()
 
     latest = snaps[-1] if snaps else None
     # day_pnl needs a snapshot taken TODAY (latest["at"] >= day_start): a
@@ -211,12 +215,22 @@ def _one_sleeve(path: str, now: datetime) -> dict[str, Any]:
             and before_today and before_today[-1]["equity"] != 0):
         prev = before_today[-1]["equity"]
         day_pnl = (latest["equity"] - prev) / prev
+
+    # Lifetime P&L: latest vs the ledger's FIRST snapshot (the seed-time
+    # record). One snapshot alone has no baseline to compare against.
+    first = snaps[0] if snaps else None
+    lifetime_pnl: Decimal | None = None
+    if (latest is not None and first is not None and first is not latest
+            and first["equity"] != 0):
+        lifetime_pnl = (latest["equity"] - first["equity"]) / first["equity"]
+
     return {
         "equity": latest["equity"] if latest else None,
-        "cash": latest["cash"] if latest else None,
+        "cash": replay_cash if has_cash_basis else (latest["cash"] if latest else None),
         "equity_at": latest["at"] if latest else None,
         "equity_kind": latest["kind"] if latest else None,
         "day_pnl_pct": day_pnl,
+        "lifetime_pnl_pct": lifetime_pnl,
         "series": [{"at": s["at"], "equity": s["equity"]} for s in snaps[-60:]],
         "positions": positions,
         "fills_today": [

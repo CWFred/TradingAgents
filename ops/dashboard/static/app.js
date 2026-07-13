@@ -267,12 +267,23 @@ function sleeveCard(name, s) {
   card.appendChild(eq);
 
   const row = el("div", { class: "sleeve-row" });
-  row.appendChild(pnlSpan(s.day_pnl_pct));
+  const pnls = el("div", { class: "pnls" }, [
+    labeledPnl("day", s.day_pnl_pct),
+    labeledPnl("life", s.lifetime_pnl_pct),
+  ]);
+  row.appendChild(pnls);
   const spark = sparkline(s.series);
   if (spark) row.appendChild(spark);
   card.appendChild(row);
   card.appendChild(el("div", { class: "sleeve-cash muted num", text: "cash " + fmtMoney(s.cash) }));
   return card;
+}
+
+function labeledPnl(label, pct) {
+  return el("span", { class: "pnl-pair" }, [
+    el("span", { class: "pnl-lbl", text: label }),
+    pnlSpan(pct),
+  ]);
 }
 
 // req 5: +4.00% green / −1.20% red / — when null.

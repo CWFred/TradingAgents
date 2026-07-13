@@ -36,9 +36,10 @@ def _seed_momentum(cfg: OpsConfig, now: datetime) -> None:
     # journal_replay_fallback write path. See task-4 report for the disclosed
     # deviation from the brief's seed (which used "buy" and no order row).
     #
-    # The last open_day snapshot carries cash=160 (the correct in-memory
-    # cash). Replay-from-0 would report 150 (250 seed - 100 BUY fill); the
-    # snapshot's cash is authoritative.
+    # The journal carries its cash basis (a seed adjustment + fills), so
+    # replay cash (250 seed - 100 BUY fill = 150) is authoritative and
+    # intraday-fresh. The last open_day snapshot's cash (160) deliberately
+    # diverges so tests can tell which source won.
     with Journal(cfg.journal_path) as j:
         j.record_cash_adjustment(kind="seed", amount=Decimal("250"), note="test")
         j.record_equity_snapshot(
@@ -65,12 +66,33 @@ def test_sleeve_positions_and_fills_from_replay(tmp_path):
     assert mom["equity"] == "260"
 
 
-def test_sleeve_cash_from_snapshot_not_replay(tmp_path):
+def test_cash_from_replay_when_journal_has_cash_basis(tmp_path):
+    # A seed cash-adjustment means the ledger records its cash basis, so
+    # replay cash (250 seed - 100 fill = 150) wins over the stale open_day
+    # snapshot's 160 — an intraday BUY must move displayed cash immediately.
     cfg = _config(tmp_path)
     _seed_momentum(cfg, NOW)
     mom = build_snapshot(cfg, now=NOW)["sleeves"]["momentum"]
-    # Snapshot cash (160) wins over replay cash (250 seed - 100 fill = 150).
-    assert mom["cash"] == "160"
+    assert mom["cash"] == "150"
+
+
+def test_lifetime_pnl_from_first_to_latest_snapshot(tmp_path):
+    cfg = _config(tmp_path)
+    _seed_momentum(cfg, NOW)
+    mom = build_snapshot(cfg, now=NOW)["sleeves"]["momentum"]
+    # (260 - 250) / 250 = 0.04 over the ledger's lifetime.
+    assert Decimal(mom["lifetime_pnl_pct"]) == Decimal("0.04")
+
+
+def test_lifetime_pnl_null_with_single_snapshot(tmp_path):
+    # One snapshot has no baseline to compare against.
+    cfg = _config(tmp_path)
+    with Journal(cfg.journal_path) as j:
+        j.record_cash_adjustment(kind="seed", amount=Decimal("250"), note="t")
+        j.record_equity_snapshot(
+            equity=Decimal("250"), cash=Decimal("250"), kind="open_day", at=NOW)
+    mom = build_snapshot(cfg, now=NOW)["sleeves"]["momentum"]
+    assert mom["lifetime_pnl_pct"] is None
 
 
 def test_baseline_shaped_cash_is_snapshot_not_negative_replay(tmp_path):
