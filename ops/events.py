@@ -65,6 +65,9 @@ KIND_INCONSISTENCY = "inconsistency"
 KIND_POSITIONS_RECOVERED_WITHOUT_STOPS = "positions_recovered_without_stops"
 KIND_JOURNAL_REPLAY_FALLBACK = "journal_replay_fallback"
 KIND_JOURNAL_REPLAY_ORPHAN_SELL = "journal_replay_orphan_sell"
+# Short-journal twin of orphan_sell: a COVER replayed with no prior SHORT.
+# Shares journal_replay_orphan_sell_payload (same shape).
+KIND_JOURNAL_REPLAY_ORPHAN_COVER = "journal_replay_orphan_cover"
 
 # Live gate / flip ritual
 KIND_BROKER_MODE_LIVE = "broker_mode_live"
@@ -142,6 +145,7 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     KIND_SERVICE_STOPPING,
     KIND_JOURNAL_REPLAY_FALLBACK,
     KIND_JOURNAL_REPLAY_ORPHAN_SELL,
+    KIND_JOURNAL_REPLAY_ORPHAN_COVER,
     KIND_BROKER_MODE_LIVE,
     KIND_LIVE_FLIP_REFUSED,
     KIND_DAILY_SUMMARY_ERROR,
