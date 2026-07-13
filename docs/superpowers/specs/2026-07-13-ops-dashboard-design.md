@@ -106,7 +106,9 @@ New package `ops/dashboard/`:
   8321. Routes:
   - `GET /` + static assets (from package dir, resolved-path check)
   - `GET /api/snapshot` — full snapshot, built fresh per request
-  - `GET /api/events?after_id=&kinds=` — incremental feed
+  - `GET /api/events?limit=&kinds=` — latest merged events (the frontend
+    re-renders the newest N each poll; incremental `after_id` cursors are
+    YAGNI at 5 s / ~100 events)
   - `GET /api/logs?file=out|err&lines=N` — tail; `file` is an enum key
     mapped to the two known paths, never a path parameter
 - **`static/`** — `index.html`, `app.js`, `style.css`. Vanilla JS, no
