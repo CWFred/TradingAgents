@@ -145,9 +145,13 @@ Red-flag triggers (≥ 1 required, 90-day lookback):
   they describe *improvement* (e.g. `gross_margin_pct > X` for 2 quarters).
   Machine-checking is direction-agnostic, so `evaluate_falsifier` needs no
   change.
-- Monitor: `DRAWDOWN_ESCALATION_PCT` must become direction-aware — for a
-  short, "drawdown" = price *rising* vs cost. `MetricContext` gains the
-  memo's direction; the −30% escalation applies to the adverse move.
+- Monitor: the canonical drawdown convention (PR #31) is **positive percent
+  below cost** for longs, with escalation at `drawdown_pct >= 30`. For
+  shorts the invariant to preserve is "positive = adverse move vs cost":
+  `MetricContext` gains the memo's direction, and the short series negates
+  the long one (price *rising* 25% against the short reads +25). The 30%
+  escalation and memo-authored `drawdown_from_cost_pct > N` falsifiers then
+  work unchanged in both directions.
 
 ### Brain + vetting
 
@@ -270,8 +274,14 @@ queue, same isolation logic as the memo stores), `short_starting_cash`
 
 - Daily overview gains both sleeves' equity/cash/positions lines (it is
   already cross-sleeve; new journals are new inputs).
-- Dashboard: `_sleeves_section` iterates configured journal paths — add the
-  two new paths (coordinate with the in-flight ops-dashboard worktree).
+- Dashboard (now merged to main): `_sleeves_section` in
+  `ops/dashboard/snapshot.py` gains `("short", config.short_journal_path)`
+  and `("insider", config.insider_journal_path)` entries. `_one_sleeve`
+  replays positions through `PaperBroker.from_journal`, which silently
+  skips SHORT/COVER fills — it must dispatch the short journal through
+  `ShortPaperBroker.from_journal` (journal-only discipline preserved: the
+  refuse-quotes guard works identically). This lands as the final task,
+  after both sleeves are in.
 - Scorecards: each sleeve vs its natural null — the short sleeve vs doing
   nothing (a short book must beat holding cash, since the market drifts
   up); the insider sleeve's memo-lite corpus vs the research sleeve's
