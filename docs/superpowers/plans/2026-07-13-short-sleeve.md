@@ -918,7 +918,7 @@ git commit -m "feat(short): red-flag triggers — 8-K items, insider sell cluste
 
 **Interfaces:**
 - Consumes: `ops.research.brain` internals (`_build_reading_plan`, `_run_evidence_stage`, `_screen_summary`, `_evidence_bullets`, `ResearchOutcome`, `ResearchError`, `MIN_EVIDENCE_ITEMS`), `resolve_evidence` + `validate_memo` from `ops/research/memo_validation.py`, `ShortThesis` (Task 4), `bind_structured`.
-- Produces: `research_short_hit(hit, *, evidence_llm, thesis_llm, memo_store, list_filings=None, fetch_text=None, price_fetcher=None, today=None, thesis_model_spec=None) -> ResearchOutcome` — same contract as `brain.research_hit` but: draft model is `ShortMemoDraft` (`thesis_type: Literal["short"]`, `short_block: ShortThesis`, `recommendation: Literal["short", "pass"]`, all other MemoDraft fields), the counter-argument stage is a **bull defending the stock** (`DEFENSE_PROMPT`), and the memo prompt (`SHORT_MEMO_PROMPT`) states the inverted target semantics: *price_target_low is the cover target (profit); price_target_high is the thesis-wrong level; at least one falsifier machine-checkable; falsifiers describe IMPROVEMENT (the thesis breaking), e.g. `gross_margin_pct > X`*.
+- Produces: `research_short_hit(hit, *, evidence_llm, thesis_llm, memo_store, list_filings=None, fetch_text=None, price_fetcher=None, today=None, thesis_model_spec=None) -> ResearchOutcome` — same contract as `brain.research_hit` but: draft model is `ShortMemoDraft` (`thesis_type: Literal["short"]`, `short_block: ShortThesis`, `recommendation: Literal["short", "pass"]`, all other MemoDraft fields), the counter-argument stage is a **bull defending the stock** (`DEFENSE_PROMPT`), and the memo prompt (`SHORT_MEMO_PROMPT`) states the inverted target semantics: *price_target_low is the cover target (profit); price_target_high is the thesis-wrong level; at least one falsifier machine-checkable; falsifiers describe IMPROVEMENT (the thesis breaking), e.g. `gross_margin_pct > X`, and `drawdown_from_cost_pct` measures the adverse move as POSITIVE percent (price rising against the short), e.g. `drawdown_from_cost_pct > 20` = squeezed 20%*.
 
 - [ ] **Step 1: Write the failing tests** — stub LLMs exactly as the existing `tests/ops/research/` brain tests do (canned structured outputs, injected `list_filings`/`fetch_text`/`price_fetcher`). Cover: a "short" draft saves a `pending_vetting` memo with `short_block` set into the given store; a "pass" draft marks it passed; insufficient evidence → `status="failed"`, nothing saved.
 
@@ -1025,18 +1025,31 @@ git commit -m "feat(short): short trade step — inverted exits, live-exposure s
 
 ### Task 11: direction-aware drawdown (metrics + monitor)
 
+Context: PR #31 made the canonical convention **positive percent below
+cost** for longs (25.0 = price 25% under entry; above-cost is negative),
+with `monitor.DRAWDOWN_ESCALATION_PCT = 30.0` and escalation on
+`dd >= 30.0`. The invariant to preserve for shorts: **positive = adverse
+move vs cost** — a price run-up against the short must read positive.
+
 **Files:**
 - Modify: `ops/research/metrics.py`, `ops/research/monitor.py`
 - Test: extend `tests/ops/research/` metrics/monitor test modules
 
 **Interfaces:**
-- Produces: `MetricContext` gains `direction: str = "long"`; `_drawdown_series` (and therefore `drawdown_pct` and the `drawdown_from_cost_pct` falsifier metric) returns the **adverse move as negative** for shorts: for `direction="short"`, each observation is `(entry - close*factor) / entry * 100` (price up ⇒ negative ⇒ loss). `monitor._build_context` sets `direction="short"` when `memo.thesis_type == "short"`. `DRAWDOWN_ESCALATION_PCT` then applies unchanged to both directions.
+- Produces: `MetricContext` gains `direction: str = "long"`; for
+  `direction="short"`, `_drawdown_series` (and therefore `drawdown_pct` and
+  the `drawdown_from_cost_pct` falsifier metric) returns the NEGATION of
+  the long series: each observation is `(close*factor - entry) / entry * 100`
+  (price up 35% against the short ⇒ +35.0 ⇒ adverse). `monitor._build_context`
+  sets `direction="short"` when `memo.thesis_type == "short"`.
+  `DRAWDOWN_ESCALATION_PCT` and memo-authored `drawdown_from_cost_pct > N`
+  falsifiers then apply unchanged in both directions.
 
-- [ ] **Step 1: Write the failing tests** — a short-direction context where price rose 35% from entry yields `drawdown_pct(ctx) == pytest.approx(-35.0)` and trips a `drawdown_from_cost_pct <= -30` falsifier; long-direction behavior unchanged (existing tests pin it).
+- [ ] **Step 1: Write the failing tests** — a short-direction context where price rose 35% from entry yields `drawdown_pct(ctx) == pytest.approx(35.0)` and trips a `drawdown_from_cost_pct > 30` falsifier; a short whose price FELL 20% yields `-20.0` and trips nothing; long-direction behavior unchanged (existing tests pin it, including the PR #31 regression test).
 
-- [ ] **Step 2: Run to verify failure** — assertion error (positive value returned)
+- [ ] **Step 2: Run to verify failure** — assertion error (sign flipped)
 
-- [ ] **Step 3: Implement** — in `_drawdown_series`, compute `move = (float(close * factor) - entry) / entry * 100.0` then `move if ctx.direction == "long" else -move`. Add the field with default `"long"` so every existing constructor call stands. In `monitor._build_context`, pass `direction=("short" if memo.thesis_type == "short" else "long")`.
+- [ ] **Step 3: Implement** — in `_drawdown_series`, compute the canonical long value `below = (entry - float(close * factor)) / entry * 100.0` then emit `below if ctx.direction == "long" else -below`, with a comment stating the both-directions invariant (positive = adverse). Add the field with default `"long"` so every existing constructor call stands. In `monitor._build_context`, pass `direction=("short" if memo.thesis_type == "short" else "long")`.
 
 - [ ] **Step 4: Run** — `.venv/bin/pytest tests/ops/research/ -v` → all PASS
 
@@ -1118,3 +1131,9 @@ Expected: all PASS (test_main.py's 11 failures pre-date this work)
 git add ops/notify/overview.py ops/main.py docs/short_sleeve.md docs/research_trading.md tests/
 git commit -m "feat(short): daily-overview section + short-sleeve runbook"
 ```
+
+---
+
+Dashboard integration for BOTH sleeves is the final task of
+`docs/superpowers/plans/2026-07-13-insider-sleeve.md` (Task 8) — it lands
+after both tracks are complete.

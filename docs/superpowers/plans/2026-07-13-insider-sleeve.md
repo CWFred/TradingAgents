@@ -371,3 +371,26 @@ Expected: all PASS
 git add ops/notify/overview.py ops/main.py docs/insider_sleeve.md docs/research_trading.md tests/
 git commit -m "feat(insider): daily-overview section + insider-sleeve runbook"
 ```
+
+---
+
+### Task 8: dashboard — both new sleeves (final task, after both plans)
+
+**Files:**
+- Modify: `ops/dashboard/snapshot.py`
+- Test: extend `tests/ops/dashboard/test_snapshot_sleeves.py`
+
+**Interfaces:**
+- Consumes: `ShortPaperBroker.from_journal` (short-sleeve plan Task 3), `config.short_journal_path` / `config.insider_journal_path`.
+- Produces: `_sleeves_section` gains `("short", config.short_journal_path)` and `("insider", config.insider_journal_path)` entries; `_one_sleeve(path, now, *, broker_cls=PaperBroker)` so the short entry passes `broker_cls=ShortPaperBroker` — `PaperBroker.from_journal` silently skips SHORT/COVER fills, which would render the short book as empty positions. The refuse-quotes guard and readonly discipline are unchanged (`ShortPaperBroker.from_journal` never quotes during replay either).
+
+- [ ] **Step 1: Write the failing tests** — a short journal seeded with a SHORT fill (order row + fill row, side "SHORT") shows the position in the "short" sleeve entry with its entry price; an insider journal with a BUY fill shows under "insider"; a missing short journal file yields the per-sleeve `{"error": ...}` shape like the existing missing-file test.
+- [ ] **Step 2: Run to verify failure** — KeyError "short" on the section dict
+- [ ] **Step 3: Implement** — add the `broker_cls` keyword (default `PaperBroker`, so the three existing sleeves are untouched), replace the hardcoded import use with the parameter, extend the tuple in `_sleeves_section` passing `broker_cls=ShortPaperBroker` for the short entry.
+- [ ] **Step 4: Run** — `.venv/bin/pytest tests/ops/dashboard/ -v` → all PASS
+- [ ] **Step 5: Commit**
+
+```bash
+git add ops/dashboard/snapshot.py tests/ops/dashboard/
+git commit -m "feat(sleeves): dashboard panels for the short + insider sleeves"
+```
