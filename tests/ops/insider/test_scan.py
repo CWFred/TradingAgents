@@ -90,14 +90,32 @@ def test_scans_only_in_universe_form4s(store):
 
 
 def test_404_index_is_an_empty_day(store):
+    class _NotFound(RuntimeError):
+        def __init__(self):
+            super().__init__("404 Client Error: Not Found")
+            self.response = type("R", (), {"status_code": 404})()
+
     def fetch_raw(url):
-        raise RuntimeError("404 Client Error: Not Found")
+        raise _NotFound()
 
     summary = scan_daily_index(
         store=store, day=DAY, universe_symbols=["AAA"],
         fetch_raw=fetch_raw, cik_resolver=_cik,
     )
     assert summary.form4_seen == 0 and summary.errors == []
+
+
+def test_error_text_mentioning_404_is_still_an_error(store):
+    # Strict status-code check: a message containing "404" without an HTTP
+    # 404 response must be recorded, not silently treated as a holiday.
+    def fetch_raw(url):
+        raise RuntimeError("connection reset fetching /archives/404-page")
+
+    summary = scan_daily_index(
+        store=store, day=DAY, universe_symbols=["AAA"],
+        fetch_raw=fetch_raw, cik_resolver=_cik,
+    )
+    assert len(summary.errors) == 1
 
 
 def test_document_failure_is_isolated(store):

@@ -58,10 +58,11 @@ def _ownership_xml(submission_text: str) -> str | None:
 
 
 def _is_404(exc: Exception) -> bool:
+    """Strictly the HTTP status — string matching on the message would let
+    any error text containing '404' silently skip a real scan day
+    (review finding P3)."""
     resp = getattr(exc, "response", None)
-    if resp is not None and getattr(resp, "status_code", None) == 404:
-        return True
-    return "404" in str(exc)
+    return resp is not None and getattr(resp, "status_code", None) == 404
 
 
 def scan_daily_index(

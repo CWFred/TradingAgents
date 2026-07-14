@@ -210,3 +210,56 @@ def test_exited_symbol_not_reentered_same_run(stores):
     outcome = _trade(stores, prices)
     assert outcome.exited == ["GHST"]
     assert outcome.entered == []
+
+
+def test_gross_cap_fences_across_same_run_entries(tmp_path):
+    # Gross cap = 50% of $1000 equity = $500. Two high-tier memos want
+    # 3% = $30 each... too small; use starting cash $10000 with the cap
+    # nearly consumed instead: seed a $4,850 short, leaving $150 of gross
+    # room. Two high-tier memos want $300 each: the first must be clamped
+    # to $150 by the LIVE (incrementally updated) exposure map and the
+    # second rejected outright — a stale snapshot would fill both at $150.
+    memo_store = MemoStore(tmp_path / "short_memos.sqlite")
+    memo_store.save(_memo(ticker="AAA", tier="high"))
+    memo_store.save(_memo(ticker="BBB", tier="high"))
+    prices = {"AAA": D("40"), "BBB": D("40"), "GHST": D("40")}
+    with Journal(str(tmp_path / "s.sqlite")) as short_journal, \
+            Journal(str(tmp_path / "m.sqlite")) as main_journal:
+        broker = ShortPaperBroker(
+            journal=short_journal, quote_source=lambda s: prices[s],
+            starting_cash=D("10000"),
+        )
+        from ops.broker.types import Order, OrderType, Side
+
+        broker.place_order(Order(
+            client_order_id="seed-GHST", symbol="GHST", side=Side.SHORT,
+            notional_dollars=D("4850"), order_type=OrderType.MARKET,
+        ))
+        ghst_memo = _memo(ticker="GHST")
+        memo_store.save(ghst_memo)
+        short_journal.record_event(
+            events.KIND_SHORT_POSITION_OPENED,
+            events.short_position_opened_payload(
+                symbol="GHST", memo_id=ghst_memo.memo_id, conviction_tier="high",
+                entry_date="2026-07-10", client_order_id="seed-GHST",
+                notional="4850",
+            ),
+        )
+        outcome = trade_short_sleeve(
+            memo_store=memo_store, short_journal=short_journal,
+            main_journal=main_journal, quote_source=lambda s: prices[s],
+            starting_cash=D("10000"), deny_list=frozenset(), asof=ASOF, now=NOW,
+            sector_lookup=lambda s: {"AAA": "Tech", "BBB": "Energy",
+                                     "GHST": "Industrials"}[s],
+            adv_fetcher=lambda t: D("1000000"),
+        )
+        assert outcome.entered == ["AAA"]          # clamped to the $150 room
+        assert any("gross exposure cap" in s for s in outcome.skipped)  # BBB
+        replayed = ShortPaperBroker.from_journal(
+            journal=short_journal, quote_source=lambda s: prices[s],
+            starting_cash=D("10000"),
+        )
+        exposures = {p.symbol: p.quantity * prices[p.symbol]
+                     for p in replayed.get_positions()}
+        assert exposures["AAA"] == D("150")
+        assert "BBB" not in exposures

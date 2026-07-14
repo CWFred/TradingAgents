@@ -176,3 +176,24 @@ def test_insufficient_evidence_fails_without_saving(memo_store):
     assert any("insufficient cited evidence" in e for e in outcome.errors)
     assert memo_store.list() == []
     assert thesis_llm.prompts == []
+
+
+def test_inverted_price_band_is_rejected_then_fixed_on_retry(memo_store):
+    # First draft puts the cover target ABOVE entry (42): rejected with the
+    # short-specific error; the retry with a sane band saves.
+    bad = _draft(price_target_low=50.0, price_target_high=55.0)
+    good = _draft()
+    thesis_llm = FakeLLM(["defense", bad, good])
+    outcome = _run(_good_evidence_llm(), thesis_llm, memo_store)
+    assert outcome.status == "researched"
+    assert any("COVER" in e for e in outcome.errors)
+    memo = memo_store.get(outcome.memo_id)
+    assert memo.price_target_low == 25.0
+
+
+def test_thesis_wrong_level_below_entry_is_rejected(memo_store):
+    bad = _draft(price_target_high=30.0)   # below entry 42
+    thesis_llm = FakeLLM(["defense", bad, bad])
+    outcome = _run(_good_evidence_llm(), thesis_llm, memo_store)
+    assert outcome.status == "failed"
+    assert any("thesis-wrong" in e for e in outcome.errors)

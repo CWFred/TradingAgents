@@ -234,6 +234,20 @@ def research_short_hit(
         errors = validate_memo(
             memo, allowed_refs=allowed_refs, known_precedents=known_precedents,
         )
+        # Short-specific target sanity (review finding P3): an inverted band
+        # would make the trade step cover as "target hit" on its first run.
+        if memo.price_target_low >= memo.entry_price_ref:
+            errors.append(
+                f"price_target_low ({memo.price_target_low}) is the COVER "
+                f"target and must sit BELOW the entry reference price "
+                f"({memo.entry_price_ref}) for a short"
+            )
+        if memo.price_target_high <= memo.entry_price_ref:
+            errors.append(
+                f"price_target_high ({memo.price_target_high}) is the "
+                f"thesis-wrong level and must sit ABOVE the entry reference "
+                f"price ({memo.entry_price_ref}) for a short"
+            )
         if not errors:
             memo_store.save(memo)
             if draft.recommendation == "pass":

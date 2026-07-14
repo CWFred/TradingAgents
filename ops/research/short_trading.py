@@ -167,6 +167,19 @@ def _entry_pass(
             sector_cache[symbol] = sector_lookup(symbol)
         return sector_cache[symbol]
 
+    # Exposure maps are built ONCE and updated incrementally after each
+    # fill — rebuilding them per candidate memo issued a quote call per
+    # held position per memo (review finding P3). New entries are marked
+    # at their fill notional, which IS their live exposure at that instant.
+    exposure_by_symbol = _live_exposures(broker, outcome)
+    exposure_by_sector: dict[str, Decimal] = {}
+    for symbol, exposure in exposure_by_symbol.items():
+        sector = sector_for(symbol)
+        exposure_by_sector[sector] = (
+            exposure_by_sector.get(sector, Decimal("0")) + exposure
+        )
+    gross = sum(exposure_by_symbol.values(), Decimal("0"))
+
     for memo in memos:
         ticker = memo.ticker
         if ticker in held or ticker in exited:
@@ -180,15 +193,6 @@ def _entry_pass(
         ) > 0:
             outcome.skipped.append(f"{ticker}: memo already had a position (closed)")
             continue
-
-        exposure_by_symbol = _live_exposures(broker, outcome)
-        exposure_by_sector: dict[str, Decimal] = {}
-        for symbol, exposure in exposure_by_symbol.items():
-            sector = sector_for(symbol)
-            exposure_by_sector[sector] = (
-                exposure_by_sector.get(sector, Decimal("0")) + exposure
-            )
-        gross = sum(exposure_by_symbol.values(), Decimal("0"))
 
         try:
             decision = size_short_entry(
@@ -228,6 +232,14 @@ def _entry_pass(
         )
         outcome.entered.append(ticker)
         held.add(ticker)
+        sector = sector_for(ticker)
+        exposure_by_symbol[ticker] = (
+            exposure_by_symbol.get(ticker, Decimal("0")) + decision.notional
+        )
+        exposure_by_sector[sector] = (
+            exposure_by_sector.get(sector, Decimal("0")) + decision.notional
+        )
+        gross += decision.notional
 
 
 def trade_short_sleeve(
