@@ -232,7 +232,7 @@ function renderMarket(market) {
 
 // ---- sleeves: cards + positions + fills ------------------------------------
 
-const SLEEVE_ORDER = ["momentum", "research", "baseline"];
+const SLEEVE_ORDER = ["momentum", "research", "baseline", "short", "insider"];
 
 function renderSleeves(sleeves) {
   const cards = document.getElementById("sleeves");
