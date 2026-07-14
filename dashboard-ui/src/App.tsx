@@ -1,3 +1,52 @@
+import { useState } from "react";
+import { isDisconnected, usePoll } from "./data/poll";
+import { isErr } from "./data/types";
+import ActivityFeed from "./components/ActivityFeed";
+import AnomaliesPanel from "./components/AnomaliesPanel";
+import { AlertBanner, DisconnectedBanner } from "./components/Banners";
+import FillsPanel from "./components/FillsPanel";
+import FunnelPanel from "./components/FunnelPanel";
+import HeaderBar from "./components/HeaderBar";
+import LogsPanel from "./components/LogsPanel";
+import OvernightPanel from "./components/OvernightPanel";
+import PositionsPanel from "./components/PositionsPanel";
+import SleeveCards from "./components/SleeveCards";
+import SleeveDrillDrawer from "./components/SleeveDrillDrawer";
+
 export default function App() {
-  return <div style={{ padding: 20 }}>ops dashboard — React scaffold</div>;
+  const poll = usePoll();
+  const [drill, setDrill] = useState<string | null>(null);
+  const snap = poll.snapshot;
+  const health = snap && !isErr(snap.health) ? snap.health : null;
+  const sleeves = snap?.sleeves ?? null;
+  const drillSleeve = drill && sleeves && !isErr(sleeves) ? sleeves[drill] : undefined;
+
+  return (
+    <>
+      {isDisconnected(poll) && <DisconnectedBanner lastGoodAt={poll.lastGoodAt} />}
+      <HeaderBar health={snap?.health ?? null} market={snap?.market ?? null}
+        lastGoodAt={poll.lastGoodAt} />
+      <AlertBanner health={health} />
+      <div className="wrap">
+        <SleeveCards sleeves={sleeves} onOpen={setDrill} />
+        <div className="cols">
+          <div className="col">
+            <PositionsPanel sleeves={sleeves} />
+            <FillsPanel sleeves={sleeves} />
+            <FunnelPanel funnel={snap?.funnel ?? null} />
+          </div>
+          <div className="col">
+            <ActivityFeed events={poll.events} />
+            <OvernightPanel funnel={snap?.funnel ?? null} />
+            <AnomaliesPanel anomalies={snap?.anomalies_7d ?? null} />
+            <LogsPanel />
+          </div>
+        </div>
+      </div>
+      {drill && (
+        <SleeveDrillDrawer name={drill} sleeve={drillSleeve}
+          onClose={() => setDrill(null)} />
+      )}
+    </>
+  );
 }
