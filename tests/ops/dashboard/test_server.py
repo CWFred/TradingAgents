@@ -11,20 +11,26 @@ from ops.dashboard.server import make_server
 from ops.journal import Journal
 
 
-@pytest.fixture()
-def base_url(tmp_path, monkeypatch):
+@pytest.fixture
+def cfg(tmp_path, monkeypatch):
     # Isolate the log dir so "missing file" tests don't read real machine
     # state (a live ops.out.log/ops.err.log on the dev box).
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    cfg = OpsConfig(
+    return OpsConfig(
         journal_path=str(tmp_path / "ops.sqlite"),
         baseline_journal_path=str(tmp_path / "baseline.sqlite"),
         research_journal_path=str(tmp_path / "research.sqlite"),
+        short_journal_path=str(tmp_path / "short.sqlite"),
+        insider_journal_path=str(tmp_path / "insider.sqlite"),
         screen_store_path=str(tmp_path / "screen.sqlite"),
         memo_store_path=str(tmp_path / "memos.sqlite"),
         guardian_liveness_path=str(tmp_path / "guardian.alive"),
         research_pause_flag_path=str(tmp_path / "research.paused"),
     )
+
+
+@pytest.fixture()
+def base_url(cfg):
     with Journal(cfg.journal_path) as j:
         j.record_event("service_started", {"pid": 1})
     server = make_server(cfg, port=0)
@@ -83,3 +89,16 @@ def test_unknown_route_404(base_url):
     with pytest.raises(urllib.error.HTTPError) as e:
         _get(base_url + "/api/nope")
     assert e.value.code == 404
+
+
+def test_events_route_merges_short_and_insider(base_url, cfg):
+    with Journal(cfg.short_journal_path) as j:
+        j.record_event("fill", {"side": "SHORT", "quantity": "30",
+                                "symbol": "GME", "price": "24.10"})
+    with Journal(cfg.insider_journal_path) as j:
+        j.record_event("fill", {"side": "BUY", "quantity": "15",
+                                "symbol": "OKTA", "price": "98.40"})
+    status, body = _get(base_url + "/api/events?limit=50")
+    assert status == 200
+    sources = {e["source"] for e in json.loads(body)}
+    assert {"short", "insider"} <= sources

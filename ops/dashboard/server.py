@@ -95,6 +95,8 @@ class _Handler(BaseHTTPRequestHandler):
             "momentum": self.config.journal_path,
             "research": self.config.research_journal_path,
             "baseline": self.config.baseline_journal_path,
+            "short": self.config.short_journal_path,
+            "insider": self.config.insider_journal_path,
         }
         self._send_json(merged_events(paths, limit=limit, kinds=kinds))
 
