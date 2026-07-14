@@ -16,7 +16,7 @@ export default function FillsPanel({ sleeves }: { sleeves: SleevesSection }) {
       const s = data[name];
       if (s && !isErr(s)) for (const f of s.fills_today) fills.push({ ...f, sleeve: name });
     }
-    fills.sort((a, b) => a.filled_at.localeCompare(b.filled_at));
+    fills.sort((a, b) => (a.filled_at < b.filled_at ? -1 : a.filled_at > b.filled_at ? 1 : 0));
   }
   return (
     <div className="panel">

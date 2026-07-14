@@ -6,8 +6,10 @@ import Unavail from "./Unavail";
 
 type SleevesSection = Section<Record<string, Section<Sleeve>>> | null;
 
-function Group({ name, sleeve, open, onToggle }: {
+function Group({ name, sleeve, open, onToggle, short }: {
   name: string; sleeve: Section<Sleeve>; open: boolean; onToggle: () => void;
+  // short broker journals positive magnitudes, so short exposure is flagged by sleeve, not by sign
+  short: boolean;
 }) {
   const err = isErr(sleeve);
   const rows = err ? [] : sleeve.positions;
@@ -35,7 +37,7 @@ function Group({ name, sleeve, open, onToggle }: {
                 {rows.map((r) => (
                   <tr key={r.symbol}>
                     <td className="sym">{r.symbol}</td>
-                    <td className={`num ${r.quantity.startsWith("-") ? "neg" : ""}`}>
+                    <td className={`num ${short || r.quantity.startsWith("-") ? "neg" : ""}`}>
                       {fmtQty(r.quantity)}
                     </td>
                     <td className="num">{r.entry ?? "—"}</td>
@@ -71,7 +73,8 @@ export default function PositionsPanel({ sleeves }: { sleeves: SleevesSection })
           if (!s) return null;
           return (
             <Group key={name} name={name} sleeve={s} open={!!expanded[name]}
-              onToggle={() => setExpanded((e) => ({ ...e, [name]: !e[name] }))} />
+              onToggle={() => setExpanded((e) => ({ ...e, [name]: !e[name] }))}
+              short={name === "short"} />
           );
         })
       )}
