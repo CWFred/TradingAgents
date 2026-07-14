@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0c0f14}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#2a333f;border-radius:6px}
+  ::-webkit-scrollbar-track{background:transparent}
+  a{color:#39d3c2;text-decoration:none}
+  a:hover{color:#5fe0d2}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @keyframes slidein{from{transform:translateX(30px);opacity:0}to{transform:translateX(0);opacity:1}}
+  @keyframes drop{from{transform:translateY(-8px);opacity:0}to{transform:translateY(0);opacity:1}}
+</style>
+</helmet>
+<div style="--bg:#0c0f14;--panel:#141922;--panel2:#1a212c;--elev:#212a37;--bd:#232c39;--bd2:#303c4c;--tx:#e8ecf3;--tx2:#93a0b2;--tx3:#5c6878;--acc:#39d3c2;--accd:#0f2b2b;--pos:#3fb27f;--neg:#e5645f;--amber:#d6a441;--sev:#e5645f;min-height:100vh;background:var(--bg);color:var(--tx);font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:13px;line-height:1.4;-webkit-font-smoothing:antialiased">
+
+  <sc-if value="{{ disconnected }}" hint-placeholder-val="{{ false }}">
+    <div style="position:sticky;top:0;z-index:60;background:linear-gradient(90deg,#3a1414,#2a1010);border-bottom:1px solid #5a2222;color:#f4b4b0;font-size:12.5px;font-weight:500;padding:9px 22px;display:flex;align-items:center;gap:10px;animation:drop .2s ease">
+      <span style="width:7px;height:7px;border-radius:50%;background:var(--sev);animation:pulse 1.1s infinite"></span>
+      <span>dashboard disconnected</span>
+      <span style="color:#c98884;font-family:'IBM Plex Mono',monospace;font-size:11.5px">— last update {{ lastUpdate }}</span>
+    </div>
+  </sc-if>
+
+  <div style="position:sticky;top:0;z-index:50;display:flex;align-items:center;justify-content:space-between;gap:20px;padding:13px 22px;background:rgba(12,15,20,.86);backdrop-filter:blur(12px);border-bottom:1px solid var(--bd)">
+    <div style="display:flex;align-items:center;gap:18px;min-width:0">
+      <div style="display:flex;align-items:center;gap:9px">
+        <span style="width:9px;height:9px;border-radius:50%;background:{{ health.dot }};box-shadow:0 0 10px {{ health.glow }}"></span>
+        <span style="font-weight:600;font-size:13.5px;letter-spacing:.02em">{{ health.verdict }}</span>
+      </div>
+      <span style="width:1px;height:20px;background:var(--bd2)"></span>
+      <div style="display:flex;align-items:center;gap:6px;color:var(--tx2);font-size:12px">
+        <span style="color:var(--tx3)">broker</span>
+        <span style="font-family:'IBM Plex Mono',monospace;color:var(--tx);font-weight:500">{{ health.broker }}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;color:var(--tx2);font-size:12px">
+        <span style="color:var(--tx3)">guardian</span>
+        <span style="font-family:'IBM Plex Mono',monospace;font-weight:500;color:{{ health.guardColor }}">{{ health.guardian }}</span>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px">
+      <div style="display:flex;align-items:center;gap:8px;padding:5px 12px;background:var(--panel);border:1px solid var(--bd);border-radius:8px">
+        <span style="width:8px;height:8px;border-radius:50%;background:{{ market.dot }}"></span>
+        <span style="font-weight:600;font-size:12px">{{ market.label }}</span>
+        <span style="color:var(--tx3);font-family:'IBM Plex Mono',monospace;font-size:11px">{{ market.sub }}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:7px;color:var(--tx3);font-size:11.5px;font-family:'IBM Plex Mono',monospace">
+        <span style="width:6px;height:6px;border-radius:50%;background:var(--acc);animation:pulse 2s infinite"></span>
+        <span>updated {{ lastUpdate }}</span>
+      </div>
+    </div>
+  </div>
+
+  <sc-if value="{{ alert.show }}" hint-placeholder-val="{{ false }}">
+    <div style="margin:14px 22px 0;border:1px solid {{ alert.border }};background:{{ alert.bg }};border-radius:10px;padding:13px 16px;display:flex;gap:14px;align-items:flex-start;animation:drop .2s ease">
+      <span style="flex:none;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:700;letter-spacing:.06em;color:{{ alert.tagColor }};background:{{ alert.tagBg }};padding:4px 9px;border-radius:6px">{{ alert.tag }}</span>
+      <div style="display:flex;flex-direction:column;gap:5px">
+        <sc-for list="{{ alert.conditions }}" as="c" hint-placeholder-count="2">
+          <div style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:{{ c.color }}">
+            <span style="width:4px;height:4px;border-radius:50%;background:currentColor;opacity:.7"></span>
+            <span>{{ c.text }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </sc-if>
+
+  <div style="padding:16px 22px 60px;max-width:1600px;margin:0 auto">
+
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin:0 2px 10px">
+      <div style="font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--tx3)">Sleeves</div>
+      <div style="font-size:11px;color:var(--tx3);font-family:'IBM Plex Mono',monospace">total {{ totalEquity }}</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:18px">
+      <sc-for list="{{ sleeves }}" as="s" hint-placeholder-count="5">
+        <div onClick="{{ s.onOpen }}" style="cursor:pointer;background:var(--panel);border:1px solid var(--bd);border-radius:11px;padding:14px 15px 12px;transition:border-color .15s,transform .15s;position:relative;overflow:hidden" style-hover="border-color:var(--bd2);transform:translateY(-2px)">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">
+            <span style="font-weight:600;font-size:13px;text-transform:capitalize">{{ s.name }}</span>
+            <sc-if value="{{ s.ok }}" hint-placeholder-val="{{ true }}">
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:500;color:{{ s.dayColor }}">{{ s.dayPnl }}</span>
+            </sc-if>
+          </div>
+          <sc-if value="{{ s.error }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:center;gap:7px;padding:10px 0 4px;color:var(--tx3);font-size:11.5px">
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;color:var(--amber);background:rgba(214,164,65,.12);padding:2px 6px;border-radius:4px">UNAVAIL</span>
+              <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ s.error }}</span>
+            </div>
+          </sc-if>
+          <sc-if value="{{ s.ok }}" hint-placeholder-val="{{ true }}">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:21px;font-weight:600;letter-spacing:-.01em" title="{{ s.equityFull }}">{{ s.equity }}</div>
+            <svg viewBox="0 0 120 30" width="100%" height="30" preserveAspectRatio="none" style="display:block;margin:8px 0 9px">
+              <path d="{{ s.sparkArea }}" fill="{{ s.sparkFill }}"></path>
+              <path d="{{ s.sparkPath }}" fill="none" stroke="{{ s.sparkColor }}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"></path>
+            </svg>
+            <div style="display:flex;align-items:center;justify-content:space-between;font-family:'IBM Plex Mono',monospace;font-size:11px">
+              <span style="color:var(--tx3)">life <span style="color:{{ s.lifeColor }}">{{ s.lifePnl }}</span></span>
+              <span style="color:var(--tx3)">cash {{ s.cash }}</span>
+            </div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1.55fr 1fr;gap:16px;align-items:start">
+
+      <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+
+        <div style="background:var(--panel);border:1px solid var(--bd);border-radius:12px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--bd)">
+            <span style="font-weight:600;font-size:13px">Positions</span>
+            <span style="font-size:11px;color:var(--tx3);font-family:'IBM Plex Mono',monospace">{{ posTotal }} open</span>
+          </div>
+          <div>
+            <sc-for list="{{ positions }}" as="g" hint-placeholder-count="5">
+              <div style="border-bottom:1px solid var(--bd)">
+                <div onClick="{{ g.onToggle }}" style="display:flex;align-items:center;justify-content:space-between;padding:11px 16px;cursor:pointer" style-hover="background:var(--panel2)">
+                  <div style="display:flex;align-items:center;gap:9px">
+                    <span style="color:var(--tx3);font-family:'IBM Plex Mono',monospace;font-size:11px;transition:transform .15s;transform:{{ g.caret }}">▸</span>
+                    <span style="font-weight:500;text-transform:capitalize">{{ g.name }}</span>
+                  </div>
+                  <span style="font-size:11.5px;color:var(--tx2);font-family:'IBM Plex Mono',monospace">{{ g.summary }}</span>
+                </div>
+                <sc-if value="{{ g.open }}" hint-placeholder-val="{{ false }}">
+                  <div style="padding:0 16px 12px">
+                    <sc-if value="{{ g.empty }}" hint-placeholder-val="{{ false }}">
+                      <div style="color:var(--tx3);font-size:12px;padding:4px 0 8px;font-style:italic">no open positions</div>
+                    </sc-if>
+                    <sc-if value="{{ g.hasRows }}" hint-placeholder-val="{{ true }}">
+                      <table style="width:100%;border-collapse:collapse;font-family:'IBM Plex Mono',monospace;font-size:12px">
+                        <thead>
+                          <tr style="color:var(--tx3);font-size:10px;text-transform:uppercase;letter-spacing:.05em">
+                            <th style="text-align:left;font-weight:500;padding:4px 8px 6px 0">symbol</th>
+                            <th style="text-align:right;font-weight:500;padding:4px 8px 6px 0">qty</th>
+                            <th style="text-align:right;font-weight:500;padding:4px 8px 6px 0">entry</th>
+                            <th style="text-align:right;font-weight:500;padding:4px 0 6px 0">stop</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <sc-for list="{{ g.rows }}" as="r" hint-placeholder-count="3">
+                            <tr style="border-top:1px solid var(--bd)">
+                              <td style="padding:6px 8px 6px 0;color:var(--tx);font-weight:500">{{ r.symbol }}</td>
+                              <td style="padding:6px 8px 6px 0;text-align:right;color:{{ r.qtyColor }}">{{ r.qty }}</td>
+                              <td style="padding:6px 8px 6px 0;text-align:right;color:var(--tx2)">{{ r.entry }}</td>
+                              <td style="padding:6px 0 6px 0;text-align:right;color:var(--tx3)">{{ r.stop }}</td>
+                            </tr>
+                          </sc-for>
+                        </tbody>
+                      </table>
+                    </sc-if>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="background:var(--panel);border:1px solid var(--bd);border-radius:12px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--bd)">
+            <span style="font-weight:600;font-size:13px">Fills today</span>
+            <span style="font-size:11px;color:var(--tx3);font-family:'IBM Plex Mono',monospace">{{ fills.length }}</span>
+          </div>
+          <sc-if value="{{ fillsEmpty }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:22px 16px;color:var(--tx3);font-size:12px;text-align:center;font-style:italic">no fills today</div>
+          </sc-if>
+          <sc-if value="{{ fillsShow }}" hint-placeholder-val="{{ true }}">
+            <div style="max-height:260px;overflow:auto">
+              <table style="width:100%;border-collapse:collapse;font-family:'IBM Plex Mono',monospace;font-size:12px">
+                <thead>
+                  <tr style="color:var(--tx3);font-size:10px;text-transform:uppercase;letter-spacing:.05em;position:sticky;top:0;background:var(--panel)">
+                    <th style="text-align:left;font-weight:500;padding:8px 8px 8px 16px">time</th>
+                    <th style="text-align:left;font-weight:500;padding:8px 8px">sleeve</th>
+                    <th style="text-align:left;font-weight:500;padding:8px 8px">side</th>
+                    <th style="text-align:left;font-weight:500;padding:8px 8px">symbol</th>
+                    <th style="text-align:right;font-weight:500;padding:8px 8px">qty</th>
+                    <th style="text-align:right;font-weight:500;padding:8px 16px 8px 8px">price</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <sc-for list="{{ fills }}" as="f" hint-placeholder-count="6">
+                    <tr style="border-top:1px solid var(--bd)">
+                      <td style="padding:6px 8px 6px 16px;color:var(--tx2)">{{ f.time }}</td>
+                      <td style="padding:6px 8px;color:var(--tx2);text-transform:capitalize;font-family:'IBM Plex Sans',sans-serif">{{ f.sleeve }}</td>
+                      <td style="padding:6px 8px"><span style="font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;color:{{ f.sideColor }};background:{{ f.sideBg }}">{{ f.side }}</span></td>
+                      <td style="padding:6px 8px;color:var(--tx);font-weight:500">{{ f.symbol }}</td>
+                      <td style="padding:6px 8px;text-align:right;color:var(--tx2)">{{ f.qty }}</td>
+                      <td style="padding:6px 16px 6px 8px;text-align:right;color:var(--tx)">{{ f.price }}</td>
+                    </tr>
+                  </sc-for>
+                </tbody>
+              </table>
+            </div>
+          </sc-if>
+        </div>
+
+        <div style="background:var(--panel);border:1px solid var(--bd);border-radius:12px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--bd)">
+            <span style="font-weight:600;font-size:13px">Research funnel</span>
+            <span style="font-size:11px;color:var(--tx3);font-family:'IBM Plex Mono',monospace">screen → memo → trade</span>
+          </div>
+          <div style="padding:14px 16px;display:flex;flex-direction:column;gap:13px">
+            <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--tx2)">
+              <span style="color:var(--tx3)">screener last run</span>
+              <span style="font-family:'IBM Plex Mono',monospace;color:var(--tx)">{{ funnel.screener }}</span>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:7px">
+              <span style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--tx3)">memos</span>
+              <div style="display:flex;flex-wrap:wrap;gap:7px">
+                <sc-for list="{{ funnel.memoPills }}" as="p" hint-placeholder-count="3">
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;padding:3px 9px;border-radius:6px;background:var(--panel2);border:1px solid var(--bd);color:var(--tx2)"><span style="color:{{ p.color }};font-weight:600">{{ p.count }}</span> {{ p.label }}</span>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:7px">
+              <span style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--tx3)">signals · 7d</span>
+              <div style="display:flex;flex-wrap:wrap;gap:7px">
+                <sc-for list="{{ funnel.signalPills }}" as="p" hint-placeholder-count="3">
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;padding:3px 9px;border-radius:6px;background:var(--panel2);border:1px solid var(--bd);color:var(--tx2)"><span style="color:{{ p.color }};font-weight:600">{{ p.count }}</span> {{ p.label }}</span>
+                </sc-for>
+              </div>
+            </div>
+            <div style="border-top:1px solid var(--bd);padding-top:11px">
+              <span style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--tx3)">open memos</span>
+              <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px">
+                <tbody>
+                  <sc-for list="{{ funnel.memos }}" as="m" hint-placeholder-count="4">
+                    <tr style="border-top:1px solid var(--bd)">
+                      <td style="padding:7px 8px 7px 0;font-family:'IBM Plex Mono',monospace;font-weight:600;color:var(--tx)">{{ m.ticker }}</td>
+                      <td style="padding:7px 8px;color:var(--tx2)">{{ m.thesis }}</td>
+                      <td style="padding:7px 8px;text-align:right"><span style="font-size:10px;font-family:'IBM Plex Mono',monospace;color:{{ m.tierColor }};font-weight:600">{{ m.tier }}</span></td>
+                      <td style="padding:7px 0;text-align:right;color:var(--tx3);font-size:11px">{{ m.status }}</td>
+                    </tr>
+                  </sc-for>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+
+        <div style="background:var(--panel);border:1px solid var(--bd);border-radius:12px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--bd)">
+            <span style="font-weight:600;font-size:13px">Activity</span>
+            <select value="{{ filter }}" onChange="{{ onFilter }}" style="background:var(--panel2);color:var(--tx2);border:1px solid var(--bd);border-radius:7px;font-size:11px;font-family:'IBM Plex Mono',monospace;padding:4px 8px;cursor:pointer;outline:none">
+              <option value="all">all kinds</option>
+              <sc-for list="{{ eventKinds }}" as="k" hint-placeholder-count="4">
+                <option value="{{ k }}">{{ k }}</option>
+              </sc-for>
+            </select>
+          </div>
+          <div style="max-height:420px;overflow:auto">
+            <sc-for list="{{ events }}" as="e" hint-placeholder-count="10">
+              <div style="display:flex;gap:10px;padding:8px 14px;border-bottom:1px solid var(--bd2);align-items:baseline" style-hover="background:var(--panel2)">
+                <span style="flex:none;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--tx3);width:52px">{{ e.time }}</span>
+                <span style="flex:none;font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;color:{{ e.color }};background:{{ e.bg }};padding:1px 6px;border-radius:4px;align-self:flex-start;margin-top:1px">{{ e.kind }}</span>
+                <span style="flex:1;font-size:12px;color:var(--tx);min-width:0">{{ e.text }}</span>
+                <span style="flex:none;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--tx3)">{{ e.age }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="background:var(--panel);border:1px solid var(--bd);border-radius:12px;padding:14px 16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:11px">
+            <span style="font-weight:600;font-size:13px">Overnight</span>
+            <sc-if value="{{ overnight.active }}" hint-placeholder-val="{{ true }}">
+              <span style="font-size:10px;font-family:'IBM Plex Mono',monospace;font-weight:600;color:var(--acc);background:var(--accd);padding:3px 8px;border-radius:5px">WINDOW ACTIVE</span>
+            </sc-if>
+            <sc-if value="{{ overnight.paused }}" hint-placeholder-val="{{ false }}">
+              <span style="font-size:10px;font-family:'IBM Plex Mono',monospace;font-weight:700;color:var(--amber);background:rgba(214,164,65,.14);padding:3px 8px;border-radius:5px">◼ PAUSED</span>
+            </sc-if>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:9px;font-size:12px">
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <span style="color:var(--tx3)">last vetting</span>
+              <span style="font-family:'IBM Plex Mono',monospace;color:var(--tx2)">{{ overnight.vetting }} <span style="color:var(--tx3)">· {{ overnight.vettingAge }}</span></span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:baseline">
+              <span style="color:var(--tx3)">last drain</span>
+              <span style="font-family:'IBM Plex Mono',monospace;color:var(--tx2)">{{ overnight.drain }} <span style="color:var(--tx3)">· {{ overnight.drainAge }}</span></span>
+            </div>
+          </div>
+        </div>
+
+        <div style="background:var(--panel);border:1px solid var(--bd);border-radius:12px;overflow:hidden">
+          <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid var(--bd)">
+            <span style="font-weight:600;font-size:13px">Anomalies</span>
+            <span style="font-size:11px;color:var(--tx3);font-family:'IBM Plex Mono',monospace">7d</span>
+          </div>
+          <sc-if value="{{ anomEmpty }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:22px 16px;color:var(--tx3);font-size:12px;text-align:center;font-style:italic">none in last 7 days</div>
+          </sc-if>
+          <sc-if value="{{ anomShow }}" hint-placeholder-val="{{ true }}">
+            <table style="width:100%;border-collapse:collapse;font-size:12px">
+              <tbody>
+                <sc-for list="{{ anomalies }}" as="a" hint-placeholder-count="3">
+                  <tr style="border-top:1px solid var(--bd)">
+                    <td style="padding:8px 8px 8px 16px;font-family:'IBM Plex Mono',monospace;color:var(--tx2)">{{ a.kind }}</td>
+                    <td style="padding:8px 8px;text-align:right;font-family:'IBM Plex Mono',monospace;color:{{ a.countColor }};font-weight:600">{{ a.count }}</td>
+                    <td style="padding:8px 16px 8px 8px;text-align:right;font-family:'IBM Plex Mono',monospace;color:var(--tx3);font-size:11px">{{ a.last }}</td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </sc-if>
+        </div>
+
+        <div style="background:var(--panel);border:1px solid var(--bd);border-radius:12px;overflow:hidden">
+          <div style="padding:13px 16px;border-bottom:1px solid var(--bd);font-weight:600;font-size:13px">Logs</div>
+          <div style="border-bottom:1px solid var(--bd)">
+            <div onClick="{{ onToggleOut }}" style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;cursor:pointer" style-hover="background:var(--panel2)">
+              <div style="display:flex;align-items:center;gap:9px">
+                <span style="color:var(--tx3);font-family:'IBM Plex Mono',monospace;font-size:11px;transform:{{ logs.outCaret }};transition:transform .15s">▸</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tx2)">ops.out.log</span>
+              </div>
+              <sc-if value="{{ logs.outOpen }}" hint-placeholder-val="{{ false }}">
+                <span onClick="{{ onRefreshOut }}" style="font-size:10.5px;font-family:'IBM Plex Mono',monospace;color:var(--acc);border:1px solid var(--bd2);padding:3px 9px;border-radius:6px" style-hover="background:var(--accd)">refresh</span>
+              </sc-if>
+            </div>
+            <sc-if value="{{ logs.outOpen }}" hint-placeholder-val="{{ false }}">
+              <pre style="margin:0;padding:12px 16px;background:#0a0d11;font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.6;color:var(--tx2);max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word">{{ logs.outText }}</pre>
+            </sc-if>
+          </div>
+          <div>
+            <div onClick="{{ onToggleErr }}" style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;cursor:pointer" style-hover="background:var(--panel2)">
+              <div style="display:flex;align-items:center;gap:9px">
+                <span style="color:var(--tx3);font-family:'IBM Plex Mono',monospace;font-size:11px;transform:{{ logs.errCaret }};transition:transform .15s">▸</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tx2)">ops.err.log</span>
+              </div>
+              <sc-if value="{{ logs.errOpen }}" hint-placeholder-val="{{ false }}">
+                <span onClick="{{ onRefreshErr }}" style="font-size:10.5px;font-family:'IBM Plex Mono',monospace;color:var(--acc);border:1px solid var(--bd2);padding:3px 9px;border-radius:6px" style-hover="background:var(--accd)">refresh</span>
+              </sc-if>
+            </div>
+            <sc-if value="{{ logs.errOpen }}" hint-placeholder-val="{{ false }}">
+              <pre style="margin:0;padding:12px 16px;background:#0a0d11;font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.6;color:#c88f8b;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word">{{ logs.errText }}</pre>
+            </sc-if>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <sc-if value="{{ drill.open }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ onCloseDrill }}" style="position:fixed;inset:0;z-index:80;background:rgba(6,8,11,.6);backdrop-filter:blur(2px)"></div>
+    <div style="position:fixed;top:0;right:0;bottom:0;z-index:81;width:480px;max-width:92vw;background:var(--panel);border-left:1px solid var(--bd2);box-shadow:-20px 0 50px rgba(0,0,0,.5);display:flex;flex-direction:column;animation:slidein .22s ease">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--bd)">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-weight:600;font-size:16px;text-transform:capitalize">{{ drill.name }}</span>
+          <span style="font-size:11px;color:var(--tx3);font-family:'IBM Plex Mono',monospace">{{ drill.kindLabel }}</span>
+        </div>
+        <span onClick="{{ onCloseDrill }}" style="cursor:pointer;color:var(--tx3);font-size:20px;line-height:1;padding:4px 8px;border-radius:6px" style-hover="background:var(--panel2);color:var(--tx)">✕</span>
+      </div>
+      <div style="flex:1;overflow:auto;padding:20px">
+        <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:4px">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:30px;font-weight:600;letter-spacing:-.01em">{{ drill.equity }}</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:{{ drill.dayColor }}">{{ drill.dayPnl }}</span>
+        </div>
+        <div style="display:flex;gap:18px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--tx3);margin-bottom:16px">
+          <span>lifetime <span style="color:{{ drill.lifeColor }}">{{ drill.lifePnl }}</span></span>
+          <span>cash <span style="color:var(--tx2)">{{ drill.cash }}</span></span>
+        </div>
+        <svg viewBox="0 0 520 120" width="100%" height="120" preserveAspectRatio="none" style="display:block;background:var(--panel2);border:1px solid var(--bd);border-radius:9px;margin-bottom:20px">
+          <path d="{{ drill.bigArea }}" fill="{{ drill.sparkFill }}"></path>
+          <path d="{{ drill.bigPath }}" fill="none" stroke="{{ drill.sparkColor }}" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round"></path>
+        </svg>
+
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--tx3);margin-bottom:8px">Positions</div>
+        <sc-if value="{{ drill.posEmpty }}" hint-placeholder-val="{{ false }}">
+          <div style="color:var(--tx3);font-size:12px;font-style:italic;margin-bottom:20px">no open positions</div>
+        </sc-if>
+        <sc-if value="{{ drill.hasPos }}" hint-placeholder-val="{{ true }}">
+          <table style="width:100%;border-collapse:collapse;font-family:'IBM Plex Mono',monospace;font-size:12px;margin-bottom:20px">
+            <thead><tr style="color:var(--tx3);font-size:10px;text-transform:uppercase"><th style="text-align:left;font-weight:500;padding:0 8px 6px 0">symbol</th><th style="text-align:right;font-weight:500;padding:0 8px 6px 0">qty</th><th style="text-align:right;font-weight:500;padding:0 8px 6px 0">entry</th><th style="text-align:right;font-weight:500;padding:0 0 6px 0">stop</th></tr></thead>
+            <tbody>
+              <sc-for list="{{ drill.positions }}" as="r" hint-placeholder-count="3">
+                <tr style="border-top:1px solid var(--bd)"><td style="padding:6px 8px 6px 0;font-weight:500">{{ r.symbol }}</td><td style="padding:6px 8px 6px 0;text-align:right;color:{{ r.qtyColor }}">{{ r.qty }}</td><td style="padding:6px 8px 6px 0;text-align:right;color:var(--tx2)">{{ r.entry }}</td><td style="padding:6px 0;text-align:right;color:var(--tx3)">{{ r.stop }}</td></tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </sc-if>
+
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--tx3);margin-bottom:8px">Fills today</div>
+        <sc-if value="{{ drill.fillsEmpty }}" hint-placeholder-val="{{ false }}">
+          <div style="color:var(--tx3);font-size:12px;font-style:italic">no fills today</div>
+        </sc-if>
+        <sc-if value="{{ drill.hasFills }}" hint-placeholder-val="{{ true }}">
+          <table style="width:100%;border-collapse:collapse;font-family:'IBM Plex Mono',monospace;font-size:12px">
+            <tbody>
+              <sc-for list="{{ drill.fills }}" as="f" hint-placeholder-count="3">
+                <tr style="border-top:1px solid var(--bd)"><td style="padding:6px 8px 6px 0;color:var(--tx3)">{{ f.time }}</td><td style="padding:6px 8px"><span style="font-size:10px;font-weight:600;padding:1px 5px;border-radius:4px;color:{{ f.sideColor }};background:{{ f.sideBg }}">{{ f.side }}</span></td><td style="padding:6px 8px;font-weight:500">{{ f.symbol }}</td><td style="padding:6px 8px;text-align:right;color:var(--tx2)">{{ f.qty }}</td><td style="padding:6px 0;text-align:right;color:var(--tx)">{{ f.price }}</td></tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </sc-if>
+      </div>
+    </div>
+  </sc-if>
+
+  <div style="position:fixed;left:14px;bottom:14px;z-index:90;display:flex;align-items:center;gap:6px;background:rgba(20,25,34,.92);backdrop-filter:blur(8px);border:1px solid var(--bd2);border-radius:10px;padding:6px 8px;font-family:'IBM Plex Mono',monospace">
+    <span style="font-size:9.5px;color:var(--tx3);text-transform:uppercase;letter-spacing:.05em;padding:0 4px">demo</span>
+    <sc-for list="{{ scenarios }}" as="sc" hint-placeholder-count="5">
+      <span onClick="{{ sc.onClick }}" style="cursor:pointer;font-size:10.5px;padding:4px 9px;border-radius:6px;color:{{ sc.color }};background:{{ sc.bg }};border:1px solid {{ sc.border }}">{{ sc.label }}</span>
+    </sc-for>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { scenario:'healthy', drill:null, expanded:{momentum:true,research:false,baseline:false,short:false,insider:false}, filter:'all', outOpen:false, errOpen:false, outLoaded:false, errLoaded:false, outNonce:0, errNonce:0, tick:0 };
+
+  store = this.makeStore();
+
+  makeStore(){
+    const now = Date.now();
+    const walk=(base,n,vol)=>{let v=base,out=[];for(let i=0;i<n;i++){v=v*(1+(Math.random()-0.48)*vol);out.push(v);}out.push(base);return out;};
+    const defs=[
+      {name:'momentum', eq:10450.2347, cash:2140.55, day:1.82, life:4.50, vol:0.010,
+        positions:[{symbol:'AAPL',qty:12,entry:'214.30',stop:'205.00'},{symbol:'NVDA',qty:8,entry:'168.42',stop:'159.00'},{symbol:'TSLA',qty:5,entry:'242.10',stop:'230.00'}],
+        fills:[{h:9,m:32,side:'BUY',symbol:'AAPL',qty:6,price:'214.28'},{h:10,m:2,side:'BUY',symbol:'NVDA',qty:8,price:'168.42'},{h:11,m:30,side:'SELL',symbol:'MSTR',qty:3,price:'1284.10'},{h:13,m:0,side:'BUY',symbol:'TSLA',qty:5,price:'242.10'}]},
+      {name:'research', eq:9880.7112, cash:3025.10, day:-0.64, life:-1.19, vol:0.008,
+        positions:[{symbol:'MSFT',qty:9,entry:'502.11',stop:''},{symbol:'GOOGL',qty:7,entry:'181.55',stop:'172.00'},{symbol:'AMZN',qty:11,entry:'219.80',stop:''},{symbol:'META',qty:4,entry:'712.30',stop:'690.00'}],
+        fills:[{h:9,m:35,side:'BUY',symbol:'MSFT',qty:9,price:'502.11'},{h:9,m:36,side:'BUY',symbol:'META',qty:4,price:'712.30'}]},
+      {name:'baseline', eq:10120.0000, cash:120.00, day:0.41, life:1.20, vol:0.006,
+        positions:[{symbol:'SPY',qty:18,entry:'558.20',stop:''}],
+        fills:[]},
+      {name:'short', eq:10310.5540, cash:8410.20, day:0.95, life:3.11, vol:0.012,
+        positions:[{symbol:'GME',qty:-30,entry:'24.10',stop:'27.50'},{symbol:'AMC',qty:-40,entry:'4.20',stop:'5.10'}],
+        fills:[{h:9,m:40,side:'SHORT',symbol:'GME',qty:30,price:'24.10'},{h:12,m:15,side:'COVER',symbol:'BYND',qty:20,price:'6.42'}]},
+      {name:'insider', eq:9720.4088, cash:1980.75, day:-0.22, life:-2.80, vol:0.009,
+        positions:[{symbol:'OKTA',qty:15,entry:'98.40',stop:'90.00'},{symbol:'PLTR',qty:60,entry:'42.10',stop:'38.00'}],
+        fills:[{h:10,m:48,side:'BUY',symbol:'OKTA',qty:15,price:'98.40'}]}
+    ];
+    const sleeves = defs.map(d=>({...d, equity:d.eq.toFixed(4), cashStr:d.cash.toFixed(4), series:walk(d.eq,59,d.vol), error:null}));
+
+    const ev=(minAgo,kind,text)=>({at:now-minAgo*60000,kind,text});
+    const events=[
+      ev(0.5,'heartbeat','guardian snapshot ok · 5 sleeves, 12 positions'),
+      ev(2,'fill','momentum BUY TSLA ×5 @ 242.10'),
+      ev(4,'signal','research signal HOLD on MSFT (score 0.61)'),
+      ev(7,'fill','short COVER BYND ×20 @ 6.42'),
+      ev(11,'memo','memo opened CRWD · tier 2 · platform consolidation'),
+      ev(16,'signal','insider cluster detected OKTA (4 Form-4 buys)'),
+      ev(19,'fill','insider BUY OKTA ×15 @ 98.40'),
+      ev(24,'order','momentum submitted SELL MSTR ×3'),
+      ev(31,'fill','research BUY META ×4 @ 712.30'),
+      ev(38,'signal','momentum breakout NVDA above 20d high'),
+      ev(45,'heartbeat','guardian snapshot ok · books reconciled'),
+      ev(52,'memo','memo closed ANET · realized +6.4%'),
+      ev(67,'screener','screener run complete · 37 / 5000 passed'),
+      ev(88,'fill','baseline rebalance SPY ×2 @ 558.05'),
+      ev(102,'signal','research signal BUY on ASML (score 0.78)'),
+      ev(119,'order','short submitted SHORT GME ×30'),
+      ev(133,'memo','memo opened ELF · tier 3 · share gains'),
+      ev(155,'heartbeat','guardian snapshot ok'),
+      ev(178,'fill','momentum BUY AAPL ×6 @ 214.28'),
+      ev(210,'signal','insider Form-4 ingest · 214 filings parsed'),
+      ev(255,'drain','overnight drain complete · 3 memos promoted'),
+      ev(300,'vetting','overnight vetting complete · 5 theses reviewed'),
+      ev(340,'screener','premarket screener seeded 5000 tickers'),
+      ev(400,'heartbeat','service started · broker=paper')
+    ];
+
+    return {
+      sleeves, events,
+      guardianAt: now - 42000,
+      lastPoll: now,
+      overnight:{ vetting:'05:02:11', vettingAt: now-3600000*8.2, drain:'06:41:03', drainAt: now-3600000*6.8 },
+      anomalies:[
+        {kind:'stale_heartbeat',count:3,last:'07-13 09:14'},
+        {kind:'ledger_lag',count:1,last:'07-12 16:02'},
+        {kind:'price_gap',count:2,last:'07-11 10:41'}
+      ],
+      funnel:{
+        screener:'37 / 5000 · 2026-07-13',
+        memos:[
+          {ticker:'NVDA',thesis:'AI capex durability',tier:'T1',status:'open'},
+          {ticker:'ASML',thesis:'litho monopoly',tier:'T2',status:'open'},
+          {ticker:'CRWD',thesis:'platform consolidation',tier:'T2',status:'open'},
+          {ticker:'ELF',thesis:'share gains',tier:'T3',status:'open'}
+        ]
+      }
+    };
+  }
+
+  componentDidMount(){ this.timer = setInterval(()=>this.poll(), 5000); }
+  componentWillUnmount(){ clearInterval(this.timer); }
+
+  poll(){
+    if(this.state.scenario==='disconnected') return;
+    const s=this.store, now=Date.now();
+    s.sleeves.forEach(sl=>{
+      if(sl.error) return;
+      const last=sl.series[sl.series.length-1];
+      const nx=last*(1+(Math.random()-0.5)*0.004);
+      sl.series=[...sl.series.slice(-59),nx];
+      sl.equity=nx.toFixed(4);
+    });
+    s.guardianAt=now; s.lastPoll=now;
+    if(Math.random()<0.4){
+      const k=['heartbeat','signal','fill'][Math.floor(Math.random()*3)];
+      const texts={heartbeat:'guardian snapshot ok',signal:'momentum signal refreshed',fill:'baseline micro-rebalance SPY ×1'};
+      s.events=[{at:now,kind:k,text:texts[k]},...s.events].slice(0,80);
+    }
+    this.setState(st=>({tick:st.tick+1}));
+  }
+
+  // ---- decimal-string display (no parseFloat for money) ----
+  roundStr(str,dp){
+    let neg=str[0]==='-'; if(neg)str=str.slice(1);
+    let [i,f='']=str.split('.'); f=f.padEnd(dp+1,'0');
+    let keep=f.slice(0,dp), next=f.charCodeAt(dp)-48, digits=i+keep;
+    if(next>=5){ let a=digits.split(''),k=a.length-1;
+      while(k>=0){ if(a[k]==='9'){a[k]='0';k--;} else {a[k]=String(+a[k]+1);break;} }
+      if(k<0)a.unshift('1'); digits=a.join(''); }
+    let ip=digits.slice(0,digits.length-dp)||'0', fp=digits.slice(digits.length-dp);
+    ip=ip.replace(/\B(?=(\d{3})+(?!\d))/g,',');
+    return (neg?'−':'')+'$'+ip+(dp?'.'+fp:'');
+  }
+  pct(v){ if(v==null||isNaN(v)) return {t:'—',c:'var(--tx3)'};
+    const s=v>0?'+':v<0?'−':''; const c=v>0?'var(--pos)':v<0?'var(--neg)':'var(--tx2)';
+    return {t:s+Math.abs(v).toFixed(2)+'%',c}; }
+  rel(ms){ const d=(Date.now()-ms)/1000; if(d<45)return'just now'; if(d<3600)return Math.round(d/60)+'m ago'; if(d<86400)return Math.round(d/3600)+'h ago'; return Math.round(d/86400)+'d ago'; }
+  hhmm(ms){ const d=new Date(ms); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0'); }
+  guardFmt(ms){ const d=(Date.now()-ms)/1000; if(d<90)return Math.round(d)+'s'; if(d<3600)return Math.round(d/60)+'m'; return Math.round(d/3600)+'h'; }
+
+  spark(series,w,h){
+    if(!series||!series.length) return {line:'',area:''};
+    const mn=Math.min(...series),mx=Math.max(...series),rng=(mx-mn)||1,pad=h*0.15;
+    const pts=series.map((v,i)=>[ (i/(series.length-1))*w, h-pad-((v-mn)/rng)*(h-pad*2) ]);
+    const line='M'+pts.map(p=>p[0].toFixed(1)+' '+p[1].toFixed(1)).join(' L');
+    const area=line+` L${w} ${h} L0 ${h} Z`;
+    return {line,area};
+  }
+
+  sideStyle(side){
+    const m={BUY:['var(--pos)','rgba(63,178,127,.14)'],SELL:['var(--neg)','rgba(229,100,95,.14)'],SHORT:['var(--amber)','rgba(214,164,65,.14)'],COVER:['var(--acc)','rgba(57,211,194,.13)']};
+    return m[side]||['var(--tx2)','var(--panel2)'];
+  }
+  kindColor(k){
+    const m={fill:'var(--pos)',signal:'var(--acc)',memo:'#b48be0',order:'#e0b06a',heartbeat:'var(--tx3)',screener:'#6aa0e0',drain:'#6aa0e0',vetting:'#6aa0e0',error:'var(--neg)',halt:'var(--sev)'};
+    return m[k]||'var(--tx2)';
+  }
+  kindBg(k){
+    const m={fill:'rgba(63,178,127,.12)',signal:'rgba(57,211,194,.12)',memo:'rgba(180,139,224,.13)',order:'rgba(224,176,106,.12)',heartbeat:'rgba(92,104,120,.16)',screener:'rgba(106,160,224,.12)',drain:'rgba(106,160,224,.12)',vetting:'rgba(106,160,224,.12)',error:'rgba(229,100,95,.14)',halt:'rgba(229,100,95,.16)'};
+    return m[k]||'var(--panel2)';
+  }
+
+  scenarioFlags(){
+    const sc=this.state.scenario;
+    return {
+      disconnected: sc==='disconnected',
+      stopped: sc==='alert',
+      stale: sc==='stale',
+      sleeveErr: sc==='error'
+    };
+  }
+
+  renderVals(){
+    const st=this.state, S=this.store, F=this.scenarioFlags();
+
+    // apply sleeve error scenario (non-destructive view)
+    const sleeveData = S.sleeves.map(sl=>{
+      if(F.sleeveErr && sl.name==='insider') return {...sl, error:'ledger file missing: insider.ndjson'};
+      return {...sl, error:null};
+    });
+
+    // header health
+    let health;
+    if(F.disconnected){ health={dot:'var(--sev)',glow:'rgba(229,100,95,.5)',verdict:'UNKNOWN',broker:'paper',guardian:'—',guardColor:'var(--tx3)'}; }
+    else if(F.stopped){ health={dot:'var(--sev)',glow:'rgba(229,100,95,.5)',verdict:'STOPPED',broker:'paper',guardian:this.guardFmt(S.guardianAt),guardColor:'var(--sev)'}; }
+    else if(F.stale){ health={dot:'var(--amber)',glow:'rgba(214,164,65,.5)',verdict:'STALE',broker:'paper',guardian:'6m',guardColor:'var(--amber)'}; }
+    else { health={dot:'var(--pos)',glow:'rgba(63,178,127,.5)',verdict:'RUNNING',broker:'paper',guardian:this.guardFmt(S.guardianAt),guardColor:'var(--tx2)'}; }
+
+    const market={ dot:'var(--pos)', label:'market OPEN', sub:'prev close 16:00' };
+
+    // banners
+    const disconnected=F.disconnected;
+    let alert={show:false};
+    if(F.stopped){
+      alert={show:true,tag:'ALERT',tagColor:'#fff',tagBg:'var(--sev)',border:'#5a2626',bg:'linear-gradient(90deg,rgba(58,20,20,.6),rgba(30,16,16,.4))',
+        conditions:[
+          {text:'service STOPPED — guardian not reporting',color:'#f0a9a5'},
+          {text:'daily drawdown halt in effect',color:'#f0a9a5'},
+          {text:'weekly kill-switch tripped',color:'#f0a9a5'}
+        ]};
+    } else if(F.stale){
+      alert={show:true,tag:'NOTICE',tagColor:'#2a2013',tagBg:'var(--amber)',border:'#4a3a1c',bg:'linear-gradient(90deg,rgba(48,38,16,.5),rgba(28,24,14,.35))',
+        conditions:[
+          {text:'service STALE — guardian heartbeat aging',color:'#e6c583'},
+          {text:'research paused',color:'#e6c583'}
+        ]};
+    }
+
+    // sleeve cards
+    const sleeves = sleeveData.map(sl=>{
+      const onOpen=()=>this.setState({drill:sl.name});
+      if(sl.error) return {name:sl.name, ok:false, error:sl.error, onOpen};
+      const last=sl.series[sl.series.length-1];
+      const sp=this.spark(sl.series,120,30);
+      const up=sl.day>=0;
+      const col=up?'var(--pos)':'var(--neg)';
+      const fill=up?'rgba(63,178,127,.10)':'rgba(229,100,95,.10)';
+      return {
+        name:sl.name, ok:true, error:null, onOpen,
+        equity:this.roundStr(sl.equity,2), equityFull:'$'+sl.equity,
+        dayPnl:this.pct(sl.day).t, dayColor:this.pct(sl.day).c,
+        lifePnl:this.pct(sl.life).t, lifeColor:this.pct(sl.life).c,
+        cash:this.roundStr(sl.cashStr,0),
+        sparkPath:sp.line, sparkArea:sp.area, sparkColor:col, sparkFill:fill
+      };
+    });
+
+    // total equity (string sum via floats ok for header summary label only, but keep display via roundStr on a string)
+    let tot=0; sleeveData.forEach(sl=>{ if(!sl.error) tot+=parseFloat(sl.equity); });
+    const totalEquity=this.roundStr(tot.toFixed(2),2);
+
+    // positions
+    const posTotal = sleeveData.reduce((n,sl)=> n + (sl.error?0:sl.positions.length), 0);
+    const positions = sleeveData.map(sl=>{
+      const exp=!!st.expanded[sl.name];
+      if(sl.error) return {name:sl.name,summary:'unavailable',open:exp,empty:false,hasRows:false,rows:[],caret:exp?'rotate(90deg)':'rotate(0)',onToggle:()=>this.toggle(sl.name)};
+      const rows=sl.positions.map(p=>({symbol:p.symbol,qty:String(p.qty),qtyColor:p.qty<0?'var(--neg)':'var(--tx)',entry:p.entry,stop:p.stop||'—'}));
+      return {name:sl.name,summary:rows.length+(rows.length===1?' position':' positions'),open:exp,empty:rows.length===0,hasRows:rows.length>0,rows,caret:exp?'rotate(90deg)':'rotate(0)',onToggle:()=>this.toggle(sl.name)};
+    });
+
+    // fills today (all sleeves)
+    let allFills=[];
+    sleeveData.forEach(sl=>{ if(sl.error)return; sl.fills.forEach(f=>allFills.push({...f,sleeve:sl.name})); });
+    allFills.sort((a,b)=> (a.h*60+a.m)-(b.h*60+b.m));
+    const fills=allFills.map(f=>{ const[c,bg]=this.sideStyle(f.side); return {time:String(f.h).padStart(2,'0')+':'+String(f.m).padStart(2,'0'),sleeve:f.sleeve,side:f.side,sideColor:c,sideBg:bg,symbol:f.symbol,qty:String(f.qty),price:f.price}; });
+
+    // funnel
+    const funnel={
+      screener:S.funnel.screener,
+      memoPills:[{count:4,label:'open',color:'var(--acc)'},{count:12,label:'closed',color:'var(--pos)'},{count:30,label:'rejected',color:'var(--tx3)'}],
+      signalPills:[{count:9,label:'buy',color:'var(--pos)'},{count:14,label:'hold',color:'var(--tx2)'},{count:3,label:'sell',color:'var(--neg)'}],
+      memos:S.funnel.memos.map(m=>({...m,tierColor:m.tier==='T1'?'var(--acc)':m.tier==='T2'?'var(--tx2)':'var(--tx3)'}))
+    };
+
+    // events
+    let evs=S.events.filter(e=> st.filter==='all' || e.kind===st.filter);
+    const events=evs.map(e=>({time:this.hhmm(e.at),kind:e.kind,color:this.kindColor(e.kind),bg:this.kindBg(e.kind),text:e.text,age:this.rel(e.at)}));
+    const eventKinds=[...new Set(S.events.map(e=>e.kind))].sort();
+
+    // overnight
+    const overnight={
+      active:!F.stale, paused:F.stale,
+      vetting:S.overnight.vetting, vettingAge:this.rel(S.overnight.vettingAt),
+      drain:S.overnight.drain, drainAge:this.rel(S.overnight.drainAt)
+    };
+
+    // anomalies
+    let anoms=[...S.anomalies];
+    if(F.stopped) anoms=[{kind:'drawdown_halt',count:1,last:this.hhmm(Date.now()).slice(0,5)},{kind:'kill_switch',count:1,last:this.hhmm(Date.now()).slice(0,5)},...anoms];
+    const anomalies=anoms.filter(a=>a.count>0).map(a=>({kind:a.kind,count:String(a.count),countColor:a.count>2?'var(--amber)':'var(--tx2)',last:a.last}));
+
+    // logs
+    const outText = st.outLoaded ? this.genLog('out', st.outNonce) : 'loading…';
+    const errText = st.errLoaded ? this.genLog('err', st.errNonce) : 'loading…';
+    const logs={
+      outOpen:st.outOpen, errOpen:st.errOpen,
+      outCaret:st.outOpen?'rotate(90deg)':'rotate(0)', errCaret:st.errOpen?'rotate(90deg)':'rotate(0)',
+      outText, errText,
+      onToggleOut:()=>{}, onToggleErr:()=>{}
+    };
+
+    // drill-down
+    let drill={open:false};
+    if(st.drill){
+      const sl=sleeveData.find(x=>x.name===st.drill);
+      if(sl && !sl.error){
+        const sp=this.spark(sl.series,520,120);
+        const up=sl.day>=0;
+        drill={
+          open:true, name:sl.name, kindLabel:{momentum:'intraday momentum',research:'LLM long theses',baseline:'passive benchmark',short:'short-selling',insider:'Form-4 clusters'}[sl.name]||'',
+          equity:this.roundStr(sl.equity,2),
+          dayPnl:this.pct(sl.day).t, dayColor:this.pct(sl.day).c,
+          lifePnl:this.pct(sl.life).t, lifeColor:this.pct(sl.life).c,
+          cash:this.roundStr(sl.cashStr,2),
+          bigPath:sp.line, bigArea:sp.area, sparkColor:up?'var(--pos)':'var(--neg)', sparkFill:up?'rgba(63,178,127,.10)':'rgba(229,100,95,.10)',
+          posEmpty:sl.positions.length===0, hasPos:sl.positions.length>0,
+          positions:sl.positions.map(p=>({symbol:p.symbol,qty:String(p.qty),qtyColor:p.qty<0?'var(--neg)':'var(--tx)',entry:p.entry,stop:p.stop||'—'})),
+          fillsEmpty:sl.fills.length===0, hasFills:sl.fills.length>0,
+          fills:sl.fills.map(f=>{const[c,bg]=this.sideStyle(f.side);return {time:String(f.h).padStart(2,'0')+':'+String(f.m).padStart(2,'0'),side:f.side,sideColor:c,sideBg:bg,symbol:f.symbol,qty:String(f.qty),price:f.price};})
+        };
+      }
+    }
+
+    // scenario toggler
+    const defs=[['healthy','healthy'],['stale','stale'],['alert','alert'],['error','sleeve err'],['disconnected','offline']];
+    const scenarios=defs.map(([id,label])=>{
+      const on=st.scenario===id;
+      return {label,onClick:()=>this.setState({scenario:id}),
+        color:on?'#0c0f14':'var(--tx2)',
+        bg:on?'var(--acc)':'transparent',
+        border:on?'var(--acc)':'var(--bd2)'};
+    });
+
+    return {
+      disconnected, lastUpdate:this.hhmm(F.disconnected?S.lastPoll:Date.now()),
+      health, market, alert,
+      sleeves, totalEquity,
+      positions, posTotal,
+      fills, fillsEmpty:fills.length===0, fillsShow:fills.length>0,
+      funnel,
+      events, eventKinds, filter:st.filter, onFilter:e=>this.setState({filter:e.target.value}),
+      overnight,
+      anomalies, anomEmpty:anomalies.length===0, anomShow:anomalies.length>0,
+      logs,
+      onToggleOut:()=>this.setState(s=>({outOpen:!s.outOpen, outLoaded:s.outLoaded||!s.outOpen})),
+      onToggleErr:()=>this.setState(s=>({errOpen:!s.errOpen, errLoaded:s.errLoaded||!s.errOpen})),
+      onRefreshOut:(e)=>{ e.stopPropagation(); this.setState(s=>({outNonce:s.outNonce+1,outLoaded:true})); },
+      onRefreshErr:(e)=>{ e.stopPropagation(); this.setState(s=>({errNonce:s.errNonce+1,errLoaded:true})); },
+      drill, onCloseDrill:()=>this.setState({drill:null}),
+      scenarios
+    };
+  }
+
+  toggle(name){ this.setState(s=>({expanded:{...s.expanded,[name]:!s.expanded[name]}})); }
+
+  genLog(which,nonce){
+    const t=()=>{const d=new Date(Date.now()-Math.random()*3600000);return d.toISOString().slice(11,19);};
+    if(which==='out'){
+      return [
+        `${t()} INFO  poll ok · snapshot 4.1kb · 5 sleeves`,
+        `${t()} INFO  guardian heartbeat · 12 positions reconciled`,
+        `${t()} INFO  momentum tick · signal=NVDA breakout`,
+        `${t()} INFO  fill applied · momentum BUY TSLA x5 @ 242.10`,
+        `${t()} INFO  research memo store flushed · 4 open`,
+        `${t()} INFO  screener cache warm · 5000 tickers`,
+        `${t()} INFO  overnight drain idle · window closed`,
+        `${t()} INFO  no-store headers set on all responses`,
+        `${t()} INFO  poll ok · snapshot 4.0kb`
+      ].join('\n');
+    }
+    return [
+      `${t()} WARN  ledger_lag · insider snapshot 2.3s behind`,
+      `${t()} WARN  price_gap · GME quote stale 11s, using last`,
+      `${t()} ERROR retry 1/3 · broker quote timeout`,
+      `${t()} WARN  stale_heartbeat cleared after retry`,
+      `${t()} WARN  research thesis parse skipped 1 malformed memo`
+    ].join('\n');
+  }
+}
+</script>
+</body>
+</html>
