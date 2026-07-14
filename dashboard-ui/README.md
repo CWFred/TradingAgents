@@ -9,3 +9,14 @@ React frontend for the local ops dashboard (`ops/dashboard/server.py`).
 
 Visual source of truth: `design/ops-dashboard.dc.html`.
 Money is decimal strings end-to-end — never route money through floats.
+
+## Access via http://opsdash.test
+
+One-time setup (adds a hosts entry, a pf loopback redirect :80→:8321, and a
+boot-persistent LaunchDaemon; see comments in the script):
+
+    sudo bash ops/deploy/setup_opsdash.sh
+
+Uninstall: remove the `opsdash.test` line from /etc/hosts, then
+`sudo launchctl bootout system /Library/LaunchDaemons/com.tradingagents.opsdash-pf.plist`
+and delete that plist plus /etc/pf.anchors/com.tradingagents.opsdash.
