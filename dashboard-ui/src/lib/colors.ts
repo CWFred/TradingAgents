@@ -54,7 +54,16 @@ const KIND_GROUPS: Record<string, string> = {
   universe_blind: "error",
 };
 
-export const kindClass = (kind: string) => "k-" + (KIND_GROUPS[kind] ?? "muted");
+// This table has drifted out of sync with ops/events.py's kind list twice
+// on this branch (new sleeves add kinds here late, or not at all). Rather
+// than trust the table to stay complete, fall back on the one naming
+// convention backend kinds actually honor: anything ending in `_error` or
+// `_failure` is an error-class event, mapped or not.
+export const kindClass = (kind: string) => {
+  const group = KIND_GROUPS[kind];
+  if (group) return "k-" + group;
+  return kind.endsWith("_error") || kind.endsWith("_failure") ? "k-error" : "k-muted";
+};
 
 const SIDES = new Set(["buy", "sell", "short", "cover"]);
 export const sideClass = (side: string) => {

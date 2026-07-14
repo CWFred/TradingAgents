@@ -38,6 +38,18 @@ describe("kindClass", () => {
   it("falls back to muted for an unknown kind", () => {
     expect(kindClass("some_totally_unrecognized_kind")).toBe("k-muted");
   });
+
+  it("falls back to error for an unmapped kind ending in _error", () => {
+    expect(kindClass("research_vetting_error")).toBe("k-error");
+  });
+
+  it("falls back to error for an unmapped kind ending in _failure", () => {
+    expect(kindClass("baseline_quote_failure")).toBe("k-error");
+  });
+
+  it("falls back to muted for an unmapped kind with an unrelated suffix", () => {
+    expect(kindClass("daily_overview")).toBe("k-muted");
+  });
 });
 
 describe("sideClass", () => {

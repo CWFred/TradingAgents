@@ -18,5 +18,7 @@ boot-persistent LaunchDaemon; see comments in the script):
     sudo bash ops/deploy/setup_opsdash.sh
 
 Uninstall: remove the `opsdash.test` line from /etc/hosts, then
-`sudo launchctl bootout system /Library/LaunchDaemons/com.tradingagents.opsdash-pf.plist`
-and delete that plist plus /etc/pf.anchors/com.tradingagents.opsdash.
+`sudo launchctl bootout system /Library/LaunchDaemons/com.tradingagents.opsdash-pf.plist`,
+delete that plist plus /etc/pf.anchors/com.tradingagents.opsdash, and run
+`sudo pfctl -a "com.apple/250.opsdash" -F all` to flush the loaded anchor
+immediately (otherwise the redirect rule stays live until reboot).

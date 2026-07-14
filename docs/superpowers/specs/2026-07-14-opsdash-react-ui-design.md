@@ -90,8 +90,12 @@ Idempotent script, run once with sudo:
 2. pf anchor file `/etc/pf.anchors/com.tradingagents.opsdash`:
    `rdr pass on lo0 inet proto tcp from any to 127.0.0.1 port 80 -> 127.0.0.1 port 8321`
 3. LaunchDaemon `com.tradingagents.opsdash-pf.plist`: at boot, load the
-   anchor (`pfctl -a com.tradingagents.opsdash -f <anchor>` and `pfctl -E`).
-   Avoids editing `/etc/pf.conf` (macOS updates can clobber it).
+   anchor (`pfctl -a com.apple/250.opsdash -f <anchor>` and `pfctl -E`).
+   Loaded into the `com.apple/*` namespace, not `com.tradingagents.opsdash`,
+   because stock macOS `/etc/pf.conf` only evaluates
+   `rdr-anchor "com.apple/*"` — anything outside that namespace never gets
+   pulled in. This also avoids editing `/etc/pf.conf` (macOS updates can
+   clobber it).
 
 Server still binds `127.0.0.1:8321` only; pf redirects loopback port-80
 traffic. Nothing becomes network-reachable. `http://opsdash.test` works in
