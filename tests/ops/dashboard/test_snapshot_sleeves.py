@@ -204,3 +204,23 @@ def test_missing_new_sleeve_journals_are_per_sleeve_errors(tmp_path):
     sleeves = build_snapshot(cfg, now=NOW)["sleeves"]
     assert "error" in sleeves["short"]
     assert "error" in sleeves["insider"]
+
+
+def test_frontend_sleeve_order_covers_every_backend_sleeve(tmp_path):
+    # The frontend renders sleeves through SLEEVE_ORDER.filter(name in payload):
+    # a sleeve the backend emits but the JS list omits disappears silently
+    # (how the short + insider panels went missing after fc0f861 added them
+    # backend-only). Parse the constant out of app.js and diff it against the
+    # snapshot's actual sleeve keys so the two can never drift again.
+    import re
+    from pathlib import Path
+
+    import ops.dashboard as dash
+
+    app_js = (Path(dash.__file__).parent / "static" / "app.js").read_text()
+    m = re.search(r"const SLEEVE_ORDER = \[(.*?)\];", app_js)
+    assert m, "SLEEVE_ORDER constant not found in app.js"
+    frontend = set(re.findall(r'"(\w+)"', m.group(1)))
+
+    backend = set(build_snapshot(_config(tmp_path), now=NOW)["sleeves"])
+    assert frontend == backend
