@@ -66,8 +66,30 @@ export interface Snapshot {
   funnel: Section<Funnel>;
   anomalies_7d: Section<Record<string, AnomalyEntry>>;
   market: Section<Market>;
+  activity: Section<Activity>;
 }
 
 export interface EventItem {
   source: string; id: number; at: string; kind: string; text: string;
+}
+
+export interface CurrentActivity {
+  job: string; stage: string | null; symbol: string | null;
+  seq: string | null; reason: string | null;
+  started_at: string; age_seconds: number;
+}
+
+export interface RunRow {
+  job: string; reason: string | null; started_at: string;
+  finished_at: string | null; ok: boolean | null;
+  duration_s: number | null; outcome: string | null;
+}
+
+export interface NextWork { at: string; job: string; purpose: string }
+
+export interface Activity {
+  current: CurrentActivity | null;
+  stale: boolean;
+  recent_runs: RunRow[];
+  next_work: NextWork[];
 }
