@@ -6,6 +6,7 @@ from datetime import datetime, time, timezone
 from decimal import Decimal
 
 from ops import events
+from ops.activity import NullReporter
 from ops.broker.base import BrokerError, NoSuchPosition, OrderRejected
 from ops.exits import evaluate_exits
 from ops.live_gate import count_live_buy_fills
@@ -15,13 +16,13 @@ from ops.trading_time import (
     trading_days_back,
     trading_week_start,
 )
+from ops.universe import yf_pacing
 from ops.universe.filters import apply_deny_list
 from ops.universe.momentum import (
     fetch_closes_and_volumes_from_yfinance,
     find_momentum_leaders,
 )
 from ops.universe.sp500 import load_sp500_members
-from ops.universe import yf_pacing
 
 # The leaderboard/exits/entries cycle may retry a FAILED run on later ticks
 # (see the gate in _tick_impl), but only up to this many attempts/day — a
@@ -37,6 +38,7 @@ class Orchestrator:
         momentum_finder=find_momentum_leaders,
         closes_fetch=fetch_closes_and_volumes_from_yfinance,
         now_fn: Callable[[], datetime] | None = None,
+        reporter=None,
     ) -> None:
         self._broker = broker
         self._universe_builder = universe_builder
@@ -49,6 +51,7 @@ class Orchestrator:
         self._momentum_finder = momentum_finder
         self._closes_fetch = closes_fetch
         self._now_fn = now_fn if now_fn is not None else lambda: datetime.now(timezone.utc)
+        self._reporter = reporter if reporter is not None else NullReporter()
 
     def tick(self) -> None:
         try:
@@ -96,91 +99,99 @@ class Orchestrator:
             at=now,
         )
 
-        # Discard fetch counters accumulated outside this cycle so the
-        # diagnostics below describe exactly one day's sweep.
-        yf_pacing.snapshot_and_reset()
+        reason = f"attempt {attempts + 1} of {MAX_DAILY_CYCLE_ATTEMPTS}"
+        if attempts:
+            reason += ", retrying failed cycle"
+        with self._reporter.job("daily_cycle", reason=reason) as activity:
+            # Discard fetch counters accumulated outside this cycle so the
+            # diagnostics below describe exactly one day's sweep.
+            yf_pacing.snapshot_and_reset()
 
-        # Leaderboard is computed ONCE per tick: the exit engine reads held
-        # names' ranks off it and the builder takes its head for entries.
-        # A failure here (or anywhere in the exit step) must not kill the
-        # tick — buys degrade gracefully, and the guardian still owns stops.
-        leaderboard = []
-        try:
-            eligible = apply_deny_list(self._members_loader(), self._config.deny_list)
-            leaderboard = self._momentum_finder(eligible, asof_date=asof_date)
-            self._run_exits(leaderboard, asof_date)
-        except Exception as exc:
+            # Leaderboard is computed ONCE per tick: the exit engine reads held
+            # names' ranks off it and the builder takes its head for entries.
+            # A failure here (or anywhere in the exit step) must not kill the
+            # tick — buys degrade gracefully, and the guardian still owns stops.
+            leaderboard = []
+            try:
+                eligible = apply_deny_list(self._members_loader(), self._config.deny_list)
+                leaderboard = self._momentum_finder(eligible, asof_date=asof_date)
+                self._run_exits(leaderboard, asof_date)
+            except Exception as exc:
+                self._journal.record_event(
+                    events.KIND_EXIT_CHECK_ERROR,
+                    events.exit_check_error_payload(
+                        error=f"{type(exc).__name__}: {exc}",
+                    ),
+                )
+
+            held = {p.symbol for p in self._broker.get_positions()}
+            free_slots = max(0, self._config.max_open_positions - len(held))
+            candidates = self._universe_builder(
+                asof_date=asof_date, config=self._config,
+                held_symbols=frozenset(held), free_slots=free_slots,
+                excluded_symbols=self._cooldown_symbols(asof_date),
+                momentum_leaders=leaderboard,
+            )
+            self._emit_universe_diagnostics(asof_date, len(candidates))
+            fresh_candidates = [c for c in candidates if c.symbol not in held]
+            current_equity = self._broker.get_equity()
+            live_cap = self._compute_live_cap()
+            placed = 0
+            # Bracket the analysis batch: a managed local model backend (e.g. ds4)
+            # is torn down when the session exits, freeing its resident memory
+            # between ticks. Bringing it up is lazy inside propagate().
+            with self._pipeline_adapter.session():
+                decisions: list = []
+                proposals = self._strategy.propose_orders(
+                    candidates=fresh_candidates,
+                    pipeline=self._pipeline_adapter,
+                    current_equity=current_equity,
+                    asof_date=asof_date,
+                    live_max_position_cap=live_cap,
+                    decision_sink=decisions,
+                )
+                for proposal in proposals:
+                    try:
+                        self._broker.place_order(proposal.order)
+                    except OrderRejected:
+                        continue
+                    except BrokerError:
+                        break
+                    placed += 1
+                    cand = proposal.candidate
+                    self._journal.record_event(
+                        events.KIND_POSITION_OPENED,
+                        events.position_opened_payload(
+                            symbol=cand.symbol,
+                            source=cand.source.value,
+                            entry_date=asof_date,
+                            client_order_id=proposal.order.client_order_id,
+                            entry_rank=cand.momentum.rank if cand.momentum else None,
+                        ),
+                    )
+                for decision in decisions:
+                    cand = decision.candidate
+                    self._journal.record_event(
+                        events.KIND_ANALYSIS_DECISION,
+                        events.analysis_decision_payload(
+                            symbol=cand.symbol,
+                            decision=decision.pipeline.decision.value,
+                            source=cand.source.value,
+                            asof=asof_date.isoformat(),
+                            rank=cand.momentum.rank if cand.momentum else None,
+                        ),
+                    )
+
+            activity.outcome = f"analyzed {len(decisions)}, placed {placed}"
+
+            # Reached only on a clean full run (an uncaught exception anywhere
+            # above propagates to tick()'s handler instead) — this is what the
+            # gate above checks to stop same-day retries.
             self._journal.record_event(
-                events.KIND_EXIT_CHECK_ERROR,
-                events.exit_check_error_payload(
-                    error=f"{type(exc).__name__}: {exc}",
-                ),
+                events.KIND_DAILY_CYCLE_COMPLETED,
+                events.daily_cycle_completed_payload(asof_date=asof_date.isoformat()),
+                at=now,
             )
-
-        held = {p.symbol for p in self._broker.get_positions()}
-        free_slots = max(0, self._config.max_open_positions - len(held))
-        candidates = self._universe_builder(
-            asof_date=asof_date, config=self._config,
-            held_symbols=frozenset(held), free_slots=free_slots,
-            excluded_symbols=self._cooldown_symbols(asof_date),
-            momentum_leaders=leaderboard,
-        )
-        self._emit_universe_diagnostics(asof_date, len(candidates))
-        fresh_candidates = [c for c in candidates if c.symbol not in held]
-        current_equity = self._broker.get_equity()
-        live_cap = self._compute_live_cap()
-        # Bracket the analysis batch: a managed local model backend (e.g. ds4)
-        # is torn down when the session exits, freeing its resident memory
-        # between ticks. Bringing it up is lazy inside propagate().
-        with self._pipeline_adapter.session():
-            decisions: list = []
-            proposals = self._strategy.propose_orders(
-                candidates=fresh_candidates,
-                pipeline=self._pipeline_adapter,
-                current_equity=current_equity,
-                asof_date=asof_date,
-                live_max_position_cap=live_cap,
-                decision_sink=decisions,
-            )
-            for proposal in proposals:
-                try:
-                    self._broker.place_order(proposal.order)
-                except OrderRejected:
-                    continue
-                except BrokerError:
-                    break
-                cand = proposal.candidate
-                self._journal.record_event(
-                    events.KIND_POSITION_OPENED,
-                    events.position_opened_payload(
-                        symbol=cand.symbol,
-                        source=cand.source.value,
-                        entry_date=asof_date,
-                        client_order_id=proposal.order.client_order_id,
-                        entry_rank=cand.momentum.rank if cand.momentum else None,
-                    ),
-                )
-            for decision in decisions:
-                cand = decision.candidate
-                self._journal.record_event(
-                    events.KIND_ANALYSIS_DECISION,
-                    events.analysis_decision_payload(
-                        symbol=cand.symbol,
-                        decision=decision.pipeline.decision.value,
-                        source=cand.source.value,
-                        asof=asof_date.isoformat(),
-                        rank=cand.momentum.rank if cand.momentum else None,
-                    ),
-                )
-
-        # Reached only on a clean full run (an uncaught exception anywhere
-        # above propagates to tick()'s handler instead) — this is what the
-        # gate above checks to stop same-day retries.
-        self._journal.record_event(
-            events.KIND_DAILY_CYCLE_COMPLETED,
-            events.daily_cycle_completed_payload(asof_date=asof_date.isoformat()),
-            at=now,
-        )
 
     def _run_exits(self, leaderboard, asof_date) -> None:
         report = evaluate_exits(

@@ -255,19 +255,23 @@ def _wire(broker, journal: Journal, config: OpsConfig, *, backend=None):
     pipeline adapter (off unless OPS_LLM_MANAGED_BACKEND is set). It is also
     returned so the service can tear it down on shutdown. Injectable for tests.
     """
+    from ops.activity import ActivityReporter
     from ops.pipeline_adapter import TradingAgentsPipelineAdapter
     from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
     from ops.universe.composite import build_composite_universe
 
     if backend is None:
         backend = build_managed_backend(load_managed_backend_config())
+    reporter = ActivityReporter(journal)
     calendar = MarketCalendar()
     orchestrator = Orchestrator(
         broker=broker,
         universe_builder=build_composite_universe,
         strategy=PostEarningsMomentumStrategy(config=config),
-        pipeline_adapter=TradingAgentsPipelineAdapter(backend=backend),
+        pipeline_adapter=TradingAgentsPipelineAdapter(
+            backend=backend, reporter=reporter),
         calendar=calendar, journal=journal, config=config,
+        reporter=reporter,
     )
     guardian = PositionGuardian(
         broker=broker, quote_source=broker.get_quote, config=config,
