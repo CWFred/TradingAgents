@@ -249,3 +249,14 @@ def test_shipped_bundle_contains_every_backend_sleeve(tmp_path):
 
     # Sanity check: assert a name NOT in the bundle is correctly absent
     assert b'"notasleeve"' not in bundle_bytes
+
+
+def test_shipped_bundle_contains_activity_ui():
+    """The built app must ship the activity strip and runs panel — a stale
+    bundle silently hides the feature."""
+    from pathlib import Path
+
+    bundle_path = (Path(__file__).parent.parent.parent.parent / "ops" / "dashboard" / "static" / "assets" / "app.js")
+    bundle_bytes = bundle_path.read_bytes()
+    for needle in (b"now-strip", b"no runs recorded yet", b"activity"):
+        assert needle in bundle_bytes, f"missing {needle!r} in shipped bundle"
