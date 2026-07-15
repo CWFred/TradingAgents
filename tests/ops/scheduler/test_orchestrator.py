@@ -410,7 +410,7 @@ def _momentum_candidate(symbol, rank):
 def _strategy_order_for_candidate(candidate):
     return StrategyOrder(
         order=_order(candidate.symbol), reason="test",
-        candidate=candidate, pipeline=MagicMock(),
+        candidate=candidate, pipeline=_pipeline_result(candidate.symbol),
     )
 
 
@@ -439,6 +439,10 @@ def test_tick_journals_position_opened_on_successful_buy(tmp_path):
     assert p["source"] == "MOMENTUM"
     assert p["entry_rank"] == 3
     assert p["entry_date"] == datetime.now(timezone.utc).date().isoformat()
+    # Legitimate tier value, never a Mock-repr string: json.dumps(default=str)
+    # would happily store "<MagicMock ...>" if the helper's pipeline drifted
+    # back to a MagicMock.
+    assert p["tier"] == "high"
 
 
 def test_tick_rejected_order_does_not_journal_position_opened(tmp_path):
