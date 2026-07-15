@@ -22,6 +22,7 @@ class PipelineDecision(str, Enum):
     BUY = "BUY"
     HOLD = "HOLD"
     SELL = "SELL"
+    TRIM = "TRIM"
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,8 @@ class PipelineResult:
     # the graph's signal processor. The vetting path reads this ungraded
     # rating; the momentum path keeps consuming the collapsed `decision`.
     rating: str = ""
+    # Conviction tier implied by the rating: TIER_HIGH, TIER_STARTER, or "".
+    tier: str = ""
 
 
 class PipelineAdapter(Protocol):
@@ -51,37 +54,43 @@ class PipelineAdapter(Protocol):
         ...
 
 
+# Conviction tiers carried on PipelineResult.tier. TIER_HIGH sizes at
+# per_position_cap_pct and is what displacement funds; TIER_STARTER sizes
+# at starter_position_pct and is what displacement trims. "" = no tier.
+TIER_HIGH = "high"
+TIER_STARTER = "starter"
+
 # Upstream ratings are one of: Buy, Overweight, Hold, Underweight, Sell.
-# For v1's conservative posture, only Buy/Sell trigger action; Overweight
-# and Underweight collapse to HOLD along with Hold and any unknown value.
-_HIGH_CONVICTION_BUY = {"BUY"}
-_HIGH_CONVICTION_SELL = {"SELL"}
-_UPSTREAM_RATINGS = {"BUY", "OVERWEIGHT", "HOLD", "UNDERWEIGHT", "SELL"}
+# v2 posture (spec 2026-07-14): the full scale acts. Overweight enters at
+# starter size; Underweight trims half of a held position (the TRIM
+# decision is a no-op for unheld symbols — enforced by the orchestrator,
+# which is the only layer that knows holdings). Unknown text still
+# defaults to HOLD.
+_RATING_ACTIONS: dict[str, tuple[PipelineDecision, str]] = {
+    "BUY": (PipelineDecision.BUY, TIER_HIGH),
+    "OVERWEIGHT": (PipelineDecision.BUY, TIER_STARTER),
+    "HOLD": (PipelineDecision.HOLD, ""),
+    "UNDERWEIGHT": (PipelineDecision.TRIM, ""),
+    "SELL": (PipelineDecision.SELL, ""),
+}
 
 
-def parse_decision(text: str) -> PipelineDecision:
-    """Parse the upstream's decision text into a PipelineDecision.
+def parse_rating_action(text: str) -> tuple[PipelineDecision, str]:
+    """Map the upstream rating word to (decision, conviction tier).
 
-    The upstream `TradingAgentsGraph.propagate()` returns a bare rating word
-    from SignalProcessor.parse_rating: one of Buy/Overweight/Hold/Underweight/Sell.
-
-    v1 posture: only Buy and Sell trigger action. Overweight and Underweight
-    collapse to HOLD along with Hold itself. Unknown or missing text also
-    defaults to HOLD (safe posture). We also still accept a leading
-    'FINAL TRANSACTION PROPOSAL: <X>' wrapper for defensive matching against
-    older upstream formats.
-    """
+    Accepts a leading 'FINAL TRANSACTION PROPOSAL: <X>' wrapper for
+    defensive matching against older upstream formats."""
     if not text:
-        return PipelineDecision.HOLD
-    # Defensive: strip a legacy "FINAL TRANSACTION PROPOSAL:" prefix if present
+        return (PipelineDecision.HOLD, "")
     m = re.search(r"FINAL TRANSACTION PROPOSAL:\s*(\S+)", text, re.IGNORECASE)
     candidate = m.group(1) if m else text.strip().split()[0] if text.strip() else ""
     candidate = candidate.strip().rstrip(".,").upper()
-    if candidate in _HIGH_CONVICTION_BUY:
-        return PipelineDecision.BUY
-    if candidate in _HIGH_CONVICTION_SELL:
-        return PipelineDecision.SELL
-    return PipelineDecision.HOLD
+    return _RATING_ACTIONS.get(candidate, (PipelineDecision.HOLD, ""))
+
+
+def parse_decision(text: str) -> PipelineDecision:
+    """Decision-only view of parse_rating_action (kept for existing callers)."""
+    return parse_rating_action(text)[0]
 
 
 class TradingAgentsPipelineAdapter:
@@ -117,11 +126,11 @@ class TradingAgentsPipelineAdapter:
         raw, decision_text = graph.propagate(
             symbol, asof_date.isoformat(), research_memo_context=research_context,
         )
-        decision = parse_decision(decision_text or "")
+        decision, tier = parse_rating_action(decision_text or "")
         raw_dict = raw if isinstance(raw, dict) else {"output": str(raw)}
         return PipelineResult(
             symbol=symbol, date=asof_date, decision=decision, raw=raw_dict,
-            rating=(decision_text or "").strip(),
+            rating=(decision_text or "").strip(), tier=tier,
         )
 
     @contextmanager
@@ -147,9 +156,11 @@ class StubPipelineAdapter:
         self,
         decisions: dict[str, PipelineDecision] | None = None,
         ratings: dict[str, str] | None = None,
+        tiers: dict[str, str] | None = None,
     ):
         self._decisions = decisions or {}
         self._ratings = ratings or {}
+        self._tiers = tiers or {}
 
     def propagate(
         self, symbol: str, asof_date: date, research_context: str = "",
@@ -162,9 +173,11 @@ class StubPipelineAdapter:
                 "judge_decision": "stub judge decision",
             },
         }
+        default_tier = TIER_HIGH if decision is PipelineDecision.BUY else ""
+        tier = self._tiers.get(symbol, default_tier)
         return PipelineResult(
             symbol=symbol, date=asof_date, decision=decision, raw=raw,
-            rating=self._ratings.get(symbol, "Hold"),
+            rating=self._ratings.get(symbol, "Hold"), tier=tier,
         )
 
     @contextmanager
