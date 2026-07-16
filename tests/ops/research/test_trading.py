@@ -7,8 +7,14 @@ import pytest
 
 from ops import events
 from ops.journal import Journal
-from ops.research.trading import TradeOutcome, trade_research_sleeve
-from tradingagents.memos.schema import EvidenceItem, Falsifier, Memo, ValueThesis
+from ops.research.trading import TradeOutcome, _exit_reason, trade_research_sleeve
+from tradingagents.memos.schema import (
+    EvidenceItem,
+    Falsifier,
+    Memo,
+    Resolution,
+    ValueThesis,
+)
 from tradingagents.memos.store import MemoStore
 
 pytestmark = pytest.mark.unit
@@ -114,6 +120,29 @@ def test_exit_on_falsifier_trip(env):
     assert closed[0]["payload"]["reason"] == "falsifier tripped"
     # And it does not re-enter in the same run.
     assert outcome.entered == []
+
+
+def test_resolved_memo_exit_reason_does_not_require_a_quote(env):
+    memo_store, _, main_journal = env
+    memo_store.save(_memo("WIDG"))
+    memo = memo_store.list(ticker="WIDG")[0]
+    memo_store.resolve(
+        memo.memo_id,
+        Resolution(
+            resolved_at=NOW, exit_price=9.0, realized_return_pct=-0.1,
+            benchmark_return_pct=0.0, holding_days=1,
+            outcome_label="thesis_right_lost_money", narrative="resolved fixture",
+        ),
+    )
+
+    class NoQuoteBroker:
+        def get_quote(self, symbol):
+            raise AssertionError(f"quote should not be requested for {symbol}")
+
+    assert _exit_reason(
+        symbol="WIDG", memo_id=memo.memo_id, memo_store=memo_store,
+        main_journal=main_journal, broker=NoQuoteBroker(),
+    ) == "resolved"
 
 
 def test_no_reentry_after_falsifier_exit_on_later_run(env):

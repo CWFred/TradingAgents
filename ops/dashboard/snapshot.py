@@ -61,6 +61,8 @@ def ro_conn(path: str) -> sqlite3.Connection:
 def _event_view(ev: dict[str, Any] | None, now: datetime) -> dict[str, Any] | None:
     if ev is None:
         return None
+    from ops.work_pause import pause_state
+
     return {
         "at": ev["at"],
         "age_seconds": (now - ev["at"]).total_seconds(),
@@ -129,7 +131,7 @@ def _health_section(config: OpsConfig, now: datetime) -> dict[str, Any]:
             "last_completed_at": cycle_done["at"] if cycle_done else None,
         },
         "halts": halts,
-        "research_paused": os.path.exists(config.research_pause_flag_path),
+        "research_paused": pause_state(config.research_pause_flag_path).paused,
         "live_gate": {
             "flip_marker_present": epoch is not None,
             "flip_at": epoch,
@@ -298,13 +300,15 @@ def _funnel_section(config: OpsConfig, now: datetime) -> dict[str, Any]:
     # ticks, which all write to the MAIN ops journal — the research journal
     # holds only the sleeve's money (fills, snapshots, position events).
     # Reading these kinds from the research journal shows "—" forever.
+    from ops.work_pause import pause_state
+
     with Journal(config.journal_path, readonly=True) as mj:
         overnight = {
             "last_vetting_run": _event_view(
                 mj.last_event(events.KIND_RESEARCH_VETTING_RUN), now),
             "last_drain_run": _event_view(
                 mj.last_event(events.KIND_RESEARCH_DRAIN_RUN), now),
-            "paused": os.path.exists(config.research_pause_flag_path),
+            "paused": pause_state(config.research_pause_flag_path).paused,
         }
         signals = {
             kind: mj.count_events(getattr(events, const), since=week_ago)

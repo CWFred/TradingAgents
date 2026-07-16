@@ -111,7 +111,7 @@ def _fetch_subreddit_rss(
             root = ET.fromstring(resp.read())
     except HTTPError as exc:
         if exc.code == 429 and _retry:
-            wait = _retry_after_seconds(exc) or 5.0
+            wait = _retry_after_seconds(exc) or 30.0
             logger.warning(
                 "Reddit RSS 429 for r/%s · %s — backing off %.1fs then retrying once",
                 sub, ticker, wait,

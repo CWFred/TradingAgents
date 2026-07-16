@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal, InvalidOperation
+
+from ops.backtest.models import MIN_BACKTEST_CUTOFF
 
 _DEFAULT_DENY_LIST = frozenset({
     "SPOT",
@@ -46,6 +49,11 @@ def _default_research_journal_path() -> str:
 def _default_screen_store_path() -> str:
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     return os.path.join(os.path.expanduser(base), "tradingagents", "research_screen.sqlite")
+
+
+def _default_backtest_store_path() -> str:
+    """Isolated backtest/learning corpus; never shares the live memo DB."""
+    return _state_path("backtest.sqlite")
 
 
 def _state_path(filename: str) -> str:
@@ -102,6 +110,21 @@ class OpsConfig:
     research_starting_cash: Decimal = Decimal("100000")
     screen_store_path: str = field(default_factory=_default_screen_store_path)
     memo_store_path: str = field(default_factory=_default_memo_store_path)
+    # Backtest and learning loop. The cutoff may only move forward from the
+    # hard minimum after a sealed model-knowledge probe; there is no bypass.
+    backtest_store_path: str = field(default_factory=_default_backtest_store_path)
+    backtest_cutoff: date = MIN_BACKTEST_CUTOFF
+    backtest_benchmark: str = "SPY"
+    backtest_horizons: tuple[int, ...] = (5, 21, 63, 126)
+    backtest_primary_horizon: int = 63
+    backtest_wash_band: Decimal = Decimal("0.03")
+    backtest_case_count: int = 40
+    backtest_case_notional: Decimal = Decimal("10000")
+    backtest_min_mature_cases: int = 20
+    backtest_promising_min_hit_rate: Decimal = Decimal("0.55")
+    backtest_promising_min_mean_excess: Decimal = Decimal("0.03")
+    backtest_dead_max_hit_rate: Decimal = Decimal("0.40")
+    backtest_dead_max_mean_excess: Decimal = Decimal("0")
     # Short sleeve (fourth ledger): own journal, memo store, and screen-hit
     # queue — the research trade step enters ALL open memos in its store
     # unfiltered, so short memos must live in a separate DB (spec decision 1).
@@ -236,6 +259,55 @@ class OpsConfig:
             raise ValueError(
                 f"insider_starting_cash must be > 0, got {self.insider_starting_cash}"
             )
+        if self.backtest_cutoff < MIN_BACKTEST_CUTOFF:
+            raise ValueError(
+                "backtest_cutoff may only advance from the hard minimum "
+                f"{MIN_BACKTEST_CUTOFF}, got {self.backtest_cutoff}"
+            )
+        if not self.backtest_benchmark.strip():
+            raise ValueError("backtest_benchmark must not be empty")
+        if (
+            not self.backtest_horizons
+            or any(h <= 0 for h in self.backtest_horizons)
+            or tuple(sorted(set(self.backtest_horizons))) != self.backtest_horizons
+        ):
+            raise ValueError(
+                "backtest_horizons must be nonempty, positive, unique, and sorted"
+            )
+        if self.backtest_primary_horizon not in self.backtest_horizons:
+            raise ValueError(
+                "backtest_primary_horizon must be one of backtest_horizons"
+            )
+        if not (Decimal("0") <= self.backtest_wash_band < Decimal("1")):
+            raise ValueError("backtest_wash_band must be in [0, 1)")
+        if not 30 <= self.backtest_case_count <= 50:
+            raise ValueError("backtest_case_count must be in the approved range 30..50")
+        if self.backtest_case_notional <= 0:
+            raise ValueError("backtest_case_notional must be positive")
+        if not 1 <= self.backtest_min_mature_cases <= self.backtest_case_count:
+            raise ValueError(
+                "backtest_min_mature_cases must be in 1..backtest_case_count"
+            )
+        for fname in (
+            "backtest_promising_min_hit_rate", "backtest_dead_max_hit_rate",
+        ):
+            value = getattr(self, fname)
+            if not (Decimal("0") <= value <= Decimal("1")):
+                raise ValueError(f"{fname} must be in [0, 1]")
+        for fname in (
+            "backtest_promising_min_mean_excess", "backtest_dead_max_mean_excess",
+        ):
+            value = getattr(self, fname)
+            if not (Decimal("-1") <= value <= Decimal("1")):
+                raise ValueError(f"{fname} must be in [-1, 1]")
+        if self.backtest_promising_min_hit_rate <= self.backtest_dead_max_hit_rate:
+            raise ValueError(
+                "promising hit-rate threshold must exceed dead hit-rate threshold"
+            )
+        if self.backtest_promising_min_mean_excess <= self.backtest_dead_max_mean_excess:
+            raise ValueError(
+                "promising mean-excess threshold must exceed dead threshold"
+            )
         for fname in ("research_screen_interval_days", "research_screen_ttl_days",
                       "research_drain_nightly_cap"):
             val = getattr(self, fname)
@@ -271,6 +343,29 @@ def _env_int(name: str) -> int | None:
         return int(raw)
     except ValueError as exc:
         raise ValueError(f"Invalid value for {name!r}: {raw!r}") from exc
+
+
+def _env_date(name: str) -> date | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f"Invalid value for {name!r}: {raw!r}") from exc
+
+
+def _env_int_tuple(name: str) -> tuple[int, ...] | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    try:
+        values = tuple(int(part.strip()) for part in raw.split(",") if part.strip())
+    except ValueError as exc:
+        raise ValueError(f"Invalid value for {name!r}: {raw!r}") from exc
+    if not values:
+        raise ValueError(f"Invalid value for {name!r}: {raw!r}")
+    return values
 
 
 def load_config() -> OpsConfig:
@@ -415,6 +510,43 @@ def load_config() -> OpsConfig:
     memo_store_path = os.environ.get("OPS_MEMO_STORE_PATH")
     if memo_store_path is not None:
         kwargs["memo_store_path"] = memo_store_path
+
+    backtest_store_path = os.environ.get("OPS_BACKTEST_STORE_PATH")
+    if backtest_store_path is not None:
+        kwargs["backtest_store_path"] = backtest_store_path
+
+    backtest_cutoff = _env_date("OPS_BACKTEST_CUTOFF")
+    if backtest_cutoff is not None:
+        kwargs["backtest_cutoff"] = backtest_cutoff
+
+    backtest_benchmark = os.environ.get("OPS_BACKTEST_BENCHMARK")
+    if backtest_benchmark is not None:
+        kwargs["backtest_benchmark"] = backtest_benchmark.upper()
+
+    backtest_horizons = _env_int_tuple("OPS_BACKTEST_HORIZONS")
+    if backtest_horizons is not None:
+        kwargs["backtest_horizons"] = backtest_horizons
+
+    for env_name, field_name in (
+        ("OPS_BACKTEST_PRIMARY_HORIZON", "backtest_primary_horizon"),
+        ("OPS_BACKTEST_CASE_COUNT", "backtest_case_count"),
+        ("OPS_BACKTEST_MIN_MATURE_CASES", "backtest_min_mature_cases"),
+    ):
+        value = _env_int(env_name)
+        if value is not None:
+            kwargs[field_name] = value
+
+    for env_name, field_name in (
+        ("OPS_BACKTEST_WASH_BAND", "backtest_wash_band"),
+        ("OPS_BACKTEST_CASE_NOTIONAL", "backtest_case_notional"),
+        ("OPS_BACKTEST_PROMISING_MIN_HIT_RATE", "backtest_promising_min_hit_rate"),
+        ("OPS_BACKTEST_PROMISING_MIN_MEAN_EXCESS", "backtest_promising_min_mean_excess"),
+        ("OPS_BACKTEST_DEAD_MAX_HIT_RATE", "backtest_dead_max_hit_rate"),
+        ("OPS_BACKTEST_DEAD_MAX_MEAN_EXCESS", "backtest_dead_max_mean_excess"),
+    ):
+        value = _env_decimal(env_name)
+        if value is not None:
+            kwargs[field_name] = value
 
     research_evidence_model = os.environ.get("OPS_RESEARCH_EVIDENCE_MODEL")
     if research_evidence_model is not None:

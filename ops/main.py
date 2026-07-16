@@ -688,7 +688,11 @@ def _research_overnight_tick(
     try:
         # Operator pause (`ops research pause`): the operator wants their
         # machine — touch nothing, journal nothing, retry next fire.
-        if os.path.exists(config.research_pause_flag_path):
+        from ops.work_pause import pause_state
+
+        if pause_state(
+            config.research_pause_flag_path, cleanup_expired=True,
+        ).paused:
             return
         deadline = _overnight_deadline(config.research_drain_deadline_hour)
         tick_now = now or (lambda: datetime.now(deadline.tzinfo))
@@ -748,7 +752,9 @@ def _research_overnight_tick(
             def stop() -> bool:
                 # Pausing mid-run stops the loop between names, freeing ds4
                 # within one name of `ops research pause`.
-                return base_stop() or os.path.exists(pause_flag)
+                return base_stop() or pause_state(
+                    pause_flag, cleanup_expired=True,
+                ).paused
 
             backend = build_managed_backend(load_managed_backend_config())
 

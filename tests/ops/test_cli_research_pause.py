@@ -3,6 +3,7 @@ switch for the overnight research window (screen/drain/vet). Pausing drops
 a flag file the daemon checks between names; resuming removes it and the
 half-hourly overnight job picks work back up."""
 from pathlib import Path
+import json
 
 import pytest
 from click.testing import CliRunner
@@ -55,3 +56,18 @@ def test_pause_creates_parent_directory(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli_mod.cli, ["research", "pause"])
     assert result.exit_code == 0
     assert flag.exists()
+
+
+def test_timed_pause_records_automatic_expiry(env):
+    flag = Path(env / "research.paused")
+    result = CliRunner().invoke(cli_mod.cli, ["research", "pause", "--hours", "3"])
+    assert result.exit_code == 0
+    payload = json.loads(flag.read_text())
+    assert payload["until"] > payload["created_at"]
+    assert "automatic resume" in result.output
+
+
+def test_timed_pause_rejects_nonpositive_duration(env):
+    result = CliRunner().invoke(cli_mod.cli, ["research", "pause", "--hours", "0"])
+    assert result.exit_code != 0
+    assert "must be positive" in result.output

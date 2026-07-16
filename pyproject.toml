@@ -33,6 +33,7 @@ dependencies = [
     "stockstats>=0.6.5",
     "tqdm>=4.67.1",
     "typing-extensions>=4.14.0",
+    "tomli>=2; python_version < '3.11'",
     "yfinance>=1.4.1",
     "click>=8.1",
 ]

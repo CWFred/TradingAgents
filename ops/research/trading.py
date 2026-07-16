@@ -39,6 +39,7 @@ from ops import events
 from ops.broker.base import InsufficientFunds, QuoteUnavailable
 from ops.broker.paper import PaperBroker
 from ops.broker.types import Order, OrderType, Side
+from ops.research.policy import evaluate_research_exit
 from ops.research.sizing import cost_basis, size_entry
 
 
@@ -103,18 +104,26 @@ def _exit_reason(*, symbol: str, memo_id, memo_store, main_journal, broker) -> s
     """First-match-wins exit reason, or None to hold. May raise
     QuoteUnavailable from the target-hit check — the caller handles it."""
     memo = memo_store.get(memo_id) if memo_id else None
-    if memo is None:
-        return "memo missing"
-    if memo.status == "resolved":
-        return "resolved"
-    if main_journal.count_events(
+    falsifier_tripped = main_journal.count_events(
         events.KIND_FALSIFIER_TRIPPED, payload_equals={"memo_id": memo_id},
-    ) > 0:
-        return "falsifier tripped"
-    quote = broker.get_quote(symbol)
-    if quote >= Decimal(str(memo.price_target_high)):
-        return "target hit"
-    return None
+    ) > 0
+    # Preserve the live path's no-quote behavior for an extant unresolved memo:
+    # QuoteUnavailable still reaches _exit_pass and becomes an explicit skip.
+    quote = (
+        broker.get_quote(symbol)
+        if (
+            memo is not None
+            and memo.status != "resolved"
+            and not falsifier_tripped
+        )
+        else None
+    )
+    decision = evaluate_research_exit(
+        memo=memo,
+        current_price=quote,
+        falsifier_tripped=falsifier_tripped,
+    )
+    return decision.reason if decision is not None else None
 
 
 def _exit_pass(*, broker, memo_store, research_journal, main_journal, prov, now, outcome) -> set[str]:
