@@ -48,6 +48,7 @@ from ops.notify.summary import emit_daily_summary
 from ops.notify.transport import DisabledTransport
 from ops.position_guardian import PositionGuardian
 from ops.reconcile import ReconcileResult, emit_reconcile_events, reconcile
+from ops.scheduler import times
 from ops.scheduler.market_calendar import MarketCalendar
 from ops.scheduler.orchestrator import Orchestrator
 from ops.trading_time import trading_day_start, trading_week_start
@@ -254,19 +255,23 @@ def _wire(broker, journal: Journal, config: OpsConfig, *, backend=None):
     pipeline adapter (off unless OPS_LLM_MANAGED_BACKEND is set). It is also
     returned so the service can tear it down on shutdown. Injectable for tests.
     """
+    from ops.activity import ActivityReporter
     from ops.pipeline_adapter import TradingAgentsPipelineAdapter
     from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
     from ops.universe.composite import build_composite_universe
 
     if backend is None:
         backend = build_managed_backend(load_managed_backend_config())
+    reporter = ActivityReporter(journal)
     calendar = MarketCalendar()
     orchestrator = Orchestrator(
         broker=broker,
         universe_builder=build_composite_universe,
         strategy=PostEarningsMomentumStrategy(config=config),
-        pipeline_adapter=TradingAgentsPipelineAdapter(backend=backend),
+        pipeline_adapter=TradingAgentsPipelineAdapter(
+            backend=backend, reporter=reporter),
         calendar=calendar, journal=journal, config=config,
+        reporter=reporter,
     )
     guardian = PositionGuardian(
         broker=broker, quote_source=broker.get_quote, config=config,
@@ -613,6 +618,41 @@ def _overnight_deadline(hour: int, *, now: datetime | None = None) -> datetime:
     return deadline
 
 
+def _overnight_reason(config, *, screened_this_run: bool, store, memo_store) -> str:
+    """Human reason string for the overnight job breadcrumb. Counts are
+    best-effort — a missing store contributes nothing rather than raising."""
+    parts: list[str] = []
+    if screened_this_run:
+        parts.append("screened")
+    n = len(store.pending_hits())
+    if n:
+        parts.append(f"{n} hit(s) to research")
+    n = len(memo_store.pending_vetting_memos())
+    if n:
+        parts.append(f"{n} memo(s) to vet")
+    try:
+        from ops.research.store import ScreenStore
+        from tradingagents.memos.store import MemoStore
+
+        n = len(ScreenStore(config.short_screen_store_path).pending_hits())
+        if n:
+            parts.append(f"{n} short hit(s)")
+        n = len(MemoStore(config.short_memo_store_path).pending_vetting_memos())
+        if n:
+            parts.append(f"{n} short memo(s) to vet")
+    except Exception:  # noqa: BLE001 - reason text must never kill the tick
+        pass
+    try:
+        from ops.insider.store import SignalStore
+
+        n = len(SignalStore(config.insider_signal_store_path).entries_without_memo())
+        if n:
+            parts.append(f"{n} insider memo(s) to author")
+    except Exception:  # noqa: BLE001
+        pass
+    return "; ".join(parts) or "work pending"
+
+
 def _research_overnight_tick(
     journal: Journal, config, *, now=None, should_stop=None, vet_adapter_factory=None,
 ) -> None:
@@ -694,110 +734,125 @@ def _research_overnight_tick(
                 # entirely. This is the common case (~2 of 3 nights).
                 return
 
-        base_stop = should_stop or _shutdown_event.is_set
-        pause_flag = config.research_pause_flag_path
+        from ops.activity import ActivityReporter
 
-        def stop() -> bool:
-            # Pausing mid-run stops the loop between names, freeing ds4
-            # within one name of `ops research pause`.
-            return base_stop() or os.path.exists(pause_flag)
+        reporter = ActivityReporter(journal)
+        reason = _overnight_reason(
+            config, screened_this_run=screened_this_run,
+            store=store, memo_store=memo_store,
+        )
+        with reporter.job("overnight", reason=reason) as activity:
+            base_stop = should_stop or _shutdown_event.is_set
+            pause_flag = config.research_pause_flag_path
 
-        backend = build_managed_backend(load_managed_backend_config())
+            def stop() -> bool:
+                # Pausing mid-run stops the loop between names, freeing ds4
+                # within one name of `ops research pause`.
+                return base_stop() or os.path.exists(pause_flag)
 
-        vetted = confirmed = rejected = vet_failed = 0
-        vet_ran = False
-        vet_errored = False
-        vet_hit_deadline = False
-        researched = drain_failed = 0
-        drain_hit_deadline = False
-        drain_llms = None  # (evidence, thesis) — built once, on first chunk
-        try:
-            while not research_idle and not stop() and tick_now() < deadline:
-                pending = store.pending_hits()
-                if not memo_store.pending_vetting_memos() and not pending:
-                    break
-                progress = 0
-                # Vet the queue first (the adapter brings ds4 up lazily, so
-                # an empty vetting queue never spins it by itself).
-                if memo_store.pending_vetting_memos() and not vet_errored:
-                    summary = _research_vetting_stage(
-                        journal, config, memo_store=memo_store, backend=backend,
-                        deadline=deadline, should_stop=stop, now=tick_now,
-                        adapter_factory=vet_adapter_factory,
-                    )
-                    if summary is None:
-                        vet_errored = True
-                    else:
-                        vet_ran = True
-                        vetted += summary.vetted
-                        confirmed += summary.confirmed
-                        rejected += summary.rejected
-                        vet_failed += summary.failed
-                        vet_hit_deadline = vet_hit_deadline or summary.hit_deadline
-                        progress += summary.vetted + summary.failed
-                # Then drain one chunk of screen hits into brain memos.
-                if pending:
-                    if drain_llms is None:
-                        from tradingagents.dataflows import edgar
-                        edgar.get_user_agent()  # fail fast before spinning ds4
+            backend = build_managed_backend(load_managed_backend_config())
 
-                        from ops.research.models import build_stage_llm
-
-                        drain_llms = (
-                            build_stage_llm(config.research_evidence_model),
-                            build_stage_llm(config.research_thesis_model),
+            vetted = confirmed = rejected = vet_failed = 0
+            vet_ran = False
+            vet_errored = False
+            vet_hit_deadline = False
+            researched = drain_failed = 0
+            drain_hit_deadline = False
+            drain_llms = None  # (evidence, thesis) — built once, on first chunk
+            try:
+                while not research_idle and not stop() and tick_now() < deadline:
+                    pending = store.pending_hits()
+                    if not memo_store.pending_vetting_memos() and not pending:
+                        break
+                    progress = 0
+                    # Vet the queue first (the adapter brings ds4 up lazily, so
+                    # an empty vetting queue never spins it by itself).
+                    if memo_store.pending_vetting_memos() and not vet_errored:
+                        summary = _research_vetting_stage(
+                            journal, config, memo_store=memo_store, backend=backend,
+                            deadline=deadline, should_stop=stop, now=tick_now,
+                            adapter_factory=vet_adapter_factory, reporter=reporter,
                         )
-                    from ops.research.drain import drain_pending
+                        if summary is None:
+                            vet_errored = True
+                        else:
+                            vet_ran = True
+                            vetted += summary.vetted
+                            confirmed += summary.confirmed
+                            rejected += summary.rejected
+                            vet_failed += summary.failed
+                            vet_hit_deadline = vet_hit_deadline or summary.hit_deadline
+                            progress += summary.vetted + summary.failed
+                    # Then drain one chunk of screen hits into brain memos.
+                    if pending:
+                        if drain_llms is None:
+                            from tradingagents.dataflows import edgar
+                            edgar.get_user_agent()  # fail fast before spinning ds4
 
-                    backend.ensure_up()
-                    summary = drain_pending(
-                        store=store, memo_store=memo_store,
-                        evidence_llm=drain_llms[0], thesis_llm=drain_llms[1],
-                        thesis_model_spec=config.research_thesis_model,
-                        max_names=config.research_drain_nightly_cap,
-                        deadline=deadline, should_stop=stop, now=tick_now,
+                            from ops.research.models import build_stage_llm
+
+                            drain_llms = (
+                                build_stage_llm(config.research_evidence_model),
+                                build_stage_llm(config.research_thesis_model),
+                            )
+                        from ops.research.drain import drain_pending
+
+                        backend.ensure_up()
+                        summary = drain_pending(
+                            store=store, memo_store=memo_store,
+                            evidence_llm=drain_llms[0], thesis_llm=drain_llms[1],
+                            thesis_model_spec=config.research_thesis_model,
+                            max_names=config.research_drain_nightly_cap,
+                            deadline=deadline, should_stop=stop, now=tick_now,
+                            reporter=reporter,
+                        )
+                        researched += summary.researched
+                        drain_failed += summary.failed
+                        drain_hit_deadline = drain_hit_deadline or summary.hit_deadline
+                        progress += summary.researched + summary.failed
+                    if progress == 0:
+                        break  # nothing moved (deadline/stop/errors) — don't spin
+                if not research_idle:  # idle nights recorded their zero event above
+                    journal.record_event(
+                        events.KIND_RESEARCH_DRAIN_RUN,
+                        events.research_drain_run_payload(
+                            asof=date.today().isoformat(), screened_this_run=screened_this_run,
+                            researched=researched, failed=drain_failed,
+                            still_pending=len(store.pending_hits()),
+                            hit_deadline=drain_hit_deadline,
+                        ),
                     )
-                    researched += summary.researched
-                    drain_failed += summary.failed
-                    drain_hit_deadline = drain_hit_deadline or summary.hit_deadline
-                    progress += summary.researched + summary.failed
-                if progress == 0:
-                    break  # nothing moved (deadline/stop/errors) — don't spin
-            if not research_idle:  # idle nights recorded their zero event above
-                journal.record_event(
-                    events.KIND_RESEARCH_DRAIN_RUN,
-                    events.research_drain_run_payload(
-                        asof=date.today().isoformat(), screened_this_run=screened_this_run,
-                        researched=researched, failed=drain_failed,
-                        still_pending=len(store.pending_hits()),
-                        hit_deadline=drain_hit_deadline,
-                    ),
+                if vet_ran:
+                    journal.record_event(
+                        events.KIND_RESEARCH_VETTING_RUN,
+                        events.research_vetting_run_payload(
+                            asof=date.today().isoformat(), vetted=vetted,
+                            confirmed=confirmed, rejected=rejected, failed=vet_failed,
+                            still_pending=len(memo_store.pending_vetting_memos()),
+                            hit_deadline=vet_hit_deadline,
+                        ),
+                    )
+                # Short sleeve gets whatever window remains — research (the
+                # proven sleeve) always drains and vets first, and both share
+                # this tick's single ds4 bracket (the sole contention guard).
+                _short_overnight_pass(
+                    journal, config, backend=backend, deadline=deadline,
+                    should_stop=stop, tick_now=tick_now,
+                    adapter_factory=vet_adapter_factory,
+                    screened_this_run=screened_this_run,
+                    reporter=reporter,
                 )
-            if vet_ran:
-                journal.record_event(
-                    events.KIND_RESEARCH_VETTING_RUN,
-                    events.research_vetting_run_payload(
-                        asof=date.today().isoformat(), vetted=vetted,
-                        confirmed=confirmed, rejected=rejected, failed=vet_failed,
-                        still_pending=len(memo_store.pending_vetting_memos()),
-                        hit_deadline=vet_hit_deadline,
-                    ),
+                _insider_memo_pass(
+                    journal, config, backend=backend, deadline=deadline,
+                    should_stop=stop, tick_now=tick_now,
+                    reporter=reporter,
                 )
-            # Short sleeve gets whatever window remains — research (the
-            # proven sleeve) always drains and vets first, and both share
-            # this tick's single ds4 bracket (the sole contention guard).
-            _short_overnight_pass(
-                journal, config, backend=backend, deadline=deadline,
-                should_stop=stop, tick_now=tick_now,
-                adapter_factory=vet_adapter_factory,
-                screened_this_run=screened_this_run,
-            )
-            _insider_memo_pass(
-                journal, config, backend=backend, deadline=deadline,
-                should_stop=stop, tick_now=tick_now,
-            )
-        finally:
-            backend.shutdown()
+                activity.outcome = (
+                    f"researched {researched}, vetted {vetted}, "
+                    f"failed {drain_failed + vet_failed}"
+                )
+            finally:
+                backend.shutdown()
     except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
         journal.record_event(
             events.KIND_RESEARCH_DRAIN_ERROR,
@@ -824,7 +879,7 @@ def _short_overnight_work_pending(config) -> bool:
 
 def _short_overnight_pass(
     journal: Journal, config, *, backend, deadline, should_stop, tick_now,
-    adapter_factory=None, screened_this_run: bool = False,
+    adapter_factory=None, screened_this_run: bool = False, reporter=None,
 ) -> None:
     """Short-sleeve overnight work, run AFTER the research stages:
     alternate graph-vetting (inverted confirm map) and drain chunks against
@@ -870,7 +925,7 @@ def _short_overnight_pass(
                 summary = _short_vetting_stage(
                     journal, config, memo_store=memo_store, backend=backend,
                     deadline=deadline, should_stop=should_stop, now=tick_now,
-                    adapter_factory=adapter_factory,
+                    adapter_factory=adapter_factory, reporter=reporter,
                 )
                 if summary is None:
                     vet_errored = True
@@ -903,7 +958,7 @@ def _short_overnight_pass(
                     thesis_model_spec=config.research_thesis_model,
                     max_names=config.research_drain_nightly_cap,
                     deadline=deadline, should_stop=should_stop, now=tick_now,
-                    research_fn=research_short_hit,
+                    research_fn=research_short_hit, reporter=reporter,
                 )
                 researched += summary.researched
                 drain_failed += summary.failed
@@ -948,6 +1003,7 @@ def _insider_memo_work_pending(config) -> bool:
 
 def _insider_memo_pass(
     journal: Journal, config, *, backend, deadline, should_stop, tick_now,
+    reporter=None,
 ) -> None:
     """Overnight memo-lite authoring for insider entries — one cheap
     structured call per entry, LAST in the window (after research and short
@@ -972,6 +1028,7 @@ def _insider_memo_pass(
             thesis_llm=build_stage_llm(config.research_thesis_model),
             thesis_model_spec=config.research_thesis_model,
             deadline=deadline, should_stop=should_stop, now=tick_now,
+            reporter=reporter,
         )
     except Exception as exc:  # noqa: BLE001 - deliberately broad, scheduler-safe
         journal.record_event(
@@ -984,7 +1041,7 @@ def _insider_memo_pass(
 
 def _short_vetting_stage(
     journal: Journal, config, *, memo_store, backend, deadline, should_stop,
-    now, adapter_factory=None,
+    now, adapter_factory=None, reporter=None,
 ):
     """One graph-vetting pass over the SHORT pending_vetting queue with the
     inverted confirm map (Sell -> high, Underweight -> medium). Same
@@ -1001,7 +1058,10 @@ def _short_vetting_stage(
         if adapter_factory is None:
             from ops.pipeline_adapter import TradingAgentsPipelineAdapter
 
-            adapter = TradingAgentsPipelineAdapter(backend=backend)
+            adapter = TradingAgentsPipelineAdapter(
+                backend=backend, reporter=reporter, activity_job="overnight",
+                activity_stage="vetting",
+            )
         else:
             adapter = adapter_factory(backend)
         return vet_pending(
@@ -1022,7 +1082,7 @@ def _short_vetting_stage(
 
 def _research_vetting_stage(
     journal: Journal, config, *, memo_store, backend, deadline, should_stop,
-    now, adapter_factory=None,
+    now, adapter_factory=None, reporter=None,
 ):
     """One graph-vetting pass over the pending_vetting queue.
 
@@ -1045,7 +1105,10 @@ def _research_vetting_stage(
         if adapter_factory is None:
             from ops.pipeline_adapter import TradingAgentsPipelineAdapter
 
-            adapter = TradingAgentsPipelineAdapter(backend=backend)
+            adapter = TradingAgentsPipelineAdapter(
+                backend=backend, reporter=reporter, activity_job="overnight",
+                activity_stage="vetting",
+            )
         else:
             adapter = adapter_factory(backend)
         return vet_pending(
@@ -1135,7 +1198,8 @@ def _start_full_scheduler(
     sched = BackgroundScheduler(timezone="America/New_York")
     sched.add_job(
         orchestrator.tick,
-        CronTrigger(minute="0,30", hour="9-15", day_of_week="mon-fri"),
+        CronTrigger(minute=times.TICK_CRON_MINUTE, hour=times.TICK_CRON_HOUR,
+                    day_of_week=times.TICK_CRON_DOW),
         id="orchestrator_tick", max_instances=1, misfire_grace_time=60,
     )
     sched.add_job(
@@ -1188,7 +1252,7 @@ def _start_full_scheduler(
         # queues back up within 30 minutes.
         sched.add_job(
             lambda: _research_overnight_tick(journal, config),
-            CronTrigger(minute="0,30"),
+            CronTrigger(minute=times.OVERNIGHT_CRON_MINUTE),
             id="research_overnight", max_instances=1, misfire_grace_time=600,
         )
         sched.add_job(

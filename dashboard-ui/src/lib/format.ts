@@ -73,3 +73,10 @@ export function guardAge(sec: number | null | undefined): string {
   if (sec < 3600) return Math.round(sec / 60) + "m";
   return Math.round(sec / 3600) + "h";
 }
+
+export function hhmmET(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-US", {
+    hour: "2-digit", minute: "2-digit", hour12: false,
+    timeZone: "America/New_York",
+  }) + " ET";
+}

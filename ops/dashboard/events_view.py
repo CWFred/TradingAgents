@@ -19,6 +19,33 @@ from ops.dashboard.snapshot import ro_conn
 _MAX_FALLBACK = 200
 
 
+def _activity_desc(p: dict[str, Any]) -> str:
+    """'overnight: vetting CRC (2/5)' for items; 'daily_cycle' for jobs."""
+    if p.get("scope") == "item":
+        bits = f"{p.get('job', '?')}: {p.get('stage', '?')}"
+        if p.get("symbol"):
+            bits += f" {p['symbol']}"
+        if p.get("seq"):
+            bits += f" ({p['seq']})"
+        return bits
+    return str(p.get("job", "?"))
+
+
+def _render_activity_started(p: dict[str, Any]) -> str:
+    desc = _activity_desc(p)
+    if p.get("scope") == "job" and p.get("reason"):
+        return f"▶ {desc} — {p['reason']}"
+    return f"▶ {desc}"
+
+
+def _render_activity_finished(p: dict[str, Any]) -> str:
+    desc = _activity_desc(p)
+    dur = p.get("duration_s")
+    if p.get("ok"):
+        return f"✓ {desc} ({dur}s)" if dur is not None else f"✓ {desc}"
+    return f"✗ {desc} — failed after {dur}s" if dur is not None else f"✗ {desc} — failed"
+
+
 def _dec_display(v: Any, dp: int, *, strip: bool) -> str:
     """Display-trim a Decimal-ish value to dp places (half-up). Journal
     quantities carry full paper-fill precision (25+ digits); the feed is for
@@ -87,6 +114,8 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
         f"Research escalation: {p.get('reason', p.get('memo_id', '?'))}"),
     "resolution_due": lambda p: f"Resolution due: memo {p.get('memo_id', '?')}",
     "catalyst_due": lambda p: f"Catalyst due: memo {p.get('memo_id', '?')}",
+    "activity_started": _render_activity_started,
+    "activity_finished": _render_activity_finished,
 }
 
 

@@ -14,6 +14,7 @@ from datetime import date
 from enum import Enum
 from typing import Protocol
 
+from ops.activity import NullReporter
 from ops.llm_backend import ManagedBackend, NullManagedBackend
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -96,11 +97,17 @@ def parse_decision(text: str) -> PipelineDecision:
 class TradingAgentsPipelineAdapter:
     """Wraps the upstream graph. Constructs lazily and reuses one instance."""
 
-    def __init__(self, *, backend: ManagedBackend | None = None, **graph_kwargs):
+    def __init__(self, *, backend: ManagedBackend | None = None,
+                 reporter=None, activity_job: str = "daily_cycle",
+                 activity_stage: str = "analyzing", **graph_kwargs):
         self._kwargs = graph_kwargs
         self._graph: TradingAgentsGraph | None = None
         self._lock = threading.Lock()
         self._backend: ManagedBackend = backend or NullManagedBackend()
+        self._reporter = reporter or NullReporter()
+        self._activity_job = activity_job
+        self._activity_stage = activity_stage
+        self._seq = 0
 
     def _ensure_graph(self) -> TradingAgentsGraph:
         # Fast path: no lock once the cache is populated.
@@ -119,23 +126,29 @@ class TradingAgentsPipelineAdapter:
     def propagate(
         self, symbol: str, asof_date: date, research_context: str = "",
     ) -> PipelineResult:
-        # Bring the managed backend up lazily — only when an analysis actually
-        # runs, so ticks with no candidates never load a local model.
-        self._backend.ensure_up()
-        graph = self._ensure_graph()
-        raw, decision_text = graph.propagate(
-            symbol, asof_date.isoformat(), research_memo_context=research_context,
-        )
-        decision, tier = parse_rating_action(decision_text or "")
-        raw_dict = raw if isinstance(raw, dict) else {"output": str(raw)}
-        return PipelineResult(
-            symbol=symbol, date=asof_date, decision=decision, raw=raw_dict,
-            rating=(decision_text or "").strip(), tier=tier,
-        )
+        self._seq += 1
+        with self._reporter.item(
+            self._activity_job, stage=self._activity_stage,
+            symbol=symbol, seq=str(self._seq),
+        ):
+            # Bring the managed backend up lazily — only when an analysis
+            # actually runs, so ticks with no candidates never load a model.
+            self._backend.ensure_up()
+            graph = self._ensure_graph()
+            raw, decision_text = graph.propagate(
+                symbol, asof_date.isoformat(), research_memo_context=research_context,
+            )
+            decision, tier = parse_rating_action(decision_text or "")
+            raw_dict = raw if isinstance(raw, dict) else {"output": str(raw)}
+            return PipelineResult(
+                symbol=symbol, date=asof_date, decision=decision, raw=raw_dict,
+                rating=(decision_text or "").strip(), tier=tier,
+            )
 
     @contextmanager
     def session(self) -> Iterator[TradingAgentsPipelineAdapter]:
         """Bracket a batch of analyses; tear the managed backend down on exit."""
+        self._seq = 0
         try:
             yield self
         finally:

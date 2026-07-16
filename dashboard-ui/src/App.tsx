@@ -8,8 +8,10 @@ import FillsPanel from "./components/FillsPanel";
 import FunnelPanel from "./components/FunnelPanel";
 import HeaderBar from "./components/HeaderBar";
 import LogsPanel from "./components/LogsPanel";
+import NowStrip from "./components/NowStrip";
 import OvernightPanel from "./components/OvernightPanel";
 import PositionsPanel from "./components/PositionsPanel";
+import RunsPanel from "./components/RunsPanel";
 import SleeveCards from "./components/SleeveCards";
 import SleeveDrillDrawer from "./components/SleeveDrillDrawer";
 
@@ -27,6 +29,7 @@ export default function App() {
       <HeaderBar health={snap?.health ?? null} market={snap?.market ?? null}
         lastGoodAt={poll.lastGoodAt} />
       <AlertBanner health={health} />
+      <NowStrip activity={snap?.activity ?? null} health={snap?.health ?? null} />
       <div className="wrap">
         <SleeveCards sleeves={sleeves} onOpen={setDrill} />
         <div className="cols">
@@ -38,6 +41,7 @@ export default function App() {
           <div className="col">
             <ActivityFeed events={poll.events} />
             <OvernightPanel funnel={snap?.funnel ?? null} />
+            <RunsPanel activity={snap?.activity ?? null} />
             <AnomaliesPanel anomalies={snap?.anomalies_7d ?? null} />
             <LogsPanel />
           </div>

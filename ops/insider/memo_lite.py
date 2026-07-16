@@ -23,6 +23,7 @@ from math import ceil
 
 from pydantic import BaseModel, Field
 
+from ops.activity import NullReporter
 from ops.insider.clusters import CLUSTER_WINDOW_DAYS
 from ops.insider.store import SignalStore
 from ops.insider.trading import MAX_HOLD_CALENDAR_DAYS, STOP_PCT, TARGET_PCT
@@ -74,12 +75,14 @@ def author_pending_memos(
     now=None,
     price_fetcher=None,
     echo=lambda msg: None,
+    reporter=None,
 ) -> int:
     """Author memos for entries that don't have one yet. Returns memos
     written. Deadline/stop-boxed like vet_pending: conditions are checked
     BEFORE each entry. Failures leave the entry queued and never raise."""
     price_fetcher = price_fetcher or fetch_price_context
     now_fn = now or (lambda: datetime.now(timezone.utc))
+    reporter = reporter or NullReporter()
     structured = bind_structured(thesis_llm, MemoLiteDraft, "insider-memo-lite")
     if structured is None:
         echo("memo-lite skipped: no structured-output support")
@@ -93,13 +96,15 @@ def author_pending_memos(
             break
         symbol, asof = entry["symbol"], entry["asof"]
         try:
-            memo = _author_one(
-                symbol=symbol, asof=asof, signal_store=signal_store,
-                structured=structured, price_fetcher=price_fetcher,
-                thesis_model_spec=thesis_model_spec,
-            )
-            memo_store.save(memo)
-            signal_store.set_entry_memo(symbol, asof, memo.memo_id)
+            with reporter.item("overnight", stage="authoring_memo",
+                               symbol=symbol):
+                memo = _author_one(
+                    symbol=symbol, asof=asof, signal_store=signal_store,
+                    structured=structured, price_fetcher=price_fetcher,
+                    thesis_model_spec=thesis_model_spec,
+                )
+                memo_store.save(memo)
+                signal_store.set_entry_memo(symbol, asof, memo.memo_id)
             written += 1
             echo(f"{symbol}: memo {memo.memo_id}")
         except Exception as exc:  # noqa: BLE001 - one bad entry must not strand the queue

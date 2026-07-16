@@ -374,12 +374,18 @@ def _anomalies_section(config: OpsConfig, now: datetime) -> dict[str, Any]:
 def build_snapshot(
     config: OpsConfig, *, now: datetime | None = None,
 ) -> dict[str, Any]:
+    from ops.dashboard.activity_view import activity_section
+
     when = now if now is not None else datetime.now(timezone.utc)
+    health = section(lambda: _health_section(config, when))
+    verdict = health.get("verdict", "UNKNOWN") if "error" not in health else "UNKNOWN"
     return {
         "generated_at": when.isoformat(),
-        "health": section(lambda: _health_section(config, when)),
+        "health": health,
         "sleeves": section(lambda: _sleeves_section(config, when)),
         "funnel": section(lambda: _funnel_section(config, when)),
         "anomalies_7d": section(lambda: _anomalies_section(config, when)),
         "market": section(lambda: _market_section(config, when)),
+        "activity": section(
+            lambda: activity_section(config, when, health_verdict=verdict)),
     }

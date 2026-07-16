@@ -43,3 +43,29 @@ def test_render_unknown_kind_falls_back_compact():
     text = render_event("brand_new_kind", {"a": 1})
     assert text.startswith("brand_new_kind")
     assert len(text) <= 220
+
+
+def test_render_activity_started_item():
+    text = render_event("activity_started", {
+        "scope": "item", "job": "overnight", "stage": "vetting",
+        "symbol": "CRC", "seq": "2/5"})
+    assert text == "▶ overnight: vetting CRC (2/5)"
+
+
+def test_render_activity_started_job_with_reason():
+    text = render_event("activity_started", {
+        "scope": "job", "job": "daily_cycle", "reason": "attempt 1 of 3"})
+    assert text == "▶ daily_cycle — attempt 1 of 3"
+
+
+def test_render_activity_finished_ok():
+    text = render_event("activity_finished", {
+        "scope": "item", "job": "overnight", "stage": "vetting",
+        "symbol": "CRC", "ok": True, "duration_s": 4.2})
+    assert text == "✓ overnight: vetting CRC (4.2s)"
+
+
+def test_render_activity_finished_failed_job():
+    text = render_event("activity_finished", {
+        "scope": "job", "job": "daily_cycle", "ok": False, "duration_s": 12.0})
+    assert text == "✗ daily_cycle — failed after 12.0s"

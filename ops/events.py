@@ -158,6 +158,14 @@ KIND_UNDERWEIGHT_TRIM = "underweight_trim"
 KIND_DAILY_OVERVIEW = "daily_overview"
 KIND_DAILY_OVERVIEW_ERROR = "daily_overview_error"
 
+# Activity breadcrumbs: what the ds4-holding pipeline is doing right now.
+# scope="job" brackets a whole window (daily cycle / overnight); scope="item"
+# brackets one unit inside it (a symbol analysis, a memo vetting, a drain
+# name). The dashboard derives "now working on", the recent-runs list, and
+# durations from these pairs.
+KIND_ACTIVITY_STARTED = "activity_started"
+KIND_ACTIVITY_FINISHED = "activity_finished"
+
 # Kinds deliberately NOT notified. Everything here is an audit trail the
 # operator reads via `ops status` or sqlite, not a push/email — either
 # because it fires during normal operation (service lifecycle, replay
@@ -241,6 +249,11 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     # dispatcher/POLICY table, so this gate event is audit-only.
     KIND_DAILY_OVERVIEW,
     KIND_DAILY_OVERVIEW_ERROR,
+    # Activity breadcrumbs: dashboard-only bookkeeping (the "now working
+    # on" / recent-runs feed) — they fire constantly during normal
+    # operation and must never notify.
+    KIND_ACTIVITY_STARTED,
+    KIND_ACTIVITY_FINISHED,
 })
 
 
@@ -872,6 +885,43 @@ def daily_overview_error_payload(*, error: str) -> dict[str, Any]:
     return {"error": error}
 
 
+def activity_started_payload(
+    *, scope: str, job: str, stage: str | None = None,
+    symbol: str | None = None, seq: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """None-valued fields are omitted (byte-stable payload convention)."""
+    payload: dict[str, Any] = {"scope": scope, "job": job}
+    if stage is not None:
+        payload["stage"] = stage
+    if symbol is not None:
+        payload["symbol"] = symbol
+    if seq is not None:
+        payload["seq"] = seq
+    if reason is not None:
+        payload["reason"] = reason
+    return payload
+
+
+def activity_finished_payload(
+    *, scope: str, job: str, ok: bool, duration_s: float,
+    stage: str | None = None, symbol: str | None = None,
+    seq: str | None = None, outcome: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"scope": scope, "job": job}
+    if stage is not None:
+        payload["stage"] = stage
+    if symbol is not None:
+        payload["symbol"] = symbol
+    if seq is not None:
+        payload["seq"] = seq
+    payload["ok"] = ok
+    payload["duration_s"] = duration_s
+    if outcome is not None:
+        payload["outcome"] = outcome
+    return payload
+
+
 # Kind -> builder registry: the enforcement test walks this to prove every
 # POLICY kind has a builder and every builder's kind has been classified
 # (POLICY or AUDIT_ONLY). Register every new builder here.
@@ -955,4 +1005,6 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_UNDERWEIGHT_TRIM: underweight_trim_payload,
     KIND_DAILY_OVERVIEW: daily_overview_payload,
     KIND_DAILY_OVERVIEW_ERROR: daily_overview_error_payload,
+    KIND_ACTIVITY_STARTED: activity_started_payload,
+    KIND_ACTIVITY_FINISHED: activity_finished_payload,
 }
