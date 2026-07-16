@@ -27,9 +27,11 @@ def _mhit(sym, rank, close="200", adv="100000000"):
     )
 
 
-def _build(*, earnings_syms=(), leaders=(), **kwargs):
+def _build(*, earnings_syms=(), leaders=(), config=None, **kwargs):
+    if config is None:
+        config = OpsConfig()
     return build_composite_universe(
-        asof_date=ASOF, config=OpsConfig(),
+        asof_date=ASOF, config=config,
         members_loader=lambda: ["AAPL", "MSFT", "NVDA", "AVGO", "META",
                                 "AMD", "CRM", "ORCL", "NOW", "PLTR"],
         earnings_finder=lambda syms, asof_date, lookback_days, fetch=None:
@@ -59,7 +61,7 @@ def test_overlap_keeps_earnings_source_and_both_payloads():
 def test_cap_is_min_of_budget_and_free_slots():
     leaders = [_mhit(s, i + 1) for i, s in enumerate(
         ["NVDA", "AMD", "AVGO", "META", "CRM", "ORCL", "NOW", "PLTR", "AAPL"])]
-    assert len(_build(leaders=leaders)) == 8                    # budget caps
+    assert len(_build(leaders=leaders, config=OpsConfig(daily_analysis_budget=8))) == 8  # budget caps
     assert len(_build(leaders=leaders, free_slots=2)) == 2      # slots cap
     assert _build(leaders=leaders, free_slots=0) == []          # full book -> zero LLM runs
 

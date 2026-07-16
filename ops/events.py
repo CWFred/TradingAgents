@@ -146,6 +146,12 @@ KIND_RESEARCH_POSITION_CLOSED = "research_position_closed"
 # analyzed candidate regardless of whether it turned into an order.
 KIND_ANALYSIS_DECISION = "analysis_decision"
 
+# v2 conviction posture: displacement/skip/trim breadcrumbs — the sells
+# and buys themselves already notify via KIND_FILL.
+KIND_DISPLACEMENT_TRIM = "displacement_trim"
+KIND_ENTRY_SKIPPED_UNFUNDED = "entry_skipped_unfunded"
+KIND_UNDERWEIGHT_TRIM = "underweight_trim"
+
 # --- Daily overview delivery (DO-Task 3) ---
 # Cross-sleeve "everything that happened today" digest: weekday post-close +
 # Saturday evening daemon job, plus `ops digest` on demand.
@@ -224,6 +230,11 @@ AUDIT_ONLY: frozenset[str] = frozenset({
     # Per-name momentum pipeline verdict: audit trail, not a push — the BUY
     # case already notifies via position_opened/fill.
     KIND_ANALYSIS_DECISION,
+    # v2 conviction posture: displacement/skip/trim breadcrumbs — the sells
+    # and buys themselves already notify via KIND_FILL.
+    KIND_DISPLACEMENT_TRIM,
+    KIND_ENTRY_SKIPPED_UNFUNDED,
+    KIND_UNDERWEIGHT_TRIM,
     # Daily overview delivery: audit record of the once-per-day cross-sleeve
     # digest run. The push itself is a direct Pushover call inside the tick
     # (see ops/main.py::_daily_overview_tick), not routed through the notify
@@ -520,6 +531,7 @@ def baseline_exit_payload(*, symbol: str, held_days: int) -> dict[str, Any]:
 def position_opened_payload(
     *, symbol: str, source: str, entry_date: date,
     client_order_id: str, entry_rank: int | None = None,
+    tier: str | None = None,
 ) -> dict[str, Any]:
     """symbol/source/entry_date are read back by the exit engine's
     provenance loader (json_extract on symbol) — keys frozen."""
@@ -531,6 +543,8 @@ def position_opened_payload(
     }
     if entry_rank is not None:
         payload["entry_rank"] = entry_rank
+    if tier:
+        payload["tier"] = tier
     return payload
 
 
@@ -802,16 +816,48 @@ def insider_position_closed_payload(
 
 def analysis_decision_payload(
     *, symbol: str, decision: str, source: str, asof: str, rank: int | None = None,
+    rating: str = "",
 ) -> dict[str, Any]:
     """Momentum sleeve per-name pipeline verdict. `decision` is one of
-    "BUY"/"HOLD"/"SELL"; `rank` is omitted (not None) when the candidate
+    "BUY"/"HOLD"/"SELL"/"TRIM"; `rank` is omitted (not None) when the candidate
     has no momentum payload (an earnings-only candidate)."""
     payload: dict[str, Any] = {
         "symbol": symbol, "decision": decision, "source": source, "asof": asof,
     }
+    if rating:
+        payload["rating"] = rating
     if rank is not None:
         payload["rank"] = rank
     return payload
+
+
+def displacement_trim_payload(
+    *, symbol: str, tier: str, notional: Decimal, funded_symbol: str,
+    client_order_id: str,
+) -> dict[str, Any]:
+    """One starter trimmed to fund a high-conviction entry (spec 2026-07-14).
+    The one-line story: 'trimmed {symbol} ({tier}) to fund {funded_symbol}'."""
+    return {
+        "symbol": symbol, "tier": tier, "notional": str(notional),
+        "funded_symbol": funded_symbol, "client_order_id": client_order_id,
+    }
+
+
+def entry_skipped_unfunded_payload(
+    *, symbol: str, shortfall: Decimal, reason: str,
+) -> dict[str, Any]:
+    """A proposed entry that could not be funded even after displacement."""
+    return {"symbol": symbol, "shortfall": str(shortfall), "reason": reason}
+
+
+def underweight_trim_payload(
+    *, symbol: str, rating: str, notional: Decimal, client_order_id: str,
+) -> dict[str, Any]:
+    """Half-trim of a held position on an Underweight re-analysis."""
+    return {
+        "symbol": symbol, "rating": rating, "notional": str(notional),
+        "client_order_id": client_order_id,
+    }
 
 
 def daily_overview_payload(*, date: str, headline: str, path: str) -> dict[str, Any]:
@@ -904,6 +950,9 @@ BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     KIND_INSIDER_POSITION_OPENED: insider_position_opened_payload,
     KIND_INSIDER_POSITION_CLOSED: insider_position_closed_payload,
     KIND_ANALYSIS_DECISION: analysis_decision_payload,
+    KIND_DISPLACEMENT_TRIM: displacement_trim_payload,
+    KIND_ENTRY_SKIPPED_UNFUNDED: entry_skipped_unfunded_payload,
+    KIND_UNDERWEIGHT_TRIM: underweight_trim_payload,
     KIND_DAILY_OVERVIEW: daily_overview_payload,
     KIND_DAILY_OVERVIEW_ERROR: daily_overview_error_payload,
 }

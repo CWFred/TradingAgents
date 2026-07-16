@@ -58,7 +58,7 @@ def test_max_open_positions_blocks_when_full():
     )
     b = MagicMock()
     b.get_positions.return_value = positions
-    ctx = RuleContext(order=o, broker=b, config=OpsConfig())
+    ctx = RuleContext(order=o, broker=b, config=OpsConfig(max_open_positions=7))
     assert MaxOpenPositionsRule().check(ctx).allowed is False
 
 

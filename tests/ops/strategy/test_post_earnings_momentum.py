@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from ops.broker.types import Side, OrderType
 from ops.config import OpsConfig
-from ops.pipeline_adapter import PipelineDecision, StubPipelineAdapter
+from ops.pipeline_adapter import PipelineDecision, StubPipelineAdapter, TIER_STARTER
 from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
 from ops.universe import Candidate, CandidateSource
 from ops.universe.earnings import EarningsHit
@@ -218,3 +218,59 @@ def test_momentum_candidate_gets_momentum_reason():
     assert len(orders) == 1
     assert "6-mo momentum leader" in orders[0].reason
     assert "0.4" in orders[0].reason
+
+
+def test_overweight_starter_gets_starter_notional():
+    cfg = OpsConfig()
+    strat = PostEarningsMomentumStrategy(config=cfg)
+    pipe = StubPipelineAdapter(
+        {"AAPL": PipelineDecision.BUY}, tiers={"AAPL": TIER_STARTER},
+    )
+    orders = strat.propose_orders(
+        candidates=[_candidate("AAPL")], pipeline=pipe,
+        current_equity=Decimal("10000"), asof_date=date(2026, 7, 14),
+    )
+    assert len(orders) == 1
+    # starter_position_pct = 5% of 10_000
+    assert orders[0].order.notional_dollars == Decimal("500.00")
+    assert orders[0].pipeline.tier == TIER_STARTER
+    assert "starter" in orders[0].reason
+
+
+def test_high_tier_still_gets_full_notional():
+    cfg = OpsConfig()
+    strat = PostEarningsMomentumStrategy(config=cfg)
+    pipe = StubPipelineAdapter({"AAPL": PipelineDecision.BUY})
+    orders = strat.propose_orders(
+        candidates=[_candidate("AAPL")], pipeline=pipe,
+        current_equity=Decimal("10000"), asof_date=date(2026, 7, 14),
+    )
+    assert orders[0].order.notional_dollars == Decimal("1200.00")
+
+
+def test_starter_below_dollar_floor_is_skipped_not_upsized():
+    cfg = OpsConfig()
+    strat = PostEarningsMomentumStrategy(config=cfg)
+    pipe = StubPipelineAdapter(
+        {"AAPL": PipelineDecision.BUY}, tiers={"AAPL": TIER_STARTER},
+    )
+    # equity 80 -> starter notional 4.00 < per_trade_dollar_floor 5
+    orders = strat.propose_orders(
+        candidates=[_candidate("AAPL")], pipeline=pipe,
+        current_equity=Decimal("80"), asof_date=date(2026, 7, 14),
+    )
+    assert orders == []
+
+
+def test_live_cap_applies_to_starter_notional_too():
+    cfg = OpsConfig()
+    strat = PostEarningsMomentumStrategy(config=cfg)
+    pipe = StubPipelineAdapter(
+        {"AAPL": PipelineDecision.BUY}, tiers={"AAPL": TIER_STARTER},
+    )
+    orders = strat.propose_orders(
+        candidates=[_candidate("AAPL")], pipeline=pipe,
+        current_equity=Decimal("10000"), asof_date=date(2026, 7, 14),
+        live_max_position_cap=Decimal("10"),
+    )
+    assert orders[0].order.notional_dollars == Decimal("10")

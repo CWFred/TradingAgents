@@ -17,7 +17,7 @@ def test_default_config_matches_spec():
     }
     assert cfg.per_position_cap_pct == Decimal("0.12")
     assert cfg.per_trade_dollar_floor == Decimal("5")
-    assert cfg.max_open_positions == 7
+    assert cfg.max_open_positions == 12
     assert cfg.cash_reserve_pct == Decimal("0.16")
     assert cfg.daily_drawdown_pct == Decimal("-0.07")
     assert cfg.weekly_drawdown_pct == Decimal("-0.15")
@@ -136,7 +136,7 @@ def test_baseline_config_fields_and_env_overrides(monkeypatch):
 
 def test_envelope_rev2_defaults_and_derived_concurrency():
     cfg = OpsConfig()
-    assert cfg.max_open_positions == 7
+    assert cfg.max_open_positions == 12
     assert cfg.per_position_cap_pct == Decimal("0.12")
     assert cfg.cash_reserve_pct == Decimal("0.16")
     # Neither dial is cosmetic: derived effective concurrency equals the cap.
@@ -150,7 +150,7 @@ def test_envelope_rev2_defaults_and_derived_concurrency():
 
 
 def test_daily_analysis_budget_default_env_and_validation(monkeypatch):
-    assert OpsConfig().daily_analysis_budget == 8
+    assert OpsConfig().daily_analysis_budget == 12
     monkeypatch.setenv("OPS_DAILY_ANALYSIS_BUDGET", "3")
     assert load_config().daily_analysis_budget == 3
     with pytest.raises(ValueError):
@@ -174,10 +174,10 @@ def test_exit_rank_must_exceed_analysis_budget():
     # Exit rank at or below the entry budget removes the hysteresis band
     # and guarantees churn at the boundary.
     with pytest.raises(ValueError):
-        OpsConfig(momentum_exit_rank=8)
+        OpsConfig(momentum_exit_rank=12)  # <= default budget of 12
     with pytest.raises(ValueError):
         OpsConfig(daily_analysis_budget=8, momentum_exit_rank=8)
-    OpsConfig(momentum_exit_rank=9)  # boundary: budget+1 is valid
+    OpsConfig(momentum_exit_rank=13)  # boundary: default budget+1 is valid
 
 
 def test_exit_day_counts_must_be_positive():
@@ -301,3 +301,36 @@ def test_sleeve_starting_cash_must_be_positive():
         OpsConfig(short_starting_cash=Decimal("0"))
     with pytest.raises(ValueError, match="insider_starting_cash"):
         OpsConfig(insider_starting_cash=Decimal("-1"))
+
+
+def test_v2_posture_defaults():
+    cfg = OpsConfig()
+    assert cfg.starter_position_pct == Decimal("0.05")
+    assert cfg.displacement_max_trims_per_day == 2
+    assert cfg.displacement_min_holding_age_days == 3
+    assert cfg.max_open_positions == 12
+    assert cfg.daily_analysis_budget == 12
+
+
+def test_starter_pct_must_be_positive_and_at_most_full_size():
+    with pytest.raises(ValueError):
+        OpsConfig(starter_position_pct=Decimal("0"))
+    with pytest.raises(ValueError):
+        OpsConfig(starter_position_pct=Decimal("0.13"))  # > per_position_cap_pct
+
+
+def test_displacement_counts_must_be_positive():
+    with pytest.raises(ValueError):
+        OpsConfig(displacement_max_trims_per_day=0)
+    with pytest.raises(ValueError):
+        OpsConfig(displacement_min_holding_age_days=0)
+
+
+def test_displacement_env_overrides(monkeypatch):
+    monkeypatch.setenv("OPS_STARTER_POSITION_PCT", "0.03")
+    monkeypatch.setenv("OPS_DISPLACEMENT_MAX_TRIMS_PER_DAY", "1")
+    monkeypatch.setenv("OPS_DISPLACEMENT_MIN_HOLDING_AGE_DAYS", "5")
+    cfg = load_config()
+    assert cfg.starter_position_pct == Decimal("0.03")
+    assert cfg.displacement_max_trims_per_day == 1
+    assert cfg.displacement_min_holding_age_days == 5

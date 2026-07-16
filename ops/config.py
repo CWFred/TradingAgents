@@ -80,7 +80,14 @@ class OpsConfig:
     full_blackout_symbols: frozenset[str] = field(default_factory=lambda: _FULL_BLACKOUT_SYMBOLS)  # Not env-overridable; extend via code
     per_position_cap_pct: Decimal = Decimal("0.12")
     per_trade_dollar_floor: Decimal = Decimal("5")
-    max_open_positions: int = 7
+    # v2 posture (spec 2026-07-14): Overweight enters at starter size.
+    starter_position_pct: Decimal = Decimal("0.05")
+    # Displacement guards: at most this many funding trims per trading day,
+    # and a starter must be held this many TRADING days before it can be
+    # trimmed to fund a high-conviction entry.
+    displacement_max_trims_per_day: int = 2
+    displacement_min_holding_age_days: int = 3
+    max_open_positions: int = 12
     cash_reserve_pct: Decimal = Decimal("0.16")
     daily_drawdown_pct: Decimal = Decimal("-0.07")
     weekly_drawdown_pct: Decimal = Decimal("-0.15")
@@ -145,7 +152,7 @@ class OpsConfig:
         )
     )
     # Cost dial: max full-pipeline (LLM) analyses per day; risk is capped separately.
-    daily_analysis_budget: int = 8
+    daily_analysis_budget: int = 12
     # Exit engine (spec Component 6). Entry is top-daily_analysis_budget;
     # the gap up to momentum_exit_rank is deliberate hysteresis.
     momentum_exit_rank: int = 25
@@ -164,6 +171,14 @@ class OpsConfig:
             val = getattr(self, fname)
             if not (Decimal("0") <= val <= Decimal("1")):
                 raise ValueError(f"{fname} must be in [0, 1], got {val}")
+        if not (Decimal("0") < self.starter_position_pct <= self.per_position_cap_pct):
+            raise ValueError(
+                "starter_position_pct must be in (0, per_position_cap_pct], got "
+                f"{self.starter_position_pct}"
+            )
+        for fname in ("displacement_max_trims_per_day", "displacement_min_holding_age_days"):
+            if getattr(self, fname) <= 0:
+                raise ValueError(f"{fname} must be > 0, got {getattr(self, fname)}")
         if self.per_trade_dollar_floor < 0:
             raise ValueError(
                 f"per_trade_dollar_floor must be >= 0, got {self.per_trade_dollar_floor}"
@@ -268,6 +283,18 @@ def load_config() -> OpsConfig:
     per_position_cap_pct = _env_decimal("OPS_PER_POSITION_CAP_PCT")
     if per_position_cap_pct is not None:
         kwargs["per_position_cap_pct"] = per_position_cap_pct
+
+    starter_position_pct = _env_decimal("OPS_STARTER_POSITION_PCT")
+    if starter_position_pct is not None:
+        kwargs["starter_position_pct"] = starter_position_pct
+
+    disp_trims = _env_int("OPS_DISPLACEMENT_MAX_TRIMS_PER_DAY")
+    if disp_trims is not None:
+        kwargs["displacement_max_trims_per_day"] = disp_trims
+
+    disp_age = _env_int("OPS_DISPLACEMENT_MIN_HOLDING_AGE_DAYS")
+    if disp_age is not None:
+        kwargs["displacement_min_holding_age_days"] = disp_age
 
     per_trade_dollar_floor = _env_decimal("OPS_PER_TRADE_DOLLAR_FLOOR")
     if per_trade_dollar_floor is not None:

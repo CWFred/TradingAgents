@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from ops.broker.types import Order, OrderType, Side
 from ops.config import OpsConfig
-from ops.pipeline_adapter import PipelineAdapter, PipelineDecision
+from ops.pipeline_adapter import PipelineAdapter, PipelineDecision, PipelineResult, TIER_STARTER
 from ops.strategy.base import AnalyzedDecision, StrategyOrder
 from ops.universe import Candidate, CandidateSource
 
@@ -34,15 +34,20 @@ def _quantize_money(d: Decimal) -> Decimal:
     return d.quantize(Decimal("0.01"))
 
 
-def _reason_for(cand: Candidate) -> str:
+def _reason_for(cand: Candidate, result: PipelineResult) -> str:
+    suffix = (
+        "pipeline BUY (Overweight starter)"
+        if result.tier == TIER_STARTER
+        else "pipeline BUY"
+    )
     if cand.source is CandidateSource.EARNINGS:
         return (
             f"post-earnings beat (EPS {cand.earnings.eps_actual} vs "
-            f"est {cand.earnings.eps_estimate}); pipeline BUY"
+            f"est {cand.earnings.eps_estimate}); {suffix}"
         )
     return (
         f"6-mo momentum leader (ret {cand.momentum.trailing_return_6m}, "
-        f"> 200d MA); pipeline BUY"
+        f"> 200d MA); {suffix}"
     )
 
 
@@ -60,10 +65,14 @@ class PostEarningsMomentumStrategy:
         live_max_position_cap: Decimal | None = None,
         decision_sink: list[AnalyzedDecision] | None = None,
     ) -> list[StrategyOrder]:
-        notional = _quantize_money(current_equity * self._cfg.per_position_cap_pct)
+        full_notional = _quantize_money(current_equity * self._cfg.per_position_cap_pct)
+        starter_notional = _quantize_money(current_equity * self._cfg.starter_position_pct)
         if live_max_position_cap is not None:
-            notional = min(notional, live_max_position_cap)
-        if notional < self._cfg.per_trade_dollar_floor:
+            full_notional = min(full_notional, live_max_position_cap)
+            starter_notional = min(starter_notional, live_max_position_cap)
+        # Even the full-size rung under the floor means no order can ever
+        # clear it — bail before spending any LLM budget (v1 behavior kept).
+        if full_notional < self._cfg.per_trade_dollar_floor:
             return []
         out: list[StrategyOrder] = []
         for cand in candidates:
@@ -71,6 +80,9 @@ class PostEarningsMomentumStrategy:
             if decision_sink is not None:
                 decision_sink.append(AnalyzedDecision(candidate=cand, pipeline=result))
             if result.decision != PipelineDecision.BUY:
+                continue
+            notional = starter_notional if result.tier == TIER_STARTER else full_notional
+            if notional < self._cfg.per_trade_dollar_floor:
                 continue
             order = Order(
                 client_order_id=_client_order_id(cand.symbol, asof_date),
@@ -82,7 +94,7 @@ class PostEarningsMomentumStrategy:
             )
             out.append(StrategyOrder(
                 order=order,
-                reason=_reason_for(cand),
+                reason=_reason_for(cand, result),
                 candidate=cand,
                 pipeline=result,
             ))

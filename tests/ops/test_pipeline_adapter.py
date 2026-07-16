@@ -4,11 +4,14 @@ from datetime import date
 import pytest
 
 from ops.pipeline_adapter import (
+    TIER_HIGH,
+    TIER_STARTER,
     PipelineDecision,
     PipelineResult,
     StubPipelineAdapter,
     TradingAgentsPipelineAdapter,
     parse_decision,
+    parse_rating_action,
 )
 
 
@@ -31,16 +34,16 @@ def test_stub_defaults_to_hold_for_unknown_symbol():
     ("Buy", PipelineDecision.BUY),
     ("Sell", PipelineDecision.SELL),
     ("Hold", PipelineDecision.HOLD),
-    # Overweight/Underweight collapse to HOLD in v1
-    ("Overweight", PipelineDecision.HOLD),
-    ("Underweight", PipelineDecision.HOLD),
+    # v2 spec 2026-07-14: Overweight triggers BUY, Underweight triggers TRIM
+    ("Overweight", PipelineDecision.BUY),
+    ("Underweight", PipelineDecision.TRIM),
     # Case-insensitive
     ("BUY", PipelineDecision.BUY),
     ("sell", PipelineDecision.SELL),
     # Legacy "FINAL TRANSACTION PROPOSAL:" wrapper still parses
     ("FINAL TRANSACTION PROPOSAL: Buy", PipelineDecision.BUY),
     ("FINAL TRANSACTION PROPOSAL: Sell", PipelineDecision.SELL),
-    ("FINAL TRANSACTION PROPOSAL: Overweight", PipelineDecision.HOLD),
+    ("FINAL TRANSACTION PROPOSAL: Overweight", PipelineDecision.BUY),
     # Trailing punctuation tolerated
     ("Buy.", PipelineDecision.BUY),
     # Unknown/empty defaults to HOLD (safe)
@@ -149,8 +152,8 @@ def test_default_adapter_has_no_managed_backend(monkeypatch):
 
 def test_propagate_threads_research_context_and_exposes_native_rating(monkeypatch):
     """Vetting path: the adapter forwards research_context to the graph and
-    surfaces the ungraded 5-tier rating; the momentum decision still
-    collapses (Overweight -> HOLD)."""
+    surfaces the ungraded 5-tier rating; v2 spec 2026-07-14 acts on full scale
+    (Overweight -> BUY)."""
     captured = {}
 
     class FakeGraph:
@@ -166,7 +169,7 @@ def test_propagate_threads_research_context_and_exposes_native_rating(monkeypatc
     result = adapter.propagate("ACME", date(2026, 7, 9), research_context="BRIEF")
     assert captured["research_memo_context"] == "BRIEF"
     assert result.rating == "Overweight"
-    assert result.decision == PipelineDecision.HOLD  # momentum collapse preserved
+    assert result.decision == PipelineDecision.BUY  # v2 acts on full scale
 
 
 def test_propagate_default_context_is_empty(monkeypatch):
@@ -253,3 +256,42 @@ def test_ensure_graph_is_thread_safe(monkeypatch):
     assert not t1.is_alive() and not t2.is_alive(), "threads did not complete — possible deadlock"
     assert results[0] is results[1]
     assert build_count == 1
+
+
+def test_parse_rating_action_full_scale():
+    assert parse_rating_action("Buy") == (PipelineDecision.BUY, TIER_HIGH)
+    assert parse_rating_action("Overweight") == (PipelineDecision.BUY, TIER_STARTER)
+    assert parse_rating_action("Hold") == (PipelineDecision.HOLD, "")
+    assert parse_rating_action("Underweight") == (PipelineDecision.TRIM, "")
+    assert parse_rating_action("Sell") == (PipelineDecision.SELL, "")
+
+
+def test_parse_rating_action_unknown_and_empty_default_hold():
+    assert parse_rating_action("") == (PipelineDecision.HOLD, "")
+    assert parse_rating_action("Banana") == (PipelineDecision.HOLD, "")
+
+
+def test_parse_rating_action_strips_legacy_wrapper_and_punctuation():
+    assert parse_rating_action("FINAL TRANSACTION PROPOSAL: Overweight.") == (
+        PipelineDecision.BUY, TIER_STARTER,
+    )
+
+
+def test_parse_decision_wrapper_still_collapses_to_decision_only():
+    assert parse_decision("Overweight") == PipelineDecision.BUY
+    assert parse_decision("Underweight") == PipelineDecision.TRIM
+
+
+def test_stub_adapter_tier_defaults_high_for_buy():
+    stub = StubPipelineAdapter({"AAPL": PipelineDecision.BUY})
+    result = stub.propagate("AAPL", date(2026, 7, 14))
+    assert result.tier == TIER_HIGH
+
+
+def test_stub_adapter_tier_explicit_and_default_empty_for_hold():
+    stub = StubPipelineAdapter(
+        {"AAPL": PipelineDecision.BUY, "MSFT": PipelineDecision.HOLD},
+        tiers={"AAPL": TIER_STARTER},
+    )
+    assert stub.propagate("AAPL", date(2026, 7, 14)).tier == TIER_STARTER
+    assert stub.propagate("MSFT", date(2026, 7, 14)).tier == ""

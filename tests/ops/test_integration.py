@@ -105,7 +105,9 @@ def test_max_open_positions_rejection(tmp_path):
               ("AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "NFLX", "TSLA")}
     paper = PaperBroker(journal=j, quote_source=lambda s: quotes[s],
                        starting_cash=Decimal("10000"))
-    cfg = OpsConfig()
+    # Pin the cap explicitly: the test funds 7 positions and expects the 8th
+    # NEW symbol rejected — the intent is "at the cap", not "at the default".
+    cfg = OpsConfig(max_open_positions=7)
     rules = [
         DenyListRule(), NoMarginRule(), NoOptionsRule(), NoCryptoRule(),
         LongOnlyRule(), StopAttachedRule(), FractionalSharesOnlyRule(),
