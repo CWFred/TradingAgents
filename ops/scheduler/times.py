@@ -12,6 +12,10 @@ TICK_CRON_MINUTE = ",".join(str(m) for m in TICK_MINUTES)
 TICK_CRON_HOUR = f"{TICK_HOUR_START}-{TICK_HOUR_END}"
 TICK_CRON_DOW = "mon-fri"
 
-# The overnight research job fires every half hour all day; the deadline
-# hour (config.research_drain_deadline_hour) bounds the actual window.
-OVERNIGHT_CRON_MINUTE = TICK_CRON_MINUTE
+# The live-first background memo queue wakes frequently, then its policy gates
+# work out of paper-trading hours. Once awake, it processes items sequentially
+# until empty, paused, or at the pre-market deadline.
+BACKGROUND_QUEUE_CRON_MINUTE = "*/5"
+# Backward-compatible name for dashboard/tests that still describe this as the
+# overnight queue.
+OVERNIGHT_CRON_MINUTE = BACKGROUND_QUEUE_CRON_MINUTE

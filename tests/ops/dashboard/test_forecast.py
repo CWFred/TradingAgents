@@ -27,6 +27,8 @@ def config(tmp_path):
         memo_store_path = str(tmp_path / "memos.db")
         short_memo_store_path = str(tmp_path / "short_memos.db")
         insider_signal_store_path = str(tmp_path / "insider.db")
+        backtest_store_path = str(tmp_path / "backtest.db")
+        research_pause_flag_path = str(tmp_path / "research.paused")
         research_screen_interval_days = 3
         research_drain_deadline_hour = 8
         daily_analysis_budget = 8
@@ -113,7 +115,7 @@ def test_overnight_purpose_lists_queues(config):
                       ttl_days=0)
     out = next_work(config, now=_et(2026, 7, 14, 13, 0), calendar=_Calendar())
     night = [w for w in out if w["job"] == "overnight"][0]
-    assert night["at"] == _et(2026, 7, 15, 0, 0).astimezone(timezone.utc)
+    assert night["at"] == _et(2026, 7, 14, 16, 45).astimezone(timezone.utc)
     assert "2 hit(s) to research" in night["purpose"]
     assert "screen due" in night["purpose"]  # no screen run recorded yet
 
@@ -126,11 +128,22 @@ def test_overnight_idle_when_queues_empty_and_screen_fresh(config):
     assert "2026-07-17" in night["purpose"]
 
 
-def test_inside_window_predicts_next_halfhour(config):
-    # 01:10 ET: the overnight window is live; next fire is 01:30
+def test_inside_window_predicts_next_five_minute_poll(config):
+    # 01:10 ET: the background window is live; next fire is 01:15.
     out = next_work(config, now=_et(2026, 7, 15, 1, 10), calendar=_Calendar())
     night = [w for w in out if w["job"] == "overnight"][0]
-    assert night["at"] == _et(2026, 7, 15, 1, 30).astimezone(timezone.utc)
+    assert night["at"] == _et(2026, 7, 15, 1, 15).astimezone(timezone.utc)
+
+
+def test_forecast_lists_explicitly_enqueued_backtests(config):
+    import sqlite3
+
+    with sqlite3.connect(config.backtest_store_path) as conn:
+        conn.execute("CREATE TABLE generation_jobs (auto_run INTEGER, status TEXT)")
+        conn.execute("INSERT INTO generation_jobs VALUES (1, 'pending')")
+    out = next_work(config, now=_et(2026, 7, 14, 17, 0), calendar=_Calendar())
+    night = [w for w in out if w["job"] == "overnight"][0]
+    assert "1 backtest memo(s) queued" in night["purpose"]
 
 
 def test_sorted_by_time(config):

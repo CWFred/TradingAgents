@@ -22,7 +22,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -597,13 +597,12 @@ def _days_since_iso(iso: str) -> float:
 
 
 def _overnight_deadline(hour: int, *, now: datetime | None = None) -> datetime:
-    """The wall-clock the overnight window must stop before.
+    """The wall-clock the current background queue window must stop before.
 
-    Weekday ticks: today's local (America/New_York) HH:00 — ahead of the
-    09:00 first momentum tick (CronTrigger minute="0,30" hour="9-15"). The
-    scheduler's thread pool does NOT serialize the window against that
-    tick; this time margin is the sole guard against two models holding
-    ds4 at once, which is why research_drain_deadline_hour is validated <9.
+    Weekday pre-market work stops at today's configured hour. After-hours
+    work starts after the 16:35 sleeve train and targets the next weekday's
+    deadline. This margin keeps an in-flight name clear of the 09:00 momentum
+    tick; ``research_drain_deadline_hour`` is therefore validated below 9.
 
     Weekend ticks (Sat/Sun 00:00): the deadline extends to the NEXT
     MONDAY's HH:00 — no momentum ticks compete for ds4 on weekends, and
@@ -611,11 +610,52 @@ def _overnight_deadline(hour: int, *, now: datetime | None = None) -> datetime:
     week starts. A Sunday 00:00 tick that would overlap a still-running
     Saturday tick is skipped by the job's max_instances=1.
     """
+    from ops.model_queue import background_window
+
     current = now or datetime.now(ZoneInfo("America/New_York"))
-    deadline = current.replace(hour=hour, minute=0, second=0, microsecond=0)
-    while deadline.weekday() >= 5:  # Sat=5 / Sun=6 -> roll to Monday
-        deadline += timedelta(days=1)
-    return deadline
+    window = background_window(current, morning_deadline_hour=hour)
+    if window.deadline is not None:
+        return window.deadline
+    # During the protected paper-trading window return today's already-past
+    # morning boundary, preserving the caller's simple ``now >= deadline`` gate.
+    local = current.astimezone(ZoneInfo("America/New_York"))
+    return local.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+
+def _live_memo_work_pending(config) -> bool:
+    """Whether any live sleeve must retain priority over backtest backfill."""
+    from ops.insider.store import SignalStore
+    from ops.research.store import ScreenStore
+    from tradingagents.memos.store import MemoStore
+
+    return any((
+        bool(ScreenStore(config.screen_store_path).pending_hits()),
+        bool(MemoStore(config.memo_store_path).pending_vetting_memos()),
+        bool(ScreenStore(config.short_screen_store_path).pending_hits()),
+        bool(MemoStore(config.short_memo_store_path).pending_vetting_memos()),
+        bool(SignalStore(config.insider_signal_store_path).entries_without_memo()),
+    ))
+
+
+def _dynamic_memo_queue_tick(journal: Journal, config, *, now=None) -> None:
+    """Run the live-first queue and use idle capacity for enqueued backtests."""
+    from ops.backtest.service import process_enqueued_generation
+    from ops.model_queue import coordinate_queue_tick
+
+    clock = now or (lambda: datetime.now(ZoneInfo("America/New_York")))
+
+    def run_backtest() -> int:
+        summary = process_enqueued_generation(config=config, max_jobs=1)
+        return summary.attempted if summary is not None else 0
+
+    coordinate_queue_tick(
+        pause_path=config.research_pause_flag_path,
+        now=clock(),
+        morning_deadline_hour=config.research_drain_deadline_hour,
+        run_live=lambda: _research_overnight_tick(journal, config, now=clock),
+        live_pending=lambda: _live_memo_work_pending(config),
+        run_backtest=run_backtest,
+    )
 
 
 def _overnight_reason(config, *, screened_this_run: bool, store, memo_store) -> str:
@@ -656,7 +696,7 @@ def _overnight_reason(config, *, screened_this_run: bool, store, memo_store) -> 
 def _research_overnight_tick(
     journal: Journal, config, *, now=None, should_stop=None, vet_adapter_factory=None,
 ) -> None:
-    """Nightly 00:00 job: screen if >= research_screen_interval_days, then
+    """Live memo-queue pass: screen if due, then
     alternate graph-vetting and drain chunks under one deadline and one ds4
     bracket until both queues are empty or the deadline/shutdown lands:
 
@@ -675,9 +715,9 @@ def _research_overnight_tick(
     failure records research_vetting_error (see _research_vetting_stage)
     and disables further vet iterations that night; neither raises.
 
-    The job fires every 30 minutes (see _start_full_scheduler) so
-    `ops research resume` picks work back up quickly; fires while paused or
-    outside the window return instantly and touch nothing. Re-firing is
+    The coordinator polls every five minutes (see _start_full_scheduler), so
+    timed/manual resume is noticed quickly; polls while paused or inside the
+    paper-trading blackout return instantly and touch nothing. Re-firing is
     idempotent/safe: the 3-day screen-due check plus the two queue states
     mean a second run same night either finds both queues empty (no-op,
     skipping ds4 entirely; the zero bookkeeping event records once per day)
@@ -688,13 +728,20 @@ def _research_overnight_tick(
     try:
         # Operator pause (`ops research pause`): the operator wants their
         # machine — touch nothing, journal nothing, retry next fire.
-        if os.path.exists(config.research_pause_flag_path):
+        from ops.work_pause import pause_state
+
+        if pause_state(
+            config.research_pause_flag_path, cleanup_expired=True,
+        ).paused:
             return
-        deadline = _overnight_deadline(config.research_drain_deadline_hour)
-        tick_now = now or (lambda: datetime.now(deadline.tzinfo))
-        if tick_now() >= deadline:
+        tick_now = now or (lambda: datetime.now(ZoneInfo("America/New_York")))
+        current = tick_now()
+        deadline = _overnight_deadline(
+            config.research_drain_deadline_hour, now=current,
+        )
+        if current >= deadline:
             # Out-of-window fire (weekday daytime): silent no-op — this is
-            # what makes the half-hourly trigger safe around market hours.
+            # what makes the frequent trigger safe around market hours.
             return
 
         from ops.research.store import ScreenStore
@@ -748,7 +795,9 @@ def _research_overnight_tick(
             def stop() -> bool:
                 # Pausing mid-run stops the loop between names, freeing ds4
                 # within one name of `ops research pause`.
-                return base_stop() or os.path.exists(pause_flag)
+                return base_stop() or pause_state(
+                    pause_flag, cleanup_expired=True,
+                ).paused
 
             backend = build_managed_backend(load_managed_backend_config())
 
@@ -1245,13 +1294,13 @@ def _start_full_scheduler(
             CronTrigger(hour=0, minute=15),
             id="insider_scan", max_instances=1, misfire_grace_time=600,
         )
-        # Half-hourly, not once-nightly: fires while paused (`ops research
+        # Five-minute live-first queue poll: fires while paused (`ops research
         # pause`) or outside the overnight window return instantly, and a
         # fire during a still-running window is skipped by max_instances=1
-        # — the frequent trigger exists so `ops research resume` picks the
-        # queues back up within 30 minutes.
+        # — the frequent trigger exists so timed/manual resume and newly
+        # enqueued backtests are noticed quickly.
         sched.add_job(
-            lambda: _research_overnight_tick(journal, config),
+            lambda: _dynamic_memo_queue_tick(journal, config),
             CronTrigger(minute=times.OVERNIGHT_CRON_MINUTE),
             id="research_overnight", max_instances=1, misfire_grace_time=600,
         )

@@ -36,7 +36,9 @@ def cli() -> None:
 def run():
     """Start the always-on orchestrator + guardian service."""
     import sys
+
     from ops.main import run as _run
+
     sys.exit(_run())
 
 
@@ -153,6 +155,165 @@ def dashboard(port: int | None) -> None:
     from ops.dashboard.server import serve
 
     sys.exit(serve(port=port))
+
+
+@cli.group()
+def backtest() -> None:
+    """Strict point-in-time backtest and learning-loop commands."""
+
+
+def _backtest_window(start: str, end: str):
+    """Resolve ``today`` once so validation and metadata cannot drift."""
+    from ops.backtest.service import parse_cli_date
+
+    today = datetime.now().date()
+    return parse_cli_date(start, today=today), parse_cli_date(end, today=today), today
+
+
+def _backtest_error(exc: Exception) -> click.ClickException:
+    from ops.backtest.service import BacktestServiceError
+
+    if isinstance(exc, (BacktestServiceError, ValueError, KeyError)):
+        return click.ClickException(str(exc))
+    raise exc
+
+
+@backtest.command("run")
+@click.option("--sleeve", default="research", show_default=True,
+              type=click.Choice(["research"]))
+@click.option("--start", required=True, help="First case date (YYYY-MM-DD).")
+@click.option("--end", default="today", show_default=True,
+              help="Last case date (YYYY-MM-DD or today).")
+@click.option("--settings", "settings_path", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="TOML replay-setting overrides; never triggers generation.")
+@click.option("--cases", "case_count", default=None, type=int,
+              help="Target cases, 30..50 (default: configured count).")
+def backtest_run(
+    sleeve: str, start: str, end: str, settings_path: str | None,
+    case_count: int | None,
+) -> None:
+    """Replay frozen memos and cached prices with zero model/network calls."""
+    from ops.backtest.service import load_settings, run_cached_backtest
+
+    config = load_config()
+    try:
+        start_date, end_date, today = _backtest_window(start, end)
+        result = run_cached_backtest(
+            config=config, sleeve=sleeve, start=start_date, end=end_date,
+            case_count=case_count or config.backtest_case_count,
+            settings=load_settings(settings_path), today=today,
+        )
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    click.echo(result.rendered_report, nl=False)
+
+
+@backtest.command("generate")
+@click.option("--sleeve", default="research", show_default=True,
+              type=click.Choice(["research"]))
+@click.option("--start", required=True, help="First case date (YYYY-MM-DD).")
+@click.option("--end", default="today", show_default=True,
+              help="Last case date (YYYY-MM-DD or today).")
+@click.option("--cases", "case_count", default=None, type=int,
+              help="Target cases, 30..50 (default: configured count).")
+@click.option("--execute", is_flag=True,
+              help="Actually run missing local-model jobs; default only prints the plan.")
+@click.option("--enqueue", is_flag=True,
+              help="Let the live-first background queue run missing jobs when ds4 is idle.")
+@click.option("--max-jobs", default=None, type=int,
+              help="Stop after this many claimed jobs (resumable).")
+def backtest_generate(
+    sleeve: str, start: str, end: str, case_count: int | None,
+    execute: bool, enqueue: bool, max_jobs: int | None,
+) -> None:
+    """Plan or explicitly execute resumable frozen-memo generation."""
+    from ops.backtest.service import generate_cases
+
+    config = load_config()
+    try:
+        start_date, end_date, today = _backtest_window(start, end)
+        result = generate_cases(
+            config=config, sleeve=sleeve, start=start_date, end=end_date,
+            case_count=case_count or config.backtest_case_count, today=today,
+            execute=execute, enqueue=enqueue, max_jobs=max_jobs,
+        )
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    click.echo(
+        f"generation plan: {result.total} case(s), {result.cached} cached, "
+        f"{result.pending} pending"
+    )
+    if result.summary is not None:
+        click.echo(
+            f"generation run: attempted {result.summary.attempted}, "
+            f"accepted {result.summary.accepted}, rejected {result.summary.rejected}, "
+            f"failed {result.summary.failed}, pending {result.summary.still_pending}"
+        )
+    elif result.pending and enqueue:
+        click.echo("queued for automatic live-first background processing")
+    elif result.pending:
+        click.echo("plan only; pass --execute to run local-model generation")
+
+
+@backtest.command("report")
+@click.argument("run_id")
+def backtest_report(run_id: str) -> None:
+    """Rerender a stored run read-only; never creates or migrates a DB."""
+    from ops.backtest.service import render_saved_report
+
+    config = load_config()
+    try:
+        rendered = render_saved_report(config.backtest_store_path, run_id)
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    click.echo(rendered, nl=False)
+
+
+@backtest.command("postmortem")
+@click.argument("run_id")
+@click.option("--execute", is_flag=True,
+              help="Run missing assessments using a configured PIT assessor adapter.")
+@click.option(
+    "--adapter", "adapter_spec", envvar="OPS_BACKTEST_POSTMORTEM_ADAPTER",
+    help="Configured adapter factory as module:attribute.",
+)
+@click.option(
+    "--facts-through", default=None,
+    help="Evidence cutoff (YYYY-MM-DD); defaults to the run adjudication date.",
+)
+def backtest_postmortem(
+    run_id: str, execute: bool, adapter_spec: str | None, facts_through: str | None,
+) -> None:
+    """Plan or update cached thesis post-mortems for a completed run."""
+    from ops.backtest.service import (
+        load_postmortem_adapter,
+        parse_cli_date,
+        postmortem_run,
+    )
+
+    config = load_config()
+    try:
+        adapter = load_postmortem_adapter(adapter_spec) if adapter_spec else None
+        explicit_cutoff = (
+            parse_cli_date(facts_through, today=datetime.now().date())
+            if facts_through else None
+        )
+        result = postmortem_run(
+            path=config.backtest_store_path, run_id=run_id, execute=execute,
+            assessor=adapter.assessor if adapter else None,
+            evidence_provider=adapter.evidence_provider if adapter else None,
+            model_id=adapter.model_id if adapter else None,
+            prompt_version=adapter.prompt_version if adapter else None,
+            evidence_cutoff=(explicit_cutoff or adapter.evidence_cutoff
+                             if adapter else explicit_cutoff),
+        )
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    click.echo(
+        f"postmortem {run_id}: {result.total} memo(s), {result.cached} cached, "
+        f"{result.pending} pending, {result.updated} updated"
+    )
 
 
 @cli.command()
@@ -434,23 +595,36 @@ def research_run(max_names: int, do_notify: bool = False) -> None:
 
 
 @research.command("pause")
-def research_pause() -> None:
-    """Pause the overnight research window (screen/drain/vet) and free ds4.
+@click.option(
+    "--hours", type=float, default=None,
+    help="Automatically resume background model work after this many hours.",
+)
+def research_pause(hours: float | None) -> None:
+    """Pause background memo/backtest work and free ds4.
 
-    Drops the pause flag the daemon checks between names: the in-flight
-    name finishes (up to ~30 min), then the window stops and ds4 shuts
-    down. Momentum trading is unaffected. Survives daemon restarts; undo
-    with `ops research resume`.
+    The daemon checks the lease between names: the in-flight name finishes
+    (up to ~30 min), then the worker stops and ds4 shuts down. Momentum,
+    monitoring, trading, exits, and the guardian are unaffected. Without
+    ``--hours`` the pause survives restarts until ``ops research resume``.
     """
-    from pathlib import Path
+    from datetime import timedelta
 
+    from ops.work_pause import set_pause
+
+    if hours is not None and hours <= 0:
+        raise click.BadParameter("must be positive", param_hint="--hours")
     config = load_config()
-    flag = Path(config.research_pause_flag_path)
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.touch()
+    state = set_pause(
+        config.research_pause_flag_path,
+        duration=timedelta(hours=hours) if hours is not None else None,
+    )
+    expiry = (
+        f"; automatic resume at {state.until.isoformat()}"
+        if state.until is not None else "; resume manually"
+    )
     click.echo(
-        f"research paused (flag: {flag}). The in-flight name finishes, "
-        "then ds4 frees — up to ~30 minutes."
+        "background memo queue paused" + expiry
+        + ". The in-flight name finishes, then ds4 frees — up to ~30 minutes."
     )
 
 
@@ -462,15 +636,13 @@ def research_resume() -> None:
     the queues back up within 30 minutes (weekends run until Monday
     morning's deadline, weekdays until the pre-market deadline).
     """
-    from pathlib import Path
+    from ops.work_pause import clear_pause
 
     config = load_config()
-    flag = Path(config.research_pause_flag_path)
-    if flag.exists():
-        flag.unlink()
-        click.echo("research resumed; the daemon picks work up within 30 minutes.")
+    if clear_pause(config.research_pause_flag_path):
+        click.echo("background memo queue resumed; the daemon picks work up shortly.")
     else:
-        click.echo("research was not paused; nothing to do.")
+        click.echo("background memo queue was not paused; nothing to do.")
 
 
 @research.command("kick")
@@ -773,7 +945,7 @@ def decide_once(
 
     # Pipeline
     if stub_pipeline or stub_pipeline_buy:
-        decisions = {s: PipelineDecision.BUY for s in stub_pipeline_buy}
+        decisions = dict.fromkeys(stub_pipeline_buy, PipelineDecision.BUY)
         pipeline = StubPipelineAdapter(decisions)
     else:
         pipeline = TradingAgentsPipelineAdapter()
@@ -786,7 +958,7 @@ def decide_once(
         asof_date=asof_date,
     )
 
-    click.echo(f"## Pipeline decisions")
+    click.echo("## Pipeline decisions")
     if not proposals:
         click.echo("0 BUY proposals (all HOLD/SELL or below trade floor)")
     for p in proposals:
@@ -796,7 +968,7 @@ def decide_once(
     click.echo("")
 
     # Place orders
-    click.echo(f"## Orders")
+    click.echo("## Orders")
     for p in proposals:
         try:
             fill = guarded.place_order(p.order)
