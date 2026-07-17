@@ -19,8 +19,8 @@ background model work from the pre-market deadline through 16:45, protecting
 the market-hours momentum cycle and the 16:20-16:35 sleeve/overview train.
 Weekends remain available until Monday's pre-market deadline.
 
-Guardian polling, monitoring, trading, exits, and notifications are never part
-of this pause/queue boundary.
+The resource pause below also gates the market-hours momentum model cycle.
+Guardian polling, monitoring, mechanical exits, and notifications remain live.
 
 ## Enqueueing backtests
 
@@ -57,15 +57,20 @@ Three-hour pause with automatic resume:
 .venv/bin/python -m ops.cli research pause --hours 3
 ```
 
-Manual resume:
+Manual resume (indefinite pauses only):
 
 ```bash
 .venv/bin/python -m ops.cli research resume
 ```
 
-The current name is allowed to finish before DS4 is released. Timed pause
-leases survive daemon restarts and are removed by the worker after expiration.
-Legacy empty pause files remain valid indefinite pauses.
+Pause is a hard resource cutoff: the daemon interrupts every registered model
+session and the CLI terminates a verified DS4 listener on the configured port,
+including an orphan from an older daemon. Interrupted durable queue items stay
+pending. All daemon model startup is refused while the lease is active.
+
+Timed leases survive daemon restarts, cannot be shortened or manually resumed,
+and expire automatically. Reissuing a longer pause extends them. Legacy empty
+pause files remain valid indefinite pauses and require manual resume.
 
 ## Learning boundary
 
@@ -75,4 +80,3 @@ control/treated experiments, and promotion into a paper sleeve is a separate
 operator decision. The current backtest adapter supports the research sleeve;
 short and insider work participate in live queue priority but require their own
 PIT replay adapters before their memos can be backtested mechanically.
-

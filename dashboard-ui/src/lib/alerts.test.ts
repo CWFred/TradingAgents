@@ -28,6 +28,6 @@ describe("deriveAlert", () => {
   it("STALE / paused → NOTICE", () => {
     expect(deriveAlert({ ...base, verdict: "STALE" })!.tag).toBe("NOTICE");
     expect(deriveAlert({ ...base, research_paused: true })!.conditions)
-      .toEqual(["research paused"]);
+      .toEqual(["TradingAgents model work paused"]);
   });
 });

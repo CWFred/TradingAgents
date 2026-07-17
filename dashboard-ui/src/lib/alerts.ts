@@ -10,7 +10,7 @@ export function deriveAlert(health: Health | null): AlertView | null {
   if (health.halts.kill_switch_this_week) alerts.push("weekly kill-switch tripped");
   const notices: string[] = [];
   if (health.verdict === "STALE") notices.push("guardian heartbeat is stale");
-  if (health.research_paused) notices.push("research paused");
+  if (health.research_paused) notices.push("TradingAgents model work paused");
   if (alerts.length) return { tag: "ALERT", conditions: [...alerts, ...notices] };
   if (notices.length) return { tag: "NOTICE", conditions: notices };
   return null;

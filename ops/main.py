@@ -54,10 +54,28 @@ from ops.scheduler.orchestrator import Orchestrator
 from ops.trading_time import trading_day_start, trading_week_start
 
 _shutdown_event = threading.Event()
+_research_pause_path: str | None = None
 
 
 def _shutdown_handler(signum, frame) -> None:
     _shutdown_event.set()
+
+
+def _background_pause_handler(signum, frame) -> None:
+    """Interrupt model work owned by this TradingAgents daemon.
+
+    SIGURG is ignored by default, so a newly deployed CLI can safely send the
+    request to an older daemon that does not have this handler yet.  Requiring
+    the pause lease to exist also prevents an accidental signal from turning a
+    model transport error into failed queue work.
+    """
+    if _research_pause_path is None:
+        return
+    from ops.llm_backend import interrupt_model_backends
+    from ops.work_pause import pause_state
+
+    if pause_state(_research_pause_path).paused:
+        interrupt_model_backends()
 
 
 def _resolve_and_announce_journal_path(config: OpsConfig) -> str:
@@ -259,6 +277,7 @@ def _wire(broker, journal: Journal, config: OpsConfig, *, backend=None):
     from ops.pipeline_adapter import TradingAgentsPipelineAdapter
     from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
     from ops.universe.composite import build_composite_universe
+    from ops.work_pause import pause_state
 
     if backend is None:
         backend = build_managed_backend(load_managed_backend_config())
@@ -271,6 +290,9 @@ def _wire(broker, journal: Journal, config: OpsConfig, *, backend=None):
         pipeline_adapter=TradingAgentsPipelineAdapter(
             backend=backend, reporter=reporter),
         calendar=calendar, journal=journal, config=config,
+        resource_paused=lambda: pause_state(
+            config.research_pause_flag_path, cleanup_expired=True,
+        ).paused,
         reporter=reporter,
     )
     guardian = PositionGuardian(
@@ -793,13 +815,18 @@ def _research_overnight_tick(
             pause_flag = config.research_pause_flag_path
 
             def stop() -> bool:
-                # Pausing mid-run stops the loop between names, freeing ds4
-                # within one name of `ops research pause`.
+                # The hard-pause signal interrupts the active server; this
+                # predicate keeps every subsequent item from starting.
                 return base_stop() or pause_state(
                     pause_flag, cleanup_expired=True,
                 ).paused
 
             backend = build_managed_backend(load_managed_backend_config())
+            from ops.llm_backend import (
+                register_background_backend,
+                unregister_background_backend,
+            )
+            register_background_backend(backend)
 
             vetted = confirmed = rejected = vet_failed = 0
             vet_ran = False
@@ -901,7 +928,10 @@ def _research_overnight_tick(
                     f"failed {drain_failed + vet_failed}"
                 )
             finally:
-                backend.shutdown()
+                try:
+                    backend.shutdown()
+                finally:
+                    unregister_background_backend(backend)
     except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
         journal.record_event(
             events.KIND_RESEARCH_DRAIN_ERROR,
@@ -1379,9 +1409,14 @@ def _run_until_signal() -> None:
 
 
 def run() -> int:
+    global _research_pause_path
     signal.signal(signal.SIGTERM, _shutdown_handler)
     signal.signal(signal.SIGINT, _shutdown_handler)
     config = load_config()
+    _research_pause_path = config.research_pause_flag_path
+    pause_signal = getattr(signal, "SIGURG", None)
+    if pause_signal is not None:
+        signal.signal(pause_signal, _background_pause_handler)
     journal_path = _resolve_and_announce_journal_path(config)
     journal = Journal(journal_path)
     # Every graceful return path below assigns exit_code before returning;
@@ -1470,3 +1505,4 @@ def run() -> int:
             events.service_stopping_payload(exit_code=exit_code),
         )
         journal.close()
+        _research_pause_path = None

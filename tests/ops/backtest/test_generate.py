@@ -116,6 +116,11 @@ class _Store:
         job["status"] = "failed" if record.guardrail_status == "failed" else "complete"
         self.frozen[record.memo_key] = record
 
+    def requeue_generation_job(self, claim):
+        job = self.jobs[claim.generation_key]
+        assert job["status"] == "running"
+        job["status"] = "pending"
+
 
 def test_local_model_validation_accepts_only_resolved_loopback_endpoints(monkeypatch):
     assert validate_local_model_spec(LOCAL_MODEL).model == "ds4"
@@ -331,6 +336,46 @@ def test_worker_honors_max_jobs_and_leaves_remaining_work_pending():
 
     assert summary.attempted == 1
     assert summary.still_pending == 1
+
+
+def test_worker_requeues_inflight_job_when_pause_interrupts_generator():
+    request = _request()
+    store = _Store()
+    plan = plan_generation([request], store=store)
+    paused = {"value": False}
+
+    def interrupted(_request):
+        paused["value"] = True
+        raise RuntimeError("model connection closed")
+
+    summary = run_generation_jobs(
+        plan, store=store, generator=interrupted,
+        should_stop=lambda: paused["value"],
+    )
+
+    assert summary == GenerationSummary(1, 0, 0, 0, 1)
+    assert store.jobs[request.generation_key]["status"] == "pending"
+    assert store.frozen == {}
+
+
+def test_worker_discards_terminal_result_if_pause_landed_inside_generator():
+    request = _request()
+    store = _Store()
+    plan = plan_generation([request], store=store)
+    paused = {"value": False}
+
+    def swallowed_interruption(req):
+        paused["value"] = True
+        return _terminal(req, status="rejected")
+
+    summary = run_generation_jobs(
+        plan, store=store, generator=swallowed_interruption,
+        should_stop=lambda: paused["value"],
+    )
+
+    assert summary == GenerationSummary(1, 0, 0, 0, 1)
+    assert store.jobs[request.generation_key]["status"] == "pending"
+    assert store.frozen == {}
 
 
 def test_worker_requires_aware_stale_boundary():

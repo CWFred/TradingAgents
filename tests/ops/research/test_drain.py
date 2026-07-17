@@ -114,6 +114,43 @@ def test_exception_marks_failed_and_continues(monkeypatch):
                                    hit_deadline=False)
 
 
+def test_interrupted_name_stays_pending_when_pause_lands(monkeypatch):
+    store = FakeStore(["AAA", "BBB"])
+    paused = {"value": False}
+
+    def interrupted(_hit, **_kw):
+        paused["value"] = True
+        raise RuntimeError("model connection closed")
+
+    monkeypatch.setattr("ops.research.drain.research_hit", interrupted)
+    summary = drain_pending(
+        store=store, memo_store=object(), evidence_llm=None, thesis_llm=None,
+        thesis_model_spec="spec", should_stop=lambda: paused["value"],
+    )
+
+    assert summary == DrainSummary(0, 0, 2, False)
+    assert store.failed == []
+    assert store.researched == []
+
+
+def test_swallowed_model_error_outcome_stays_pending_when_paused(monkeypatch):
+    store = FakeStore(["AAA"])
+    paused = {"value": False}
+
+    def interrupted(hit, **_kw):
+        paused["value"] = True
+        return _outcome(hit, "failed")
+
+    monkeypatch.setattr("ops.research.drain.research_hit", interrupted)
+    summary = drain_pending(
+        store=store, memo_store=object(), evidence_llm=None, thesis_llm=None,
+        thesis_model_spec="spec", should_stop=lambda: paused["value"],
+    )
+
+    assert summary == DrainSummary(0, 0, 1, False)
+    assert store.failed == []
+
+
 def test_research_error_propagates(monkeypatch):
     store = FakeStore(["AAA"])
 

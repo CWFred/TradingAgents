@@ -525,7 +525,13 @@ def _execute_generation(
     max_jobs: int | None,
     auto_only: bool = False,
 ) -> GenerationSummary:
-    from ops.llm_backend import build_managed_backend, load_managed_backend_config
+    from ops.llm_backend import (
+        build_managed_backend,
+        load_managed_backend_config,
+        register_background_backend,
+        unregister_background_backend,
+    )
+    from ops.work_pause import pause_state
     from tradingagents.llm_clients import create_llm_client
 
     evidence_spec = validate_local_model_spec(config.research_evidence_model)
@@ -539,6 +545,8 @@ def _execute_generation(
         base_url=thesis_spec.base_url,
     ).get_llm()
     backend = build_managed_backend(load_managed_backend_config())
+    if auto_only:
+        register_background_backend(backend)
     try:
         backend.ensure_up()
 
@@ -551,9 +559,18 @@ def _execute_generation(
             plan, store=store, generator=generator,
             stale_before=datetime.now(timezone.utc) - timedelta(hours=6),
             max_jobs=max_jobs, auto_only=auto_only,
+            should_stop=(
+                lambda: pause_state(
+                    config.research_pause_flag_path, cleanup_expired=True,
+                ).paused
+            ) if auto_only else None,
         )
     finally:
-        backend.shutdown()
+        try:
+            backend.shutdown()
+        finally:
+            if auto_only:
+                unregister_background_backend(backend)
 
 
 def process_enqueued_generation(

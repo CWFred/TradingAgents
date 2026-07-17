@@ -231,6 +231,8 @@ def vet_pending(
                 confirm_tiers=confirm_tiers,
             )
         except Exception as exc:  # noqa: BLE001 - one bad name must not strand the queue
+            if should_stop is not None and should_stop():
+                break
             failed += 1
             echo(f"{memo.ticker}: FAILED ({type(exc).__name__}: {exc})")
             continue

@@ -244,6 +244,8 @@ class GenerationStore(Protocol):
         self, claim: GenerationClaim, record: FrozenMemoRecord
     ) -> None: ...
 
+    def requeue_generation_job(self, claim: GenerationClaim) -> None: ...
+
 
 @dataclass(frozen=True)
 class GenerationPlan:
@@ -431,6 +433,7 @@ def run_generation_jobs(
     stale_before: datetime | None = None,
     max_jobs: int | None = None,
     auto_only: bool = False,
+    should_stop: Callable[[], bool] | None = None,
 ) -> GenerationSummary:
     """Resume stale work and drain claimed jobs without duplicating memos."""
     if max_jobs is not None and max_jobs < 0:
@@ -443,6 +446,8 @@ def run_generation_jobs(
     request_by_key = plan.request_by_key()
     attempted = accepted = rejected = failed = 0
     while max_jobs is None or attempted < max_jobs:
+        if should_stop is not None and should_stop():
+            break
         claim = (
             store.claim_next_generation_job(auto_only=True)
             if auto_only else store.claim_next_generation_job()
@@ -457,9 +462,15 @@ def run_generation_jobs(
         attempted += 1
         try:
             record = generator(request)
+            if should_stop is not None and should_stop():
+                store.requeue_generation_job(claim)
+                break
             if record.memo_key != request.memo_key or record.case_id != request.case.case_id:
                 raise ValueError("generator returned a record for another request")
         except Exception as exc:  # one failed name must not strand the resumable queue
+            if should_stop is not None and should_stop():
+                store.requeue_generation_job(claim)
+                break
             record = FrozenMemoRecord.terminal(
                 request,
                 status="failed",

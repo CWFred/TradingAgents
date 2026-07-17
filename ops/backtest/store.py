@@ -889,6 +889,18 @@ class BacktestStore:
                 ),
             )
 
+    def requeue_generation_job(self, claim) -> None:
+        """Return an interrupted live claim to pending without freezing it."""
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE generation_jobs SET status = 'pending', claimed_at = NULL, "
+                "last_error = 'operator pause' "
+                "WHERE generation_key = ? AND status = 'running' AND attempt_count = ?",
+                (claim.generation_key, claim.attempt_count),
+            )
+            if cursor.rowcount != 1:
+                raise CaseConflictError("generation claim is stale or no longer running")
+
     # --- Replay run persistence ------------------------------------------
 
     def create_run(
