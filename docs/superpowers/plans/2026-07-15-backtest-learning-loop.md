@@ -215,3 +215,16 @@ remain byte-for-byte unchanged.
 
 Each slice keeps `backtest.sqlite` forward-migratable and must not weaken the
 cutoff or PIT gates to make incomplete data look usable.
+
+## 2026-07-16 operational addendum: dynamic background queue
+
+- The live service now polls one live-first background queue every five minutes.
+- Existing research, short, and insider stores remain the durable live sources;
+  explicitly auto-enqueued backtest generation jobs are the lowest priority.
+- Weekday model work is blacked out from the pre-market deadline through 16:45
+  ET, preserving the momentum cycle and the afternoon sleeve train. Weekends
+  can drain continuously until Monday's pre-market boundary.
+- `backtest generate --enqueue` persists opt-in intent; plan-only generation
+  remains inert and `--execute` remains an explicit foreground operation.
+- `research pause --hours N` writes a restart-safe timed lease. Expiry resumes
+  automatically, while legacy empty flags remain indefinite pauses.

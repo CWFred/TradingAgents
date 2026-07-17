@@ -219,11 +219,13 @@ def backtest_run(
               help="Target cases, 30..50 (default: configured count).")
 @click.option("--execute", is_flag=True,
               help="Actually run missing local-model jobs; default only prints the plan.")
+@click.option("--enqueue", is_flag=True,
+              help="Let the live-first background queue run missing jobs when ds4 is idle.")
 @click.option("--max-jobs", default=None, type=int,
               help="Stop after this many claimed jobs (resumable).")
 def backtest_generate(
     sleeve: str, start: str, end: str, case_count: int | None,
-    execute: bool, max_jobs: int | None,
+    execute: bool, enqueue: bool, max_jobs: int | None,
 ) -> None:
     """Plan or explicitly execute resumable frozen-memo generation."""
     from ops.backtest.service import generate_cases
@@ -234,7 +236,7 @@ def backtest_generate(
         result = generate_cases(
             config=config, sleeve=sleeve, start=start_date, end=end_date,
             case_count=case_count or config.backtest_case_count, today=today,
-            execute=execute, max_jobs=max_jobs,
+            execute=execute, enqueue=enqueue, max_jobs=max_jobs,
         )
     except Exception as exc:
         raise _backtest_error(exc) from exc
@@ -248,6 +250,8 @@ def backtest_generate(
             f"accepted {result.summary.accepted}, rejected {result.summary.rejected}, "
             f"failed {result.summary.failed}, pending {result.summary.still_pending}"
         )
+    elif result.pending and enqueue:
+        click.echo("queued for automatic live-first background processing")
     elif result.pending:
         click.echo("plan only; pass --execute to run local-model generation")
 

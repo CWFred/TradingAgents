@@ -234,7 +234,9 @@ class GenerationStore(Protocol):
 
     def requeue_stale_generation_jobs(self, *, stale_before: datetime) -> int: ...
 
-    def claim_next_generation_job(self) -> GenerationClaim | None:
+    def claim_next_generation_job(
+        self, *, auto_only: bool = False,
+    ) -> GenerationClaim | None:
         """Atomically claim the oldest pending job by case asof/creation order."""
         ...
 
@@ -428,6 +430,7 @@ def run_generation_jobs(
     generator: Callable[[GenerationRequest], FrozenMemoRecord],
     stale_before: datetime | None = None,
     max_jobs: int | None = None,
+    auto_only: bool = False,
 ) -> GenerationSummary:
     """Resume stale work and drain claimed jobs without duplicating memos."""
     if max_jobs is not None and max_jobs < 0:
@@ -440,7 +443,10 @@ def run_generation_jobs(
     request_by_key = plan.request_by_key()
     attempted = accepted = rejected = failed = 0
     while max_jobs is None or attempted < max_jobs:
-        claim = store.claim_next_generation_job()
+        claim = (
+            store.claim_next_generation_job(auto_only=True)
+            if auto_only else store.claim_next_generation_job()
+        )
         if claim is None:
             break
         request = request_by_key.get(claim.generation_key)

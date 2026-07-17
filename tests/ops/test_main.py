@@ -1376,10 +1376,8 @@ def test_overnight_tick_zero_event_recorded_once_per_day(monkeypatch, tmp_path):
         assert len(drain_events) == 1
 
 
-def test_full_scheduler_overnight_job_fires_half_hourly():
-    """Resume latency: the overnight job fires every 30 minutes (paused and
-    out-of-window fires no-op instantly), so `ops research resume` picks
-    work back up within half an hour."""
+def test_full_scheduler_background_queue_fires_every_five_minutes():
+    """The live-first queue notices new work and timed resume promptly."""
     from unittest.mock import MagicMock
 
     from ops.main import _start_full_scheduler
@@ -1392,10 +1390,36 @@ def test_full_scheduler_overnight_job_fires_half_hourly():
         job = sched.get_job("research_overnight")
         assert job is not None
         trigger = str(job.trigger)
-        assert "minute='0,30'" in trigger
+        assert "minute='*/5'" in trigger
         assert "hour='0'" not in trigger  # no longer once-nightly
     finally:
         sched.shutdown(wait=False)
+
+
+def test_dynamic_memo_queue_runs_live_before_one_backtest_batch(monkeypatch, tmp_path):
+    from datetime import datetime
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    import ops.main as main_mod
+
+    order = []
+    monkeypatch.setattr(
+        main_mod, "_research_overnight_tick",
+        lambda *_args, **_kwargs: order.append("live"),
+    )
+    monkeypatch.setattr(main_mod, "_live_memo_work_pending", lambda _cfg: False)
+    monkeypatch.setattr(
+        "ops.backtest.service.process_enqueued_generation",
+        lambda **_kwargs: order.append("backtest") or SimpleNamespace(attempted=1),
+    )
+    cfg = SimpleNamespace(
+        research_pause_flag_path=str(tmp_path / "paused"),
+        research_drain_deadline_hour=8,
+    )
+    now = datetime(2026, 7, 16, 17, tzinfo=ZoneInfo("America/New_York"))
+    main_mod._dynamic_memo_queue_tick(None, cfg, now=lambda: now)
+    assert order == ["live", "backtest"]
 
 
 def test_full_scheduler_registers_overnight_job():

@@ -32,7 +32,7 @@ from ops.backtest.models import (
     stable_hash,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BUSY_TIMEOUT_MS = 5_000
 
 
@@ -296,7 +296,6 @@ CREATE TABLE IF NOT EXISTS lesson_assessments (
 );
 """
 
-
 def _parse_utc(value: str) -> datetime:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -401,6 +400,38 @@ class BacktestStore:
                     + "VALUES ('schema_version', '2');\n"
                     + "PRAGMA user_version = 2;\nCOMMIT;"
                 )
+                current = 2
+            if current == 2:
+                columns = {
+                    row[1]
+                    for row in self._conn.execute(
+                        "PRAGMA table_info(generation_jobs)"
+                    ).fetchall()
+                }
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if "request_json" not in columns:
+                        self._conn.execute(
+                            "ALTER TABLE generation_jobs ADD COLUMN request_json TEXT"
+                        )
+                    if "auto_run" not in columns:
+                        self._conn.execute(
+                            "ALTER TABLE generation_jobs ADD COLUMN auto_run INTEGER "
+                            "NOT NULL DEFAULT 0 CHECK (auto_run IN (0, 1))"
+                        )
+                    self._conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_generation_jobs_auto_queue "
+                        "ON generation_jobs(auto_run, status, created_at, generation_key)"
+                    )
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO schema_metadata (key, value) "
+                        "VALUES ('schema_version', '3')"
+                    )
+                    self._conn.execute("PRAGMA user_version = 3")
+                    self._conn.execute("COMMIT")
+                except BaseException:
+                    self._conn.execute("ROLLBACK")
+                    raise
             columns = {
                 row[1]
                 for row in self._conn.execute(
@@ -651,6 +682,15 @@ class BacktestStore:
             raise ValueError("generation request manifest/case mismatch")
         self.insert_case(request.case)
         self.save_context_manifest(request.manifest)
+        request_json = canonical_json({
+            "brain_version": request.brain_version,
+            "prompt_version": request.prompt_version,
+            "evidence_model_id": request.evidence_model_id,
+            "thesis_model_id": request.thesis_model_id,
+            "lesson_fingerprint": request.lesson_fingerprint,
+            "conditioning": request.conditioning,
+            "hit_payload": request.hit_payload,
+        })
         with self.transaction() as conn:
             frozen = conn.execute(
                 "SELECT 1 FROM frozen_memos WHERE memo_key = ?", (request.memo_key,),
@@ -658,7 +698,8 @@ class BacktestStore:
             if frozen is not None:
                 return
             row = conn.execute(
-                "SELECT case_id FROM generation_jobs WHERE generation_key = ?",
+                "SELECT case_id, request_json FROM generation_jobs "
+                "WHERE generation_key = ?",
                 (request.generation_key,),
             ).fetchone()
             if row is not None:
@@ -666,15 +707,90 @@ class BacktestStore:
                     raise CaseConflictError(
                         f"generation key {request.generation_key} belongs to another case"
                     )
+                if row["request_json"] is None:
+                    conn.execute(
+                        "UPDATE generation_jobs SET request_json = ? "
+                        "WHERE generation_key = ?",
+                        (request_json, request.generation_key),
+                    )
+                elif row["request_json"] != request_json:
+                    raise CaseConflictError(
+                        f"generation key {request.generation_key} has different request data"
+                    )
                 return
             conn.execute(
                 "INSERT INTO generation_jobs "
-                "(generation_key, case_id, status, created_at) VALUES (?, ?, 'pending', ?)",
+                "(generation_key, case_id, status, request_json, created_at) "
+                "VALUES (?, ?, 'pending', ?, ?)",
                 (
                     request.generation_key, request.case.case_id,
+                    request_json,
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+
+    def enqueue_generation_jobs(self, generation_keys: Sequence[str]) -> int:
+        """Opt pending jobs into automatic background processing."""
+        keys = tuple(dict.fromkeys(generation_keys))
+        if not keys:
+            return 0
+        placeholders = ",".join("?" for _ in keys)
+        with self.transaction() as conn:
+            known = int(conn.execute(
+                f"SELECT COUNT(*) FROM generation_jobs "
+                f"WHERE generation_key IN ({placeholders})",
+                keys,
+            ).fetchone()[0])
+            if known != len(keys):
+                raise KeyError("one or more generation jobs do not exist")
+            cursor = conn.execute(
+                f"UPDATE generation_jobs SET auto_run = 1 "
+                f"WHERE generation_key IN ({placeholders}) "
+                "AND status IN ('pending', 'running')",
+                keys,
+            )
+            return cursor.rowcount
+
+    def queued_generation_requests(self, *, auto_only: bool = False):
+        """Rehydrate durable requests so a daemon can resume after restart."""
+        from ops.backtest.generate import GenerationRequest
+
+        where = "AND j.auto_run = 1" if auto_only else ""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT j.generation_key, j.request_json, j.case_id "
+                "FROM generation_jobs AS j JOIN cases AS c ON c.case_id = j.case_id "
+                "WHERE j.status IN ('pending', 'running') " + where + " "
+                "ORDER BY c.asof, c.created_at, c.symbol, j.generation_key"
+            ).fetchall()
+        requests = []
+        for row in rows:
+            if row["request_json"] is None:
+                continue
+            case = self.get_case(row["case_id"])
+            manifest = self.get_context_manifest(row["case_id"])
+            if case is None or manifest is None:
+                raise CaseConflictError(
+                    f"queued generation {row['generation_key']} lost its frozen inputs"
+                )
+            payload = json.loads(row["request_json"])
+            request = GenerationRequest.create(
+                case=case,
+                manifest=manifest,
+                brain_version=payload["brain_version"],
+                prompt_version=payload["prompt_version"],
+                evidence_model_id=payload["evidence_model_id"],
+                thesis_model_id=payload["thesis_model_id"],
+                lesson_fingerprint=payload["lesson_fingerprint"],
+                conditioning=payload.get("conditioning", {}),
+                hit_payload=payload.get("hit_payload", {}),
+            )
+            if request.generation_key != row["generation_key"]:
+                raise CaseConflictError(
+                    f"queued generation {row['generation_key']} no longer hashes identically"
+                )
+            requests.append(request)
+        return tuple(requests)
 
     def requeue_stale_generation_jobs(self, *, stale_before: datetime) -> int:
         if stale_before.tzinfo is None or stale_before.utcoffset() is None:
@@ -688,15 +804,16 @@ class BacktestStore:
             )
             return cursor.rowcount
 
-    def claim_next_generation_job(self):
+    def claim_next_generation_job(self, *, auto_only: bool = False):
         """Atomically claim the oldest pending case for resumable generation."""
         from ops.backtest.generate import GenerationClaim
 
         with self.transaction() as conn:
+            auto_clause = "AND j.auto_run = 1" if auto_only else ""
             row = conn.execute(
                 "SELECT j.generation_key, j.case_id, j.attempt_count "
                 "FROM generation_jobs AS j JOIN cases AS c ON c.case_id = j.case_id "
-                "WHERE j.status = 'pending' "
+                "WHERE j.status = 'pending' " + auto_clause + " "
                 "ORDER BY c.asof, c.created_at, c.symbol, j.generation_key LIMIT 1"
             ).fetchone()
             if row is None:
@@ -736,7 +853,8 @@ class BacktestStore:
                     )
                 if job["status"] != "complete":
                     conn.execute(
-                        "UPDATE generation_jobs SET status = 'complete', completed_at = ? "
+                        "UPDATE generation_jobs SET status = 'complete', auto_run = 0, "
+                        "completed_at = ? "
                         "WHERE generation_key = ?",
                         (record.created_at.isoformat(), claim.generation_key),
                     )
@@ -763,7 +881,7 @@ class BacktestStore:
                 ),
             )
             conn.execute(
-                "UPDATE generation_jobs SET status = 'complete', completed_at = ?, "
+                "UPDATE generation_jobs SET status = 'complete', auto_run = 0, completed_at = ?, "
                 "last_error = ? WHERE generation_key = ?",
                 (
                     record.created_at.isoformat(), record.guardrail_reason,

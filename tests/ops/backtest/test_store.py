@@ -218,6 +218,19 @@ def test_stale_generation_claim_is_requeued(tmp_path):
         assert second.attempt_count == first.attempt_count + 1
 
 
+def test_generation_job_requires_explicit_auto_queue_opt_in_and_rehydrates(tmp_path):
+    request = _generation_request(_case())
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        store.ensure_generation_job(request)
+        assert store.claim_next_generation_job(auto_only=True) is None
+        assert store.queued_generation_requests(auto_only=True) == ()
+
+        assert store.enqueue_generation_jobs([request.generation_key]) == 1
+        assert store.queued_generation_requests(auto_only=True) == (request,)
+        claim = store.claim_next_generation_job(auto_only=True)
+        assert claim.generation_key == request.generation_key
+
+
 def test_cutoff_probe_is_sealed_idempotently_without_changing_store_cutoff(tmp_path):
     created = datetime(2025, 7, 15, tzinfo=timezone.utc)
     values = {

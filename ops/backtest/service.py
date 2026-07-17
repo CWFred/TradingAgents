@@ -523,6 +523,7 @@ def _execute_generation(
     store: BacktestStore,
     config: OpsConfig,
     max_jobs: int | None,
+    auto_only: bool = False,
 ) -> GenerationSummary:
     from ops.llm_backend import build_managed_backend, load_managed_backend_config
     from tradingagents.llm_clients import create_llm_client
@@ -549,10 +550,39 @@ def _execute_generation(
         return run_generation_jobs(
             plan, store=store, generator=generator,
             stale_before=datetime.now(timezone.utc) - timedelta(hours=6),
-            max_jobs=max_jobs,
+            max_jobs=max_jobs, auto_only=auto_only,
         )
     finally:
         backend.shutdown()
+
+
+def process_enqueued_generation(
+    *, config: OpsConfig, max_jobs: int = 1,
+) -> GenerationSummary | None:
+    """Run an explicitly auto-queued backtest batch after live queues are idle."""
+    if max_jobs <= 0:
+        raise InvalidBacktestRequest("max-jobs must be positive")
+    from ops.work_pause import pause_state
+
+    if pause_state(
+        config.research_pause_flag_path, cleanup_expired=True,
+    ).paused:
+        return None
+    if not Path(config.backtest_store_path).expanduser().is_file():
+        return None
+    with BacktestStore(
+        config.backtest_store_path, cutoff=config.backtest_cutoff,
+    ) as store:
+        requests = store.queued_generation_requests(auto_only=True)
+        if not requests:
+            return None
+        plan = GenerationPlan(
+            requests=requests, cached=(),
+            pending=tuple(request.generation_key for request in requests),
+        )
+        return _execute_generation(
+            plan, store=store, config=config, max_jobs=max_jobs, auto_only=True,
+        )
 
 
 def prepare_cases(
@@ -703,12 +733,15 @@ def generate_cases(
     case_count: int,
     today: date,
     execute: bool = False,
+    enqueue: bool = False,
     max_jobs: int | None = None,
     brain_version: str = DEFAULT_BRAIN_VERSION,
     prompt_version: str = DEFAULT_PROMPT_VERSION,
     executor: Callable[..., GenerationSummary] | None = None,
     preparer: Callable[..., Sequence[BacktestCase]] | None = None,
 ) -> GenerationResult:
+    if execute and enqueue:
+        raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
     _validate_window(
         start=start, end=end, today=today, cutoff=config.backtest_cutoff,
         case_count=case_count,
@@ -739,6 +772,8 @@ def generate_cases(
             brain_version=brain_version, prompt_version=prompt_version,
         )
         plan = plan_generation(requests, store=store)
+        if enqueue:
+            store.enqueue_generation_jobs(plan.pending)
         summary = None
         if execute and plan.pending:
             runner = executor or _execute_generation

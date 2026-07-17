@@ -13,6 +13,7 @@ from ops.backtest.service import (
     DEFAULT_PROMPT_VERSION,
     generate_cases,
     prepare_cases,
+    process_enqueued_generation,
 )
 from ops.backtest.store import BacktestStore
 from ops.cli import cli
@@ -138,6 +139,86 @@ def test_generate_reports_cached_plan(tmp_path):
     ])
     assert result.exit_code == 0
     assert "1 case(s), 1 cached, 0 pending" in result.output
+
+
+def test_generate_enqueue_opts_jobs_into_background_processing(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    case = _seed_case(path, frozen=False)
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-01",
+        "--end", "2025-06-30", "--enqueue",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "queued for automatic" in result.output
+    with BacktestStore(path) as store:
+        queued = store.queued_generation_requests(auto_only=True)
+    assert [request.case.case_id for request in queued] == [case.case_id]
+
+
+def test_generate_rejects_execute_and_enqueue_together(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    _seed_case(path, frozen=False)
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-01",
+        "--end", "2025-06-30", "--execute", "--enqueue",
+    ])
+    assert result.exit_code != 0
+    assert "either immediate execution or background enqueue" in result.output
+
+
+def test_background_processor_resumes_explicit_queue_without_touching_plan_only_jobs(
+    tmp_path, monkeypatch,
+):
+    path = tmp_path / "backtest.sqlite"
+    auto_case = _seed_case(path, frozen=False, symbol="AUTO")
+    manual_case = _seed_case(path, frozen=False, symbol="MANUAL")
+    cfg = OpsConfig(
+        backtest_store_path=str(path),
+        research_pause_flag_path=str(tmp_path / "paused"),
+    )
+    with BacktestStore(path) as store:
+        for case in (auto_case, manual_case):
+            request = GenerationRequest.create(
+                case=case, manifest=store.get_context_manifest(case.case_id),
+                brain_version=DEFAULT_BRAIN_VERSION,
+                prompt_version=DEFAULT_PROMPT_VERSION,
+                evidence_model_id=cfg.research_evidence_model,
+                thesis_model_id=cfg.research_thesis_model,
+            )
+            store.ensure_generation_job(request)
+        requests = store.queued_generation_requests()
+        by_symbol = {request.case.symbol: request for request in requests}
+        store.enqueue_generation_jobs([by_symbol["AUTO"].generation_key])
+
+    class Backend:
+        def ensure_up(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+    class Client:
+        def get_llm(self):
+            return object()
+
+    monkeypatch.setattr(
+        "ops.llm_backend.build_managed_backend", lambda _cfg: Backend(),
+    )
+    monkeypatch.setattr(
+        "tradingagents.llm_clients.create_llm_client", lambda **_kwargs: Client(),
+    )
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_research_memo",
+        lambda request, **_kwargs: FrozenMemoRecord.terminal(
+            request, status="rejected", reason="fixture",
+        ),
+    )
+
+    summary = process_enqueued_generation(config=cfg, max_jobs=1)
+    assert summary.attempted == 1
+    with BacktestStore(path) as store:
+        assert store.frozen_memo_for_case(auto_case.case_id) is not None
+        assert store.frozen_memo_for_case(manual_case.case_id) is None
 
 
 def test_generate_prepares_empty_store_through_injected_pit_seams(tmp_path):

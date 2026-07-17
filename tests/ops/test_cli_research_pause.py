@@ -1,9 +1,6 @@
-"""`ops research pause` / `ops research resume`: the operator's ds4 kill
-switch for the overnight research window (screen/drain/vet). Pausing drops
-a flag file the daemon checks between names; resuming removes it and the
-half-hourly overnight job picks work back up."""
-from pathlib import Path
+"""Timed/manual pause controls for the live-first background model queue."""
 import json
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner

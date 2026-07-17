@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,10 +70,8 @@ def pause_state(
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return PauseState(True)
     if cleanup_expired:
-        try:
+        with suppress(FileNotFoundError):
             flag.unlink()
-        except FileNotFoundError:
-            pass
     return PauseState(False)
 
 
@@ -120,4 +119,3 @@ def clear_pause(path: str | Path) -> bool:
     except FileNotFoundError:
         return False
     return True
-

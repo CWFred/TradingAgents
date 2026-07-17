@@ -16,8 +16,10 @@ from zoneinfo import ZoneInfo
 from ops import events
 from ops.dashboard.snapshot import ro_conn
 from ops.journal import Journal
+from ops.model_queue import background_window
 from ops.scheduler import times
 from ops.scheduler.orchestrator import MAX_DAILY_CYCLE_ATTEMPTS
+from ops.work_pause import pause_state
 
 ET = ZoneInfo("America/New_York")
 
@@ -46,11 +48,20 @@ def _last_screen_run_at(path: str) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _next_half_hour(now_et: datetime) -> datetime:
+def _next_queue_poll(now_et: datetime, *, deadline_hour: int) -> datetime:
     base = now_et.replace(second=0, microsecond=0)
-    if base.minute < 30:
-        return base.replace(minute=30)
-    return (base + timedelta(hours=1)).replace(minute=0)
+    minutes = ((base.minute // 5) + 1) * 5
+    candidate = (
+        base.replace(minute=minutes)
+        if minutes < 60 else (base + timedelta(hours=1)).replace(minute=0)
+    )
+    for _ in range(7 * 24 * 12):
+        if background_window(
+            candidate, morning_deadline_hour=deadline_hour,
+        ).allowed:
+            return candidate
+        candidate += timedelta(minutes=5)
+    raise RuntimeError("no background queue window within seven days")
 
 
 def _next_cycle_tick(now_et: datetime, calendar, *, skip_today: bool) -> datetime:
@@ -94,12 +105,12 @@ def _cycle_entry(config, now_et: datetime, calendar) -> dict[str, Any]:
 
 def _overnight_entry(config, now_et: datetime) -> dict[str, Any]:
     deadline_h = config.research_drain_deadline_hour
-    in_window = now_et.hour < deadline_h or now_et.weekday() >= 5
-    if in_window:
-        at = _next_half_hour(now_et)
-    else:
-        at = (now_et + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0)
+    pause_path = getattr(config, "research_pause_flag_path", "")
+    pause = pause_state(pause_path, now=now_et) if pause_path else None
+    forecast_from = now_et
+    if pause is not None and pause.until is not None:
+        forecast_from = max(forecast_from, pause.until.astimezone(ET))
+    at = _next_queue_poll(forecast_from, deadline_hour=deadline_h)
 
     pending_sql = "SELECT COUNT(*) FROM screen_hits WHERE status = 'pending'"
     vet_sql = "SELECT COUNT(*) FROM memos WHERE status = 'pending_vetting'"
@@ -109,6 +120,11 @@ def _overnight_entry(config, now_et: datetime) -> dict[str, Any]:
              + _count(config.short_memo_store_path, vet_sql))
     insider = _count(config.insider_signal_store_path,
                      "SELECT COUNT(*) FROM sleeve_entries WHERE memo_id = ''")
+    backtests = _count(
+        getattr(config, "backtest_store_path", ""),
+        "SELECT COUNT(*) FROM generation_jobs "
+        "WHERE auto_run = 1 AND status IN ('pending', 'running')",
+    ) if getattr(config, "backtest_store_path", "") else 0
 
     last_screen = _last_screen_run_at(config.screen_store_path)
     interval = timedelta(days=config.research_screen_interval_days)
@@ -124,6 +140,10 @@ def _overnight_entry(config, now_et: datetime) -> dict[str, Any]:
         parts.append(f"{memos} memo(s) to vet")
     if insider:
         parts.append(f"{insider} insider memo(s) to author")
+    if backtests:
+        parts.append(f"{backtests} backtest memo(s) queued")
+    if pause is not None and pause.paused:
+        parts.insert(0, "paused indefinitely" if pause.until is None else "timed pause")
     if parts:
         purpose = " · ".join(parts)
     else:
