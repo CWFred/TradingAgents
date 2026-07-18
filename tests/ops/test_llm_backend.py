@@ -9,6 +9,8 @@ server) are injected so these tests never spawn a real process or touch RAM.
 """
 from __future__ import annotations
 
+import signal
+
 import pytest
 
 from ops.llm_backend import (
@@ -17,7 +19,11 @@ from ops.llm_backend import (
     ManagedBackendError,
     NullManagedBackend,
     build_managed_backend,
+    interrupt_background_backends,
     load_managed_backend_config,
+    register_background_backend,
+    terminate_configured_ds4,
+    unregister_background_backend,
 )
 
 
@@ -277,6 +283,67 @@ def test_shutdown_terminates_owned_process():
     backend.shutdown()
 
     assert deps.proc.terminated is True
+
+
+def test_interrupt_stops_only_registered_owned_background_server():
+    background_deps = Deps(health_sequence=[False, True])
+    momentum_deps = Deps(health_sequence=[False, True])
+    background = make_backend(background_deps)
+    momentum = make_backend(momentum_deps)
+    background.ensure_up()
+    momentum.ensure_up()
+    register_background_backend(background)
+    try:
+        assert interrupt_background_backends() == 1
+    finally:
+        unregister_background_backend(background)
+
+    assert background_deps.proc.terminated is True
+    assert momentum_deps.proc.terminated is False
+
+
+def test_interrupt_never_stops_external_server():
+    deps = Deps(health_sequence=[True])
+    backend = make_backend(deps)
+    backend.ensure_up()
+    register_background_backend(backend)
+    try:
+        interrupt_background_backends()
+    finally:
+        unregister_background_backend(backend)
+
+    assert deps.proc.terminated is False
+
+
+def test_hard_stop_terminates_only_verified_configured_ds4_listener():
+    cfg = ManagedBackendConfig(ds4_dir="/repo/ds4", port=8000)
+    sent = []
+    commands = {
+        10: "/repo/ds4/ds4-server -m model --port 8000",
+        11: "/other/server --port 8000",
+    }
+
+    stopped = terminate_configured_ds4(
+        cfg,
+        listener_pids=lambda port: [10, 11] if port == 8000 else [],
+        process_command=commands.get,
+        send_signal=lambda pid, sig: sent.append((pid, sig)),
+    )
+
+    assert stopped == 1
+    assert sent == [(10, signal.SIGTERM)]
+
+
+def test_managed_backend_refuses_startup_while_pause_lease_exists(tmp_path):
+    deps = Deps(health_sequence=[False])
+    pause = tmp_path / "paused"
+    pause.touch()
+    backend = make_backend(deps, pause_flag_path=str(pause))
+
+    with pytest.raises(ManagedBackendError, match="blocked by operator pause"):
+        backend.ensure_up()
+
+    assert deps.spawned == []
 
 
 def test_shutdown_does_not_kill_external_server():

@@ -4,8 +4,9 @@ Shared by `ops research run` (name-capped, manual) and the overnight
 scheduler tick (deadline-boxed, unattended). Pure of backend lifecycle:
 the caller brings ds4 up and tears it down around this call.
 
-Stop conditions, checked BEFORE each name so a name already in flight
-always finishes:
+Stop conditions are checked before each name.  If an in-flight model call is
+interrupted by the operator pause control, the stop condition is checked again
+and that name remains pending for resume:
   1. should_stop() is true  (graceful shutdown requested)
   2. now() >= deadline       (08:00 wall-clock reached)
   3. the pending queue is empty
@@ -91,11 +92,15 @@ def drain_pending(
         except ResearchError:
             raise  # configuration problem: abort the whole batch
         except _NameFailed as nf:
+            if should_stop is not None and should_stop():
+                break
             store.mark_failed(hit["id"])
             failed += 1
             echo(f"{nf.outcome.symbol}: FAILED — " + "; ".join(nf.outcome.errors))
             continue
         except Exception as exc:  # noqa: BLE001 - one bad name must not strand the queue
+            if should_stop is not None and should_stop():
+                break
             store.mark_failed(hit["id"])
             failed += 1
             echo(f"{hit['symbol']}: FAILED ({type(exc).__name__}: {exc})")

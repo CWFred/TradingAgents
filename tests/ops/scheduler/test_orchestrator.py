@@ -179,6 +179,27 @@ def test_tick_brackets_analysis_in_pipeline_session(tmp_path):
     pipeline.session.return_value.__exit__.assert_called_once()
 
 
+def test_resource_pause_blocks_sweep_and_model_session_but_keeps_tick_safe(tmp_path):
+    from ops.config import OpsConfig
+    from ops.journal import Journal
+
+    j = Journal(str(tmp_path / "j.sqlite"))
+    pipeline = _fake_pipeline()
+    members = MagicMock(side_effect=AssertionError("resource sweep must stay off"))
+    orch = Orchestrator(
+        broker=_fake_broker(), universe_builder=_fake_universe(["AAPL"]),
+        strategy=_fake_strategy([]), pipeline_adapter=pipeline,
+        calendar=_fake_calendar(is_open=True), journal=j, config=OpsConfig(),
+        members_loader=members, resource_paused=lambda: True,
+    )
+
+    orch.tick()
+
+    members.assert_not_called()
+    pipeline.session.assert_not_called()
+    assert not j.has_event_today("daily_cycle_run")
+
+
 def test_tick_journals_orchestrator_tick_error_on_unexpected_exception(tmp_path):
     """Any unexpected exception from a collaborator is swallowed and journaled."""
     from ops.journal import Journal

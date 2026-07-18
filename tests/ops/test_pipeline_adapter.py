@@ -3,6 +3,7 @@ from datetime import date
 
 import pytest
 
+from ops.llm_backend import interrupt_model_backends
 from ops.pipeline_adapter import (
     TIER_HIGH,
     TIER_STARTER,
@@ -92,6 +93,9 @@ class _RecordingBackend:
         self.shutdown_calls += 1
         self.events.append("shutdown")
 
+    def interrupt(self):
+        self.events.append("interrupt")
+
 
 def test_propagate_ensures_backend_up_before_graph(monkeypatch):
     """The managed backend must be brought up before the graph runs, so a
@@ -132,6 +136,17 @@ def test_session_shuts_down_even_on_error():
         with adapter.session():
             raise ValueError("boom")
     assert backend.shutdown_calls == 1
+
+
+def test_session_exposes_momentum_backend_to_hard_pause():
+    events = []
+    backend = _RecordingBackend(events)
+    adapter = TradingAgentsPipelineAdapter(backend=backend)
+
+    with adapter.session():
+        assert interrupt_model_backends() == 1
+
+    assert events == ["interrupt", "shutdown"]
 
 
 def test_default_adapter_has_no_managed_backend(monkeypatch):

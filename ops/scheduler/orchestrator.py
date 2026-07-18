@@ -42,6 +42,7 @@ class Orchestrator:
         momentum_finder=find_momentum_leaders,
         closes_fetch=fetch_closes_and_volumes_from_yfinance,
         now_fn: Callable[[], datetime] | None = None,
+        resource_paused: Callable[[], bool] | None = None,
         reporter=None,
     ) -> None:
         self._broker = broker
@@ -55,6 +56,7 @@ class Orchestrator:
         self._momentum_finder = momentum_finder
         self._closes_fetch = closes_fetch
         self._now_fn = now_fn if now_fn is not None else lambda: datetime.now(timezone.utc)
+        self._resource_paused = resource_paused or (lambda: False)
         self._reporter = reporter if reporter is not None else NullReporter()
 
     def tick(self) -> None:
@@ -73,6 +75,11 @@ class Orchestrator:
             return
         self._maybe_snapshot_equity()
         if self._is_daily_halted() or self._is_weekly_halted():
+            return
+        # The operator resource lease is a hard gate before the expensive
+        # universe sweep or any model startup. Guardian stop checks run in a
+        # separate scheduler job and remain active while model work is paused.
+        if self._resource_paused():
             return
         now = self._now_fn()
         asof_date = now.date()

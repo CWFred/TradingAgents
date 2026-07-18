@@ -15,7 +15,12 @@ from enum import Enum
 from typing import Protocol
 
 from ops.activity import NullReporter
-from ops.llm_backend import ManagedBackend, NullManagedBackend
+from ops.llm_backend import (
+    ManagedBackend,
+    NullManagedBackend,
+    register_model_backend,
+    unregister_model_backend,
+)
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 
@@ -149,10 +154,14 @@ class TradingAgentsPipelineAdapter:
     def session(self) -> Iterator[TradingAgentsPipelineAdapter]:
         """Bracket a batch of analyses; tear the managed backend down on exit."""
         self._seq = 0
+        register_model_backend(self._backend)
         try:
             yield self
         finally:
-            self._backend.shutdown()
+            try:
+                self._backend.shutdown()
+            finally:
+                unregister_model_backend(self._backend)
 
 
 class StubPipelineAdapter:

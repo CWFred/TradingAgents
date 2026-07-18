@@ -108,6 +108,8 @@ def author_pending_memos(
             written += 1
             echo(f"{symbol}: memo {memo.memo_id}")
         except Exception as exc:  # noqa: BLE001 - one bad entry must not strand the queue
+            if should_stop is not None and should_stop():
+                break
             echo(f"{symbol}: memo-lite FAILED ({type(exc).__name__}: {exc})")
     return written
 

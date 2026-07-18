@@ -21,6 +21,8 @@ real process.
 from __future__ import annotations
 
 import os
+import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -33,6 +35,10 @@ from typing import Protocol
 
 class ManagedBackendError(RuntimeError):
     """Raised when a managed backend cannot be brought up."""
+
+
+class ManagedBackendPaused(ManagedBackendError):
+    """Raised when the operator resource-pause lease forbids model startup."""
 
 
 def _expand(path: str) -> str:
@@ -52,6 +58,7 @@ class ManagedBackendConfig:
     lms_path: str = field(default_factory=lambda: _expand("~/.lmstudio/bin/lms"))
     build_if_missing: bool = True
     startup_timeout_s: float = 180.0
+    pause_flag_path: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -67,6 +74,7 @@ class ManagedBackendConfig:
 # --------------------------------------------------------------------------- #
 class ManagedBackend(Protocol):
     def ensure_up(self) -> None: ...
+    def interrupt(self) -> None: ...
     def shutdown(self) -> None: ...
 
 
@@ -76,8 +84,55 @@ class NullManagedBackend:
     def ensure_up(self) -> None:  # noqa: D401 - trivial
         return None
 
+    def interrupt(self) -> None:
+        return None
+
     def shutdown(self) -> None:
         return None
+
+
+# Active TradingAgents model sessions register here so the operator pause can
+# preempt them without stopping the broker guardian or the daemon itself.
+_model_targets: dict[int, tuple[ManagedBackend, int]] = {}
+_model_targets_lock = threading.Lock()
+
+
+def register_model_backend(backend: ManagedBackend) -> None:
+    """Expose an active model backend to the daemon's pause handler."""
+    key = id(backend)
+    with _model_targets_lock:
+        current = _model_targets.get(key)
+        count = current[1] + 1 if current is not None else 1
+        _model_targets[key] = (backend, count)
+
+
+def unregister_model_backend(backend: ManagedBackend) -> None:
+    key = id(backend)
+    with _model_targets_lock:
+        current = _model_targets.get(key)
+        if current is None:
+            return
+        if current[1] <= 1:
+            _model_targets.pop(key, None)
+        else:
+            _model_targets[key] = (current[0], current[1] - 1)
+
+
+def interrupt_model_backends() -> int:
+    """Interrupt active TradingAgents inference, returning the target count."""
+    with _model_targets_lock:
+        targets = [entry[0] for entry in _model_targets.values()]
+    for backend in targets:
+        interrupt = getattr(backend, "interrupt", None)
+        if callable(interrupt):
+            interrupt()
+    return len(targets)
+
+
+# Compatibility names for callers introduced with the background-only pause.
+register_background_backend = register_model_backend
+unregister_background_backend = unregister_model_backend
+interrupt_background_backends = interrupt_model_backends
 
 
 # Injected-dependency signatures (defaults below wire up the real ones).
@@ -131,6 +186,7 @@ class Ds4ManagedBackend:
         self._log_path = log_path or os.path.join(config.ds4_dir, "ds4-server.log")
         self._proc: object | None = None  # set only when we launch it
         self._lock = threading.Lock()
+        self._interrupt_requested = threading.Event()
 
     @property
     def _binary(self) -> str:
@@ -139,6 +195,13 @@ class Ds4ManagedBackend:
     def ensure_up(self) -> None:
         if not self.config.enabled:
             return
+        if self.config.pause_flag_path:
+            from ops.work_pause import pause_state
+
+            if pause_state(
+                self.config.pause_flag_path, cleanup_expired=True,
+            ).paused:
+                raise ManagedBackendPaused("model startup blocked by operator pause")
         with self._lock:
             if self._health(self.config.base_url):
                 return  # already serving (ours from a prior call, or external)
@@ -176,6 +239,9 @@ class Ds4ManagedBackend:
         self._proc = proc
         deadline = self._monotonic() + cfg.startup_timeout_s
         while self._monotonic() < deadline:
+            if self._interrupt_requested.is_set():
+                proc.terminate()
+                raise ManagedBackendError("ds4-server startup interrupted")
             if proc.poll() is not None:  # exited before becoming healthy
                 self._proc = None
                 raise ManagedBackendError(
@@ -192,6 +258,19 @@ class Ds4ManagedBackend:
         raise ManagedBackendError(
             f"ds4-server did not become healthy within {cfg.startup_timeout_s:.0f}s"
         )
+
+    def interrupt(self) -> None:
+        """Stop owned inference promptly without waiting for process teardown.
+
+        This is intentionally narrower than ``shutdown``: it is safe to call
+        from the daemon's control-signal handler, never touches an externally
+        started server, and leaves the Popen handle for the worker's normal
+        ``shutdown`` path to reap.
+        """
+        self._interrupt_requested.set()
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
 
     def shutdown(self) -> None:
         if not self.config.enabled:
@@ -239,14 +318,24 @@ def _env_bool(name: str) -> bool | None:
 
 
 def load_managed_backend_config() -> ManagedBackendConfig:
+    from ops.work_pause import default_pause_path
+
     kind = (os.environ.get("OPS_LLM_MANAGED_BACKEND") or "none").strip().lower()
     if kind in ("", "none"):
-        return ManagedBackendConfig(kind="none")
+        return ManagedBackendConfig(
+            kind="none",
+            pause_flag_path=os.environ.get("OPS_RESEARCH_PAUSE_FLAG_PATH")
+            or default_pause_path(),
+        )
     if kind != "ds4":
         raise ManagedBackendError(
             f"unknown OPS_LLM_MANAGED_BACKEND {kind!r} (supported: ds4)"
         )
-    kwargs: dict = {"kind": "ds4"}
+    kwargs: dict = {
+        "kind": "ds4",
+        "pause_flag_path": os.environ.get("OPS_RESEARCH_PAUSE_FLAG_PATH")
+        or default_pause_path(),
+    }
     for env_name, key in (
         ("DS4_DIR", "ds4_dir"), ("DS4_MODEL", "model"), ("DS4_HOST", "host"),
         ("DS4_KV_DIR", "kv_dir"), ("DS4_LMS_PATH", "lms_path"),
@@ -265,6 +354,66 @@ def load_managed_backend_config() -> ManagedBackendConfig:
     if build is not None:
         kwargs["build_if_missing"] = build
     return ManagedBackendConfig(**kwargs)
+
+
+def _listener_pids(port: int) -> list[int]:
+    """Best-effort local listener discovery used by the operator kill switch."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids: list[int] = []
+    for raw in result.stdout.splitlines():
+        try:
+            pids.append(int(raw.strip()))
+        except ValueError:
+            continue
+    return pids
+
+
+def _process_command(pid: int) -> str:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def terminate_configured_ds4(
+    config: ManagedBackendConfig,
+    *,
+    listener_pids: Callable[[int], list[int]] = _listener_pids,
+    process_command: Callable[[int], str] = _process_command,
+    send_signal: Callable[[int, int], None] = os.kill,
+) -> int:
+    """Terminate verified ds4 listeners, including orphaned server processes.
+
+    Port ownership alone is not enough: the command's executable must resolve
+    to the configured ds4 binary.  This makes the hard resource cutoff useful
+    without ever killing an unrelated service that later reused port 8000.
+    """
+    binary = os.path.realpath(os.path.join(config.ds4_dir, "ds4-server"))
+    stopped = 0
+    for pid in listener_pids(config.port):
+        command = process_command(pid)
+        try:
+            executable = os.path.realpath(shlex.split(command)[0])
+        except (ValueError, IndexError):
+            continue
+        if executable != binary:
+            continue
+        try:
+            send_signal(pid, signal.SIGTERM)
+        except (OSError, ValueError):
+            continue
+        stopped += 1
+    return stopped
 
 
 def build_managed_backend(config: ManagedBackendConfig) -> ManagedBackend:

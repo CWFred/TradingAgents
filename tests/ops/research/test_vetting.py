@@ -339,3 +339,23 @@ def test_vet_pending_failure_leaves_memo_pending_and_continues(store):
     assert summary.still_pending == 1          # AAA retried next night
     assert [m.ticker for m in store.pending_vetting_memos()] == ["AAA"]
     assert any("AAA" in e and "FAILED" in e for e in echoes)
+
+
+def test_vet_pending_interruption_is_not_counted_as_failure(store):
+    store.save(_memo(ticker="AAA"))
+    paused = {"value": False}
+
+    class InterruptedAdapter(StubPipelineAdapter):
+        def propagate(self, symbol, asof_date, research_context=""):
+            paused["value"] = True
+            raise RuntimeError("model connection closed")
+
+    summary = vet_pending(
+        memo_store=store, adapter=InterruptedAdapter(),
+        falsifier_llm=NoFalsifierLLM(), vetted_by_model="m",
+        should_stop=lambda: paused["value"],
+    )
+
+    assert summary.failed == 0
+    assert summary.vetted == 0
+    assert summary.still_pending == 1

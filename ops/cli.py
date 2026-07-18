@@ -600,16 +600,19 @@ def research_run(max_names: int, do_notify: bool = False) -> None:
     help="Automatically resume background model work after this many hours.",
 )
 def research_pause(hours: float | None) -> None:
-    """Pause background memo/backtest work and free ds4.
+    """Hard-pause TradingAgents model work and free ds4 immediately.
 
-    The daemon checks the lease between names: the in-flight name finishes
-    (up to ~30 min), then the worker stops and ds4 shuts down. Momentum,
-    monitoring, trading, exits, and the guardian are unaffected. Without
-    ``--hours`` the pause survives restarts until ``ops research resume``.
+    The daemon interrupts in-flight model calls and the CLI also terminates a
+    verified local ds4 listener, including an orphan left by an older daemon.
+    Background items remain queued for resume. New background and momentum
+    model work is refused until the lease expires. Monitoring, exits, and the
+    guardian remain active. Without ``--hours`` the pause survives restarts
+    until ``ops research resume``.
     """
     from datetime import timedelta
 
-    from ops.work_pause import set_pause
+    from ops.llm_backend import load_managed_backend_config, terminate_configured_ds4
+    from ops.work_pause import request_immediate_pause, set_pause
 
     if hours is not None and hours <= 0:
         raise click.BadParameter("must be positive", param_hint="--hours")
@@ -618,31 +621,48 @@ def research_pause(hours: float | None) -> None:
         config.research_pause_flag_path,
         duration=timedelta(hours=hours) if hours is not None else None,
     )
+    interrupt_requested = request_immediate_pause(config.journal_path)
+    stopped_servers = terminate_configured_ds4(load_managed_backend_config())
     expiry = (
         f"; automatic resume at {state.until.isoformat()}"
         if state.until is not None else "; resume manually"
     )
+    lockout = (
+        f"until {state.until.isoformat()}"
+        if state.until is not None else "until manual resume"
+    )
     click.echo(
-        "background memo queue paused" + expiry
-        + ". The in-flight name finishes, then ds4 frees — up to ~30 minutes."
+        "TradingAgents model work paused" + expiry
+        + (
+            f". Hard stop sent; {stopped_servers} verified ds4 server(s) "
+            f"terminated. New model work is locked out {lockout}."
+            if interrupt_requested or stopped_servers else
+            f". No active ds4 server was found; new model work is locked out {lockout}."
+        )
     )
 
 
 @research.command("resume")
 def research_resume() -> None:
-    """Resume the overnight research window after `ops research pause`.
+    """Resume model work after an indefinite `ops research pause`.
 
-    Removes the pause flag; the daemon's half-hourly overnight job picks
-    the queues back up within 30 minutes (weekends run until Monday
-    morning's deadline, weekdays until the pre-market deadline).
+    Timed leases cannot be resumed early. For an indefinite lease this removes
+    the flag; model work becomes eligible on its next scheduled poll/tick.
     """
-    from ops.work_pause import clear_pause
+    from ops.work_pause import clear_pause, pause_state
 
     config = load_config()
+    state = pause_state(config.research_pause_flag_path)
+    if state.paused and state.until is not None:
+        click.echo(
+            "timed resource pause is locked until "
+            f"{state.until.isoformat()}; resume refused."
+        )
+        return
     if clear_pause(config.research_pause_flag_path):
-        click.echo("background memo queue resumed; the daemon picks work up shortly.")
+        click.echo("TradingAgents model work resumed; the daemon may pick work up shortly.")
     else:
-        click.echo("background memo queue was not paused; nothing to do.")
+        click.echo("TradingAgents model work was not paused; nothing to do.")
 
 
 @research.command("kick")

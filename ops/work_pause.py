@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sqlite3
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,6 +30,13 @@ class PauseState:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def default_pause_path() -> str:
+    return os.path.join(
+        os.path.expanduser(os.environ.get("XDG_STATE_HOME") or "~/.local/state"),
+        "tradingagents", "research.paused",
+    )
 
 
 def pause_state(
@@ -82,7 +91,7 @@ def set_pause(
     reason: str = "operator",
     now: datetime | None = None,
 ) -> PauseState:
-    """Create an indefinite pause or a timed lease atomically."""
+    """Create or extend a pause atomically; never shorten an active lease."""
     if duration is not None and duration.total_seconds() <= 0:
         raise ValueError("pause duration must be positive")
     current = now or _utc_now()
@@ -90,11 +99,16 @@ def set_pause(
         raise ValueError("pause clock must be timezone-aware")
     flag = Path(path)
     flag.parent.mkdir(parents=True, exist_ok=True)
+    existing = pause_state(flag, now=current)
+    if existing.indefinite:
+        return existing
     if duration is None:
         content = ""
         state = PauseState(True, reason=reason)
     else:
         until = current.astimezone(timezone.utc) + duration
+        if existing.until is not None and existing.until >= until:
+            return existing
         content = json.dumps(
             {
                 "version": 1,
@@ -117,5 +131,41 @@ def clear_pause(path: str | Path) -> bool:
     try:
         Path(path).unlink()
     except FileNotFoundError:
+        return False
+    return True
+
+
+def request_immediate_pause(journal_path: str | Path) -> bool:
+    """Ask a running ops daemon to interrupt all active inference now.
+
+    The durable journal identifies the current service PID.  SIGURG is used
+    because its default disposition is ignore: sending this from upgraded CLI
+    code to an older daemon is therefore backward-compatible rather than
+    process-terminating.  The daemon independently verifies that a pause lease
+    exists before acting.
+    """
+    pause_signal = getattr(signal, "SIGURG", None)
+    if pause_signal is None:
+        return False
+
+    from ops import events
+    from ops.journal import Journal
+
+    try:
+        with Journal(str(journal_path), readonly=True) as journal:
+            started = journal.last_event(events.KIND_SERVICE_STARTED)
+            stopped = journal.last_event(events.KIND_SERVICE_STOPPING)
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+    if started is None:
+        return False
+    if stopped is not None and stopped["at"] > started["at"]:
+        return False
+    pid = started["payload"].get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, pause_signal)
+    except (OSError, ValueError):
         return False
     return True

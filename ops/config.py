@@ -11,6 +11,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from ops.backtest.models import MIN_BACKTEST_CUTOFF
+from ops.work_pause import default_pause_path
 
 _DEFAULT_DENY_LIST = frozenset({
     "SPOT",
@@ -154,16 +155,13 @@ class OpsConfig:
     # keeps it from minting more pending_vetting debt per night (~30min of
     # graph time per buy) than later vetting stages can service.
     research_drain_nightly_cap: int = 15
-    # Operator pause switch for the overnight research window (screen/drain/
-    # vet): `ops research pause` touches this file, `ops research resume`
-    # removes it. The daemon checks it between names, so ds4 frees within
-    # one name (~30 min) of pausing. A file (not an env var) so it can be
-    # flipped without restarting the daemon and survives daemon restarts.
+    # Operator resource-pause switch for every daemon model path (momentum,
+    # screen/drain/vet, insider memo, and backtest): `ops research pause`
+    # writes it and sends a backward-compatible preemption signal. Durable
+    # queue items remain pending. A file (not an env var) makes the startup
+    # lockout survive daemon restarts.
     research_pause_flag_path: str = field(
-        default_factory=lambda: os.path.join(
-            os.path.expanduser(os.environ.get("XDG_STATE_HOME") or "~/.local/state"),
-            "tradingagents", "research.paused",
-        )
+        default_factory=default_pause_path
     )
     # Guardian liveness file: the guardian best-effort-touches this at the
     # start of every pass; the (separate-process) dashboard reads its mtime.
