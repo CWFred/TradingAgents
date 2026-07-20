@@ -119,6 +119,44 @@ def test_inverted_map_confirms_a_short_on_bearish_ratings(store, rating, tier):
     assert got.conviction_tier == tier
 
 
+def test_confirm_appends_catalyst_from_pm_reassess_fields(store):
+    memo = _memo()
+    store.save(memo)
+    adapter = StubPipelineAdapter(
+        ratings={"ACME": "Buy"},
+        reassess={"ACME": ("2026-08-03", "Starship Flight 13 outcome")},
+    )
+    vet_memo(memo, adapter=adapter, falsifier_llm=NoFalsifierLLM(), memo_store=store)
+    got = store.get(memo.memo_id)
+    assert len(got.catalysts) == 1
+    cat = got.catalysts[0]
+    assert cat.description == "Starship Flight 13 outcome"
+    assert cat.expected_date == date(2026, 8, 3)
+    assert cat.hard_date is True
+
+
+def test_confirm_without_pm_reassess_fields_adds_no_catalyst(store):
+    memo = _memo()
+    store.save(memo)
+    adapter = StubPipelineAdapter(ratings={"ACME": "Buy"})
+    vet_memo(memo, adapter=adapter, falsifier_llm=NoFalsifierLLM(), memo_store=store)
+    got = store.get(memo.memo_id)
+    assert got.catalysts == []
+
+
+def test_reject_ignores_pm_reassess_fields(store):
+    memo = _memo()
+    store.save(memo)
+    adapter = StubPipelineAdapter(
+        ratings={"ACME": "Hold"},
+        reassess={"ACME": ("2026-08-03", "irrelevant")},
+    )
+    vet_memo(memo, adapter=adapter, falsifier_llm=NoFalsifierLLM(), memo_store=store)
+    got = store.get(memo.memo_id)
+    assert got.status == "rejected"
+    assert got.catalysts == []
+
+
 @pytest.mark.parametrize("rating", ["Buy", "Overweight", "Hold", ""])
 def test_inverted_map_rejects_bullish_ratings(store, rating):
     memo = _memo()
