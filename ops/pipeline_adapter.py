@@ -5,6 +5,7 @@ StubPipelineAdapter to avoid LLM costs. The graph is constructed lazily so
 importing this module is free of side effects."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
@@ -15,6 +16,7 @@ from datetime import date
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from ops.activity import NullReporter
 from ops.llm_backend import (
@@ -128,27 +130,51 @@ class TradingAgentsPipelineAdapter:
         return Path(config["results_dir"])
 
     def _completed_result(
-        self, symbol: str, asof_date: date,
+        self, symbol: str, asof_date: date, research_context: str = "",
     ) -> PipelineResult | None:
         """Load a complete same-day graph result, if one is safely reusable."""
         if not self._reuse_completed or not re.fullmatch(r"[A-Za-z0-9._-]+", symbol):
             return None
-        path = (
-            self._results_dir / symbol.upper() / "TradingAgentsStrategy_logs"
-            / f"full_states_log_{asof_date.isoformat()}.json"
-        )
+        context_digest = hashlib.sha256(research_context.encode("utf-8")).hexdigest()
+        if research_context:
+            path = (
+                self._results_dir / ".pipeline_completed" / asof_date.isoformat()
+                / f"{symbol.upper()}-{context_digest}.json"
+            )
+        else:
+            path = (
+                self._results_dir / symbol.upper() / "TradingAgentsStrategy_logs"
+                / f"full_states_log_{asof_date.isoformat()}.json"
+            )
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            if research_context:
+                if not isinstance(stored, dict):
+                    return None
+                if stored.get("research_context_sha256") != context_digest:
+                    return None
+                if str(stored.get("symbol", "")).upper() != symbol.upper():
+                    return None
+                if stored.get("date") != asof_date.isoformat():
+                    return None
+                raw = stored.get("raw")
+                rating = stored.get("rating")
+                if not isinstance(rating, str) or not rating.strip():
+                    return None
+            else:
+                raw = stored
+                rating = ""
             if not isinstance(raw, dict):
-                return None
-            if str(raw.get("company_of_interest", "")).upper() != symbol.upper():
-                return None
-            if raw.get("trade_date") != asof_date.isoformat():
                 return None
             final_decision = raw.get("final_trade_decision")
             if not isinstance(final_decision, str) or not final_decision.strip():
                 return None
-            rating = SignalProcessor().process_signal(final_decision)
+            if not research_context:
+                if str(raw.get("company_of_interest", "")).upper() != symbol.upper():
+                    return None
+                if raw.get("trade_date") != asof_date.isoformat():
+                    return None
+                rating = SignalProcessor().process_signal(final_decision)
             decision, tier = parse_rating_action(rating)
         except (OSError, ValueError, TypeError):
             # A missing, partial, or malformed state is not a cache hit. The
@@ -162,6 +188,39 @@ class TradingAgentsPipelineAdapter:
             symbol=symbol, date=asof_date, decision=decision, raw=reused_raw,
             rating=rating, tier=tier,
         )
+
+    def _save_context_result(
+        self, result: PipelineResult, research_context: str,
+    ) -> None:
+        """Atomically checkpoint one memo-specific graph result for retry."""
+        if not self._reuse_completed or not research_context:
+            return
+        digest = hashlib.sha256(research_context.encode("utf-8")).hexdigest()
+        path = (
+            self._results_dir / ".pipeline_completed" / result.date.isoformat()
+            / f"{result.symbol.upper()}-{digest}.json"
+        )
+        tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        payload = {
+            "symbol": result.symbol.upper(),
+            "date": result.date.isoformat(),
+            "research_context_sha256": digest,
+            "rating": result.rating,
+            "raw": result.raw,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8",
+            )
+            tmp.replace(path)
+        except (OSError, TypeError, ValueError):
+            # Checkpointing is an optimization; a successful analysis remains
+            # successful even if its retry cache cannot be persisted.
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def has_completed_results(self, asof_date: date) -> bool:
         """Whether today has at least one validated result worth resuming."""
@@ -195,7 +254,7 @@ class TradingAgentsPipelineAdapter:
             self._activity_job, stage=self._activity_stage,
             symbol=symbol, seq=str(self._seq),
         ) as activity:
-            completed = self._completed_result(symbol, asof_date)
+            completed = self._completed_result(symbol, asof_date, research_context)
             if completed is not None:
                 activity.outcome = "reused completed analysis"
                 return completed
@@ -208,10 +267,12 @@ class TradingAgentsPipelineAdapter:
             )
             decision, tier = parse_rating_action(decision_text or "")
             raw_dict = raw if isinstance(raw, dict) else {"output": str(raw)}
-            return PipelineResult(
+            result = PipelineResult(
                 symbol=symbol, date=asof_date, decision=decision, raw=raw_dict,
                 rating=(decision_text or "").strip(), tier=tier,
             )
+            self._save_context_result(result, research_context)
+            return result
 
     @contextmanager
     def session(self) -> Iterator[TradingAgentsPipelineAdapter]:

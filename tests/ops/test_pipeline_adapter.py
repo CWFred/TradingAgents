@@ -181,6 +181,50 @@ def test_propagate_ignores_invalid_completed_result(tmp_path, monkeypatch):
     assert backend.ensure_calls == 1
 
 
+def test_research_context_result_resumes_only_for_exact_memo(tmp_path, monkeypatch):
+    """Vetting retries reuse an exact memo result, never another context."""
+    asof = date(2026, 7, 20)
+    calls = []
+
+    class FakeGraph:
+        def __init__(self, **kwargs):
+            pass
+
+        def propagate(self, ticker, dt, research_memo_context=""):
+            calls.append(research_memo_context)
+            return ({
+                "company_of_interest": ticker,
+                "trade_date": dt,
+                "final_trade_decision": "**Rating**: Buy",
+                "risk_debate_state": {"history": "complete debate"},
+            }, "Buy")
+
+    monkeypatch.setattr("ops.pipeline_adapter.TradingAgentsGraph", FakeGraph)
+    config = {"results_dir": str(tmp_path)}
+    first_backend = _RecordingBackend([])
+    first = TradingAgentsPipelineAdapter(
+        backend=first_backend, reuse_completed=True, config=config,
+    ).propagate("ACME", asof, research_context="memo A")
+    assert first.decision is PipelineDecision.BUY
+    assert first_backend.ensure_calls == 1
+
+    resumed_backend = _RecordingBackend([])
+    resumed = TradingAgentsPipelineAdapter(
+        backend=resumed_backend, reuse_completed=True, config=config,
+    ).propagate("ACME", asof, research_context="memo A")
+    assert resumed.decision is PipelineDecision.BUY
+    assert resumed.raw["reused_completed_state"] is True
+    assert resumed_backend.ensure_calls == 0
+    assert calls == ["memo A"]
+
+    different_backend = _RecordingBackend([])
+    TradingAgentsPipelineAdapter(
+        backend=different_backend, reuse_completed=True, config=config,
+    ).propagate("ACME", asof, research_context="memo B")
+    assert different_backend.ensure_calls == 1
+    assert calls == ["memo A", "memo B"]
+
+
 def test_session_shuts_down_backend():
     events = []
     backend = _RecordingBackend(events)
