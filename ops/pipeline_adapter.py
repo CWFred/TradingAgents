@@ -5,6 +5,7 @@ StubPipelineAdapter to avoid LLM costs. The graph is constructed lazily so
 importing this module is free of side effects."""
 from __future__ import annotations
 
+import json
 import re
 import threading
 from collections.abc import Iterator
@@ -12,6 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
+from pathlib import Path
 from typing import Protocol
 
 from ops.activity import NullReporter
@@ -21,6 +23,8 @@ from ops.llm_backend import (
     register_model_backend,
     unregister_model_backend,
 )
+from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.graph.signal_processing import SignalProcessor
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 
@@ -58,6 +62,8 @@ class PipelineAdapter(Protocol):
         starts a server.
         """
         ...
+
+    def has_completed_results(self, asof_date: date) -> bool: ...
 
 
 # Conviction tiers carried on PipelineResult.tier. TIER_HIGH sizes at
@@ -104,7 +110,8 @@ class TradingAgentsPipelineAdapter:
 
     def __init__(self, *, backend: ManagedBackend | None = None,
                  reporter=None, activity_job: str = "daily_cycle",
-                 activity_stage: str = "analyzing", **graph_kwargs):
+                 activity_stage: str = "analyzing",
+                 reuse_completed: bool = False, **graph_kwargs):
         self._kwargs = graph_kwargs
         self._graph: TradingAgentsGraph | None = None
         self._lock = threading.Lock()
@@ -112,7 +119,59 @@ class TradingAgentsPipelineAdapter:
         self._reporter = reporter or NullReporter()
         self._activity_job = activity_job
         self._activity_stage = activity_stage
+        self._reuse_completed = reuse_completed
         self._seq = 0
+
+    @property
+    def _results_dir(self) -> Path:
+        config = self._kwargs.get("config") or DEFAULT_CONFIG
+        return Path(config["results_dir"])
+
+    def _completed_result(
+        self, symbol: str, asof_date: date,
+    ) -> PipelineResult | None:
+        """Load a complete same-day graph result, if one is safely reusable."""
+        if not self._reuse_completed or not re.fullmatch(r"[A-Za-z0-9._-]+", symbol):
+            return None
+        path = (
+            self._results_dir / symbol.upper() / "TradingAgentsStrategy_logs"
+            / f"full_states_log_{asof_date.isoformat()}.json"
+        )
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return None
+            if str(raw.get("company_of_interest", "")).upper() != symbol.upper():
+                return None
+            if raw.get("trade_date") != asof_date.isoformat():
+                return None
+            final_decision = raw.get("final_trade_decision")
+            if not isinstance(final_decision, str) or not final_decision.strip():
+                return None
+            rating = SignalProcessor().process_signal(final_decision)
+            decision, tier = parse_rating_action(rating)
+        except (OSError, ValueError, TypeError):
+            # A missing, partial, or malformed state is not a cache hit. The
+            # graph will run normally and overwrite it with a complete result.
+            return None
+
+        reused_raw = dict(raw)
+        reused_raw["reused_completed_state"] = True
+        reused_raw["reused_completed_state_path"] = str(path)
+        return PipelineResult(
+            symbol=symbol, date=asof_date, decision=decision, raw=reused_raw,
+            rating=rating, tier=tier,
+        )
+
+    def has_completed_results(self, asof_date: date) -> bool:
+        """Whether today has at least one validated result worth resuming."""
+        if not self._reuse_completed:
+            return False
+        pattern = f"*/TradingAgentsStrategy_logs/full_states_log_{asof_date.isoformat()}.json"
+        for path in self._results_dir.glob(pattern):
+            if self._completed_result(path.parent.parent.name, asof_date) is not None:
+                return True
+        return False
 
     def _ensure_graph(self) -> TradingAgentsGraph:
         # Fast path: no lock once the cache is populated.
@@ -135,7 +194,11 @@ class TradingAgentsPipelineAdapter:
         with self._reporter.item(
             self._activity_job, stage=self._activity_stage,
             symbol=symbol, seq=str(self._seq),
-        ):
+        ) as activity:
+            completed = self._completed_result(symbol, asof_date)
+            if completed is not None:
+                activity.outcome = "reused completed analysis"
+                return completed
             # Bring the managed backend up lazily — only when an analysis
             # actually runs, so ticks with no candidates never load a model.
             self._backend.ensure_up()
@@ -201,6 +264,9 @@ class StubPipelineAdapter:
             symbol=symbol, date=asof_date, decision=decision, raw=raw,
             rating=self._ratings.get(symbol, "Hold"), tier=tier,
         )
+
+    def has_completed_results(self, asof_date: date) -> bool:
+        return False
 
     @contextmanager
     def session(self) -> Iterator[StubPipelineAdapter]:

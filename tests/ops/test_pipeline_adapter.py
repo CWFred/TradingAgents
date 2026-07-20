@@ -1,3 +1,4 @@
+import json
 import threading
 from datetime import date
 
@@ -115,6 +116,68 @@ def test_propagate_ensures_backend_up_before_graph(monkeypatch):
     adapter = TradingAgentsPipelineAdapter(backend=backend)
     adapter.propagate("AAPL", date(2026, 6, 30))
     assert events == ["ensure_up", "propagate"]
+    assert backend.ensure_calls == 1
+
+
+def test_propagate_reuses_valid_completed_same_day_result(tmp_path, monkeypatch):
+    """A retry must skip a symbol whose complete risk-reviewed state exists."""
+    asof = date(2026, 7, 20)
+    state_dir = tmp_path / "CFG" / "TradingAgentsStrategy_logs"
+    state_dir.mkdir(parents=True)
+    state_path = state_dir / f"full_states_log_{asof.isoformat()}.json"
+    state_path.write_text(json.dumps({
+        "company_of_interest": "CFG",
+        "trade_date": asof.isoformat(),
+        "final_trade_decision": "## Decision\n\n**Rating**: Underweight\n",
+        "risk_debate_state": {"judge_decision": "reduce exposure"},
+    }), encoding="utf-8")
+
+    def fail_build(self):
+        raise AssertionError("a cached result must not construct the graph")
+
+    monkeypatch.setattr(TradingAgentsPipelineAdapter, "_build_graph", fail_build)
+    backend = _RecordingBackend([])
+    adapter = TradingAgentsPipelineAdapter(
+        backend=backend, reuse_completed=True,
+        config={"results_dir": str(tmp_path)},
+    )
+
+    assert adapter.has_completed_results(asof) is True
+    result = adapter.propagate("CFG", asof)
+
+    assert result.decision is PipelineDecision.TRIM
+    assert result.rating == "Underweight"
+    assert result.raw["reused_completed_state"] is True
+    assert backend.ensure_calls == 0
+
+
+def test_propagate_ignores_invalid_completed_result(tmp_path, monkeypatch):
+    """A partial/mismatched state cannot suppress a fresh graph analysis."""
+    asof = date(2026, 7, 20)
+    state_dir = tmp_path / "CFG" / "TradingAgentsStrategy_logs"
+    state_dir.mkdir(parents=True)
+    (state_dir / f"full_states_log_{asof.isoformat()}.json").write_text(
+        '{"company_of_interest":"OTHER"}', encoding="utf-8",
+    )
+
+    class FakeGraph:
+        def __init__(self, **kwargs):
+            pass
+
+        def propagate(self, ticker, dt, research_memo_context=""):
+            return ({}, "Buy")
+
+    monkeypatch.setattr("ops.pipeline_adapter.TradingAgentsGraph", FakeGraph)
+    backend = _RecordingBackend([])
+    adapter = TradingAgentsPipelineAdapter(
+        backend=backend, reuse_completed=True,
+        config={"results_dir": str(tmp_path)},
+    )
+
+    assert adapter.has_completed_results(asof) is False
+    result = adapter.propagate("CFG", asof)
+
+    assert result.decision is PipelineDecision.BUY
     assert backend.ensure_calls == 1
 
 

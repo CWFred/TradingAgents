@@ -288,7 +288,7 @@ def _wire(broker, journal: Journal, config: OpsConfig, *, backend=None):
         universe_builder=build_composite_universe,
         strategy=PostEarningsMomentumStrategy(config=config),
         pipeline_adapter=TradingAgentsPipelineAdapter(
-            backend=backend, reporter=reporter),
+            backend=backend, reporter=reporter, reuse_completed=True),
         calendar=calendar, journal=journal, config=config,
         resource_paused=lambda: pause_state(
             config.research_pause_flag_path, cleanup_expired=True,
