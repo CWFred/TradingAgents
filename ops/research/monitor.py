@@ -157,27 +157,27 @@ def _check_memo(memo, ctx, *, journal, screen_store, today, now, outcome) -> Non
         if not (catalyst.hard_date and catalyst.expected_date
                 and catalyst.expected_date <= today):
             continue
-        if _recently_notified(
+        if not _recently_notified(
             journal, events.KIND_CATALYST_DUE, now=now,
             memo_id=memo.memo_id, catalyst_index=str(i),
         ):
-            continue
-        outcome.catalyst_due += 1
-        journal.record_event(
-            events.KIND_CATALYST_DUE,
-            events.catalyst_due_payload(
-                memo_id=memo.memo_id, ticker=memo.ticker,
-                catalyst_index=str(i), description=catalyst.description,
-                expected_date=catalyst.expected_date.isoformat(),
-            ),
-            at=now,
-        )
+            outcome.catalyst_due += 1
+            journal.record_event(
+                events.KIND_CATALYST_DUE,
+                events.catalyst_due_payload(
+                    memo_id=memo.memo_id, ticker=memo.ticker,
+                    catalyst_index=str(i), description=catalyst.description,
+                    expected_date=catalyst.expected_date.isoformat(),
+                ),
+                at=now,
+            )
+
         reason = f"catalyst due: {catalyst.description}"
         hit_id = screen_store.enqueue_hit(
             memo.ticker, asof=today,
             payload=_escalation_payload(memo.ticker, today, reason),
         )
-        if hit_id is not None:
+        if hit_id is not None:  # enqueue-dedupe doubles as notify-dedupe
             outcome.escalations += 1
             journal.record_event(
                 events.KIND_RESEARCH_ESCALATION,

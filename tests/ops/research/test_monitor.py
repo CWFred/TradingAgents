@@ -162,10 +162,14 @@ def test_lapsed_hard_catalyst_surfaces_for_event_memo(stores):
     due = _events_of(journal, events.KIND_CATALYST_DUE)
     assert len(due) == 1 and due[0]["payload"]["ticker"] == "SPIN"
     assert [h["symbol"] for h in screen_store.pending_hits()] == ["SPIN"]
-    # Soft/future dates never fire: re-run dedupes too (pending hit already queued).
+    # Same day re-run: catalyst is still due, but no second notification
+    # (journal dedupe) and no second escalation (hit still pending —
+    # enqueue_hit is called again but its own pending-hit dedupe returns None).
     outcome2 = _run(stores)
     assert outcome2.catalyst_due == 0
     assert outcome2.escalations == 0
+    assert len(_events_of(journal, events.KIND_CATALYST_DUE)) == 1
+    assert len(screen_store.pending_hits()) == 1
 
 
 def test_pm_reassess_catalyst_on_value_memo_also_escalates(stores):
