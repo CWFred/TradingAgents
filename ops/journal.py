@@ -233,18 +233,26 @@ class Journal:
             ).fetchone()
         return _from_iso(row[0]) if row is not None else None
 
-    def last_event(self, kind: str) -> dict[str, Any] | None:
-        """Most recent event of `kind` (by insertion id), or None.
+    def last_event(
+        self, kind: str, *, payload_equals: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Most recent matching event of `kind` (by insertion id), or None.
 
         Single indexed row lookup — `ops status` calls this per section
         (service lifecycle, anomaly kinds) and must not scan the whole
-        events table Python-side."""
+        events table Python-side. Optional payload filters use the same safe
+        identifier-only JSON paths as :meth:`count_events`.
+        """
+        sql = "SELECT at, kind, payload FROM events WHERE kind = ?"
+        params: list[Any] = [kind]
+        for key, val in (payload_equals or {}).items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise ValueError(f"unsafe payload key for last_event: {key!r}")
+            sql += f" AND json_extract(payload, '$.{key}') = ?"
+            params.append(val)
+        sql += " ORDER BY id DESC LIMIT 1"
         with self._lock:
-            row = self._conn.execute(
-                "SELECT at, kind, payload FROM events WHERE kind = ?"
-                " ORDER BY id DESC LIMIT 1",
-                (kind,),
-            ).fetchone()
+            row = self._conn.execute(sql, params).fetchone()
         if row is None:
             return None
         return {

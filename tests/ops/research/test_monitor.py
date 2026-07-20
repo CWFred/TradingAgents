@@ -74,13 +74,13 @@ def _prices(close):
     return lambda symbol: PriceContext(closes={TODAY: Decimal(str(close))})
 
 
-def _run(stores, *, close=9.5, facts_fetcher=None):
+def _run(stores, *, close=9.5, facts_fetcher=None, today=TODAY, now=NOW):
     memo_store, screen_store, journal = stores
     return monitor_memos(
         memo_store=memo_store, screen_store=screen_store, journal=journal,
         price_fetcher=_prices(close),
         facts_fetcher=facts_fetcher or (lambda t: (_ for _ in ()).throw(AssertionError("no facts needed"))),
-        today=TODAY, now=NOW,
+        today=today, now=now,
     )
 
 
@@ -170,6 +170,76 @@ def test_lapsed_hard_catalyst_surfaces_for_event_memo(stores):
     assert outcome2.escalations == 0
     assert len(_events_of(journal, events.KIND_CATALYST_DUE)) == 1
     assert len(screen_store.pending_hits()) == 1
+
+
+def test_researched_catalyst_escalation_is_not_requeued(stores):
+    memo_store, screen_store, journal = stores
+    memo_store.save(_memo(catalysts=[Catalyst(
+        description="scheduled reassessment", expected_date=TODAY, hard_date=True,
+    )]))
+    _run(stores)
+    first_hit = screen_store.pending_hits()[0]
+    screen_store.mark_researched(first_hit["id"])
+
+    outcome = _run(stores)
+
+    assert outcome.escalations == 0
+    assert screen_store.pending_hits() == []
+    assert len(_events_of(journal, events.KIND_RESEARCH_ESCALATION)) == 1
+
+
+def test_failed_catalyst_escalation_is_retried(stores):
+    memo_store, screen_store, journal = stores
+    memo_store.save(_memo(catalysts=[Catalyst(
+        description="scheduled reassessment", expected_date=TODAY, hard_date=True,
+    )]))
+    _run(stores)
+    first_hit = screen_store.pending_hits()[0]
+    screen_store.mark_failed(first_hit["id"])
+
+    outcome = _run(stores)
+
+    assert outcome.escalations == 1
+    assert len(screen_store.pending_hits()) == 1
+    assert screen_store.pending_hits()[0]["id"] != first_hit["id"]
+    assert len(_events_of(journal, events.KIND_RESEARCH_ESCALATION)) == 2
+
+
+def test_multiple_due_catalysts_are_aggregated_into_one_hit(stores):
+    memo_store, screen_store, journal = stores
+    memo_store.save(_memo(catalysts=[
+        Catalyst(description="first event", expected_date=TODAY, hard_date=True),
+        Catalyst(description="second event", expected_date=TODAY, hard_date=True),
+    ]))
+
+    outcome = _run(stores)
+
+    assert outcome.catalyst_due == 2
+    assert outcome.escalations == 1
+    hit = screen_store.pending_hits()[0]
+    description = hit["payload"]["triggers"][0]["description"]
+    assert "first event" in description
+    assert "second event" in description
+
+
+def test_newly_due_catalyst_queues_after_prior_set_was_researched(stores):
+    memo_store, screen_store, _ = stores
+    tomorrow = TODAY + timedelta(days=1)
+    memo_store.save(_memo(catalysts=[
+        Catalyst(description="first event", expected_date=TODAY, hard_date=True),
+        Catalyst(description="second event", expected_date=tomorrow, hard_date=True),
+    ]))
+    _run(stores)
+    first_hit = screen_store.pending_hits()[0]
+    screen_store.mark_researched(first_hit["id"])
+
+    outcome = _run(stores, today=tomorrow, now=NOW + timedelta(days=1))
+
+    assert outcome.catalyst_due == 1
+    assert outcome.escalations == 1
+    description = screen_store.pending_hits()[0]["payload"]["triggers"][0]["description"]
+    assert "first event" in description
+    assert "second event" in description
 
 
 def test_pm_reassess_catalyst_on_value_memo_also_escalates(stores):

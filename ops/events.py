@@ -645,10 +645,14 @@ def catalyst_due_payload(
 
 def research_escalation_payload(
     *, ticker: str, memo_id: str, reason: str, hit_id: int | None,
+    dedupe_key: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "ticker": ticker, "memo_id": memo_id, "reason": reason, "hit_id": hit_id,
     }
+    if dedupe_key is not None:
+        payload["dedupe_key"] = dedupe_key
+    return payload
 
 
 def research_monitor_run_payload(

@@ -18,7 +18,7 @@ so that:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Literal
 
@@ -251,7 +251,9 @@ class PortfolioDecision(BaseModel):
     @field_validator("reassess_after", mode="before")
     @classmethod
     def _nullish_reassess_date_to_none(cls, v):
-        if isinstance(v, (date, datetime)):
+        if isinstance(v, datetime):
+            return v.date()
+        if isinstance(v, date):
             return v
         if isinstance(v, str):
             coerced = _coerce_optional_float(v)
@@ -265,17 +267,30 @@ class PortfolioDecision(BaseModel):
                 # null it out rather than let Pydantic's own strict `date`
                 # coercion raise a ValidationError (#reassess-drain).
                 return None
-        return v
+        # The field is optional enrichment. A weak model returning an object,
+        # list, or number here must not discard the entire PM decision.
+        return None
 
-    @field_validator("reassess_after")
-    @classmethod
-    def _bound_reassess_after(cls, v):
-        if v is None:
-            return v
-        today = datetime.now(timezone.utc).date()
-        if v < today or v > today + timedelta(days=_MAX_REASSESS_HORIZON_DAYS):
-            return None
-        return v
+
+def normalize_pm_reassessment(
+    decision: PortfolioDecision, *, as_of: date,
+) -> PortfolioDecision:
+    """Bound a PM reassessment to the graph's analysis date.
+
+    ``PortfolioDecision`` is also constructed by LangChain before the agent
+    node sees graph state, so a field validator cannot know ``trade_date``.
+    Keep parsing in the schema and apply the time window here, where the
+    caller can supply the actual as-of date used by historical and live runs.
+    """
+    reassess_after = decision.reassess_after
+    if (
+        reassess_after is not None
+        and as_of <= reassess_after <= as_of + timedelta(days=_MAX_REASSESS_HORIZON_DAYS)
+    ):
+        return decision
+    if reassess_after is None and decision.reassess_trigger is None:
+        return decision
+    return decision.model_copy(update={"reassess_after": None, "reassess_trigger": None})
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:

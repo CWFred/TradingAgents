@@ -54,6 +54,15 @@ def test_mark_researched_removes_from_queue_and_allows_requeue(store):
     assert len(store.pending_hits()) == 1
 
 
+def test_hit_status_tracks_lifecycle_and_missing_ids(store):
+    store.record_run(asof=ASOF, universe_size=100, results=[_result("AAA")])
+    hit_id = store.pending_hits()[0]["id"]
+    assert store.hit_status(hit_id) == "pending"
+    store.mark_researched(hit_id)
+    assert store.hit_status(hit_id) == "researched"
+    assert store.hit_status(hit_id + 1000) is None
+
+
 def test_mark_expired(store):
     store.record_run(asof=ASOF, universe_size=100, results=[_result("AAA")])
     store.mark_expired(store.pending_hits()[0]["id"])

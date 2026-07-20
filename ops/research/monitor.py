@@ -153,10 +153,12 @@ def _check_memo(memo, ctx, *, journal, screen_store, today, now, outcome) -> Non
     catalysts = list(memo.catalysts)
     if memo.event_block is not None:
         catalysts += list(memo.event_block.key_dates)
+    due_catalysts = []
     for i, catalyst in enumerate(catalysts):
         if not (catalyst.hard_date and catalyst.expected_date
                 and catalyst.expected_date <= today):
             continue
+        due_catalysts.append((i, catalyst))
         if not _recently_notified(
             journal, events.KIND_CATALYST_DUE, now=now,
             memo_id=memo.memo_id, catalyst_index=str(i),
@@ -172,21 +174,47 @@ def _check_memo(memo, ctx, *, journal, screen_store, today, now, outcome) -> Non
                 at=now,
             )
 
-        reason = f"catalyst due: {catalyst.description}"
-        hit_id = screen_store.enqueue_hit(
-            memo.ticker, asof=today,
-            payload=_escalation_payload(memo.ticker, today, reason),
+    if not due_catalysts:
+        return
+
+    # The set grows when another hard date arrives. Key the research attempt
+    # to that set so a completed re-analysis is one-shot, while a later newly
+    # due catalyst produces a fresh aggregate hit.
+    dedupe_key = "catalysts:" + "|".join(
+        f"{i}@{catalyst.expected_date.isoformat()}"
+        for i, catalyst in due_catalysts
+    )
+    prior = journal.last_event(
+        events.KIND_RESEARCH_ESCALATION,
+        payload_equals={"memo_id": memo.memo_id, "dedupe_key": dedupe_key},
+    )
+    if prior is not None:
+        prior_hit_id = prior["payload"].get("hit_id")
+        prior_status = (
+            screen_store.hit_status(prior_hit_id)
+            if isinstance(prior_hit_id, int)
+            else None
         )
-        if hit_id is not None:  # enqueue-dedupe doubles as notify-dedupe
-            outcome.escalations += 1
-            journal.record_event(
-                events.KIND_RESEARCH_ESCALATION,
-                events.research_escalation_payload(
-                    ticker=memo.ticker, memo_id=memo.memo_id,
-                    reason=reason, hit_id=hit_id,
-                ),
-                at=now,
-            )
+        if prior_status in {"pending", "researched"}:
+            return
+
+    descriptions = [catalyst.description for _, catalyst in due_catalysts]
+    label = "catalyst due" if len(descriptions) == 1 else "catalysts due"
+    reason = f"{label}: {'; '.join(descriptions)}"
+    hit_id = screen_store.enqueue_hit(
+        memo.ticker, asof=today,
+        payload=_escalation_payload(memo.ticker, today, reason),
+    )
+    if hit_id is not None:
+        outcome.escalations += 1
+        journal.record_event(
+            events.KIND_RESEARCH_ESCALATION,
+            events.research_escalation_payload(
+                ticker=memo.ticker, memo_id=memo.memo_id,
+                reason=reason, hit_id=hit_id, dedupe_key=dedupe_key,
+            ),
+            at=now,
+        )
 
 
 def monitor_memos(

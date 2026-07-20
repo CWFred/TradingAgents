@@ -421,6 +421,30 @@ def test_last_event_returns_most_recent_of_kind(tmp_path):
     assert isinstance(last["at"], datetime) and last["at"].tzinfo is not None
 
 
+def test_last_event_filters_by_payload(tmp_path):
+    j = Journal(str(tmp_path / "j.sqlite"))
+    j.record_event("research_escalation", {"memo_id": "m-1", "hit_id": 1})
+    j.record_event("research_escalation", {"memo_id": "m-2", "hit_id": 2})
+    j.record_event("research_escalation", {"memo_id": "m-1", "hit_id": 3})
+
+    last = j.last_event(
+        "research_escalation", payload_equals={"memo_id": "m-1"},
+    )
+
+    assert last is not None
+    assert last["payload"]["hit_id"] == 3
+
+
+def test_last_event_rejects_unsafe_payload_keys(tmp_path):
+    import pytest
+
+    j = Journal(str(tmp_path / "j.sqlite"))
+    with pytest.raises(ValueError):
+        j.last_event(
+            "fill", payload_equals={"side') OR 1=1 --": "BUY"},
+        )
+
+
 def test_journal_path_property(tmp_path):
     """`ops status` prints the journal it actually opened (which may be a
     --journal override, not config.journal_path), so the path must be

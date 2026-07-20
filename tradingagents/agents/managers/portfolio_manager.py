@@ -10,7 +10,13 @@ back gracefully to free-text generation.
 
 from __future__ import annotations
 
-from tradingagents.agents.schemas import PortfolioDecision, render_pm_decision
+from datetime import date
+
+from tradingagents.agents.schemas import (
+    PortfolioDecision,
+    normalize_pm_reassessment,
+    render_pm_decision,
+)
 from tradingagents.agents.utils.agent_utils import (
     get_instrument_context_from_state,
     get_language_instruction,
@@ -26,6 +32,12 @@ def create_portfolio_manager(llm):
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
+        try:
+            analysis_date = date.fromisoformat(str(state["trade_date"]))
+        except (KeyError, TypeError, ValueError):
+            # Preserve compatibility with bare programmatic states created by
+            # older callers; real graph states always carry trade_date.
+            analysis_date = date.today()
 
         history = state["risk_debate_state"]["history"]
         risk_debate_state = state["risk_debate_state"]
@@ -53,6 +65,7 @@ def create_portfolio_manager(llm):
 - **Sell**: Exit position or avoid entry
 
 **Context:**
+- The analysis date is {analysis_date.isoformat()}.
 - Research Manager's investment plan: **{research_plan}**
 - Trader's transaction proposal: **{trader_plan}**
 {lessons_line}
@@ -67,9 +80,13 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             structured_llm,
             llm,
             prompt,
-            render_pm_decision,
+            lambda decision: render_pm_decision(
+                normalize_pm_reassessment(decision, as_of=analysis_date)
+            ),
             "Portfolio Manager",
         )
+        if decision_obj is not None:
+            decision_obj = normalize_pm_reassessment(decision_obj, as_of=analysis_date)
         reassess_after = (
             decision_obj.reassess_after.isoformat()
             if decision_obj is not None and decision_obj.reassess_after is not None

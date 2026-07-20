@@ -1,13 +1,17 @@
 """Tests for TradingMemoryLog — storage, deferred reflection, PM injection, legacy removal."""
 
-from unittest.mock import MagicMock, patch
 from datetime import date
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
 from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
-from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
+from tradingagents.agents.schemas import (
+    PortfolioDecision,
+    PortfolioRating,
+    normalize_pm_reassessment,
+)
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.graph.propagation import Propagator
 from tradingagents.graph.reflection import Reflector
@@ -60,10 +64,11 @@ def _price_df(prices):
     return pd.DataFrame({"Close": prices})
 
 
-def _make_pm_state(past_context=""):
+def _make_pm_state(past_context="", trade_date="2026-07-20"):
     """Minimal AgentState dict for portfolio_manager_node."""
     return {
         "company_of_interest": "NVDA",
+        "trade_date": trade_date,
         "past_context": past_context,
         "risk_debate_state": {
             "history": "Risk debate history.",
@@ -757,20 +762,43 @@ class TestPortfolioManagerInjection:
             rating=PortfolioRating.HOLD,
             executive_summary="s",
             investment_thesis="t",
-            reassess_after=date(2020, 1, 1),
+            reassess_after=date(2026, 7, 19),
         )
-        assert decision.reassess_after is None
+        normalized = normalize_pm_reassessment(decision, as_of=date(2026, 7, 20))
+        assert normalized.reassess_after is None
+        assert normalized.reassess_trigger is None
 
     def test_pm_reassess_after_too_far_out_is_nulled(self):
-        from datetime import timedelta
-        far = date.today() + timedelta(days=400)
         decision = PortfolioDecision(
             rating=PortfolioRating.HOLD,
             executive_summary="s",
             investment_thesis="t",
-            reassess_after=far,
+            reassess_after=date(2027, 8, 24),
         )
-        assert decision.reassess_after is None
+        normalized = normalize_pm_reassessment(decision, as_of=date(2026, 7, 20))
+        assert normalized.reassess_after is None
+
+    def test_pm_reassess_after_is_relative_to_analysis_date(self):
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after=date(2026, 1, 10),
+            reassess_trigger="January catalyst",
+        )
+        llm = _structured_pm_llm({}, decision)
+        result = create_portfolio_manager(llm)(
+            _make_pm_state(trade_date="2026-01-01")
+        )
+        assert result["pm_reassess_after"] == "2026-01-10"
+        assert result["pm_reassess_trigger"] == "January catalyst"
+
+    def test_pm_prompt_includes_analysis_date(self):
+        captured = {}
+        create_portfolio_manager(_structured_pm_llm(captured))(
+            _make_pm_state(trade_date="2026-01-01")
+        )
+        assert "analysis date is 2026-01-01" in captured["prompt"]
 
     def test_pm_reassess_after_malformed_string_is_nulled_not_raised(self):
         """A non-sentinel, non-ISO string (e.g. an LLM writing "Q3 2026"
@@ -793,6 +821,16 @@ class TestPortfolioManagerInjection:
             executive_summary="s",
             investment_thesis="t",
             reassess_after="2026-08-32",
+        )
+        assert decision.reassess_after is None
+
+    @pytest.mark.parametrize("malformed", [20260803, {"date": "2026-08-03"}, []])
+    def test_pm_reassess_after_wrong_json_type_is_nulled(self, malformed):
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after=malformed,
         )
         assert decision.reassess_after is None
 
