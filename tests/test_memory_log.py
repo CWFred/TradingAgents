@@ -1,12 +1,17 @@
 """Tests for TradingMemoryLog — storage, deferred reflection, PM injection, legacy removal."""
 
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
 from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
-from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
+from tradingagents.agents.schemas import (
+    PortfolioDecision,
+    PortfolioRating,
+    normalize_pm_reassessment,
+)
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.graph.propagation import Propagator
 from tradingagents.graph.reflection import Reflector
@@ -59,10 +64,11 @@ def _price_df(prices):
     return pd.DataFrame({"Close": prices})
 
 
-def _make_pm_state(past_context=""):
+def _make_pm_state(past_context="", trade_date="2026-07-20"):
     """Minimal AgentState dict for portfolio_manager_node."""
     return {
         "company_of_interest": "NVDA",
+        "trade_date": trade_date,
         "past_context": past_context,
         "risk_debate_state": {
             "history": "Risk debate history.",
@@ -726,6 +732,137 @@ class TestPortfolioManagerInjection:
         assert "**Investment Thesis**: AI capex cycle" in md
         assert "**Price Target**: 215.0" in md
         assert "**Time Horizon**: 3-6 months" in md
+
+    def test_pm_reassess_fields_render_when_set(self):
+        captured = {}
+        decision = PortfolioDecision(
+            rating=PortfolioRating.UNDERWEIGHT,
+            executive_summary="Trim ahead of the binary catalyst.",
+            investment_thesis="Explosion risk is not priced in at this multiple.",
+            reassess_after=date(2026, 8, 3),
+            reassess_trigger="Starship Flight 13 outcome",
+        )
+        llm = _structured_pm_llm(captured, decision)
+        pm_node = create_portfolio_manager(llm)
+        result = pm_node(_make_pm_state())
+        md = result["final_trade_decision"]
+        assert "**Reassess After**: 2026-08-03" in md
+        assert "**Reassess Trigger**: Starship Flight 13 outcome" in md
+
+    def test_pm_reassess_fields_omitted_when_unset(self):
+        captured = {}
+        llm = _structured_pm_llm(captured)
+        pm_node = create_portfolio_manager(llm)
+        md = pm_node(_make_pm_state())["final_trade_decision"]
+        assert "Reassess After" not in md
+        assert "Reassess Trigger" not in md
+
+    def test_pm_reassess_after_in_the_past_is_nulled(self):
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after=date(2026, 7, 19),
+        )
+        normalized = normalize_pm_reassessment(decision, as_of=date(2026, 7, 20))
+        assert normalized.reassess_after is None
+        assert normalized.reassess_trigger is None
+
+    def test_pm_reassess_after_too_far_out_is_nulled(self):
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after=date(2027, 8, 24),
+        )
+        normalized = normalize_pm_reassessment(decision, as_of=date(2026, 7, 20))
+        assert normalized.reassess_after is None
+
+    def test_pm_reassess_after_is_relative_to_analysis_date(self):
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after=date(2026, 1, 10),
+            reassess_trigger="January catalyst",
+        )
+        llm = _structured_pm_llm({}, decision)
+        result = create_portfolio_manager(llm)(
+            _make_pm_state(trade_date="2026-01-01")
+        )
+        assert result["pm_reassess_after"] == "2026-01-10"
+        assert result["pm_reassess_trigger"] == "January catalyst"
+
+    def test_pm_prompt_includes_analysis_date(self):
+        captured = {}
+        create_portfolio_manager(_structured_pm_llm(captured))(
+            _make_pm_state(trade_date="2026-01-01")
+        )
+        assert "analysis date is 2026-01-01" in captured["prompt"]
+
+    def test_pm_reassess_after_malformed_string_is_nulled_not_raised(self):
+        """A non-sentinel, non-ISO string (e.g. an LLM writing "Q3 2026"
+        instead of a YYYY-MM-DD date) must not raise ValidationError — that
+        would otherwise propagate up through invoke_structured_with_result
+        and silently discard the entire structured PM decision."""
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after="Q3 2026",
+        )
+        assert decision.reassess_after is None
+
+    def test_pm_reassess_after_invalid_calendar_date_string_is_nulled(self):
+        """A string that looks ISO-shaped but names an invalid calendar date
+        (August has 31 days) must also null out rather than raise."""
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after="2026-08-32",
+        )
+        assert decision.reassess_after is None
+
+    @pytest.mark.parametrize("malformed", [20260803, {"date": "2026-08-03"}, []])
+    def test_pm_reassess_after_wrong_json_type_is_nulled(self, malformed):
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after=malformed,
+        )
+        assert decision.reassess_after is None
+
+    def test_pm_state_carries_reassess_fields_when_set(self):
+        decision = PortfolioDecision(
+            rating=PortfolioRating.UNDERWEIGHT,
+            executive_summary="Trim ahead of the binary catalyst.",
+            investment_thesis="Explosion risk is not priced in at this multiple.",
+            reassess_after=date(2026, 8, 3),
+            reassess_trigger="Starship Flight 13 outcome",
+        )
+        llm = _structured_pm_llm({}, decision)
+        pm_node = create_portfolio_manager(llm)
+        result = pm_node(_make_pm_state())
+        assert result["pm_reassess_after"] == "2026-08-03"
+        assert result["pm_reassess_trigger"] == "Starship Flight 13 outcome"
+
+    def test_pm_state_reassess_fields_empty_when_unset(self):
+        llm = _structured_pm_llm({})
+        pm_node = create_portfolio_manager(llm)
+        result = pm_node(_make_pm_state())
+        assert result["pm_reassess_after"] == ""
+        assert result["pm_reassess_trigger"] == ""
+
+    def test_pm_state_reassess_fields_empty_on_freetext_fallback(self):
+        llm = MagicMock()
+        llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
+        llm.invoke.return_value = MagicMock(content="**Rating**: Hold")
+        pm_node = create_portfolio_manager(llm)
+        result = pm_node(_make_pm_state())
+        assert result["pm_reassess_after"] == ""
+        assert result["pm_reassess_trigger"] == ""
 
     def test_pm_falls_back_to_freetext_when_structured_unavailable(self):
         """If a provider does not support with_structured_output, the agent

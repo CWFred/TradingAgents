@@ -5,7 +5,9 @@ Positions and memos are watched MECHANICALLY; humans get exceptions:
   - machine-checkable falsifiers evaluated against fresh prices/facts
     (ops/research/metrics.py — stateless, journal is the only memory);
   - a -30% drawdown escalates even when no falsifier trips;
-  - lapsed hard-dated catalysts surface for event-sleeve memos;
+  - a lapsed hard-dated catalyst (any thesis type — including one the
+    Portfolio Manager scheduled at vetting time) escalates like a tripped
+    falsifier;
   - due_for_resolution memos push the memo's exit checklist;
   - every escalation queues a re-research hit for the Phase B brain
     (ops research run picks it up) — the monitor NEVER invokes an LLM.
@@ -148,19 +150,19 @@ def _check_memo(memo, ctx, *, journal, screen_store, today, now, outcome) -> Non
                 at=now,
             )
 
-    if memo.thesis_type == "event":
-        catalysts = list(memo.catalysts)
-        if memo.event_block is not None:
-            catalysts += list(memo.event_block.key_dates)
-        for i, catalyst in enumerate(catalysts):
-            if not (catalyst.hard_date and catalyst.expected_date
-                    and catalyst.expected_date <= today):
-                continue
-            if _recently_notified(
-                journal, events.KIND_CATALYST_DUE, now=now,
-                memo_id=memo.memo_id, catalyst_index=str(i),
-            ):
-                continue
+    catalysts = list(memo.catalysts)
+    if memo.event_block is not None:
+        catalysts += list(memo.event_block.key_dates)
+    due_catalysts = []
+    for i, catalyst in enumerate(catalysts):
+        if not (catalyst.hard_date and catalyst.expected_date
+                and catalyst.expected_date <= today):
+            continue
+        due_catalysts.append((i, catalyst))
+        if not _recently_notified(
+            journal, events.KIND_CATALYST_DUE, now=now,
+            memo_id=memo.memo_id, catalyst_index=str(i),
+        ):
             outcome.catalyst_due += 1
             journal.record_event(
                 events.KIND_CATALYST_DUE,
@@ -171,6 +173,48 @@ def _check_memo(memo, ctx, *, journal, screen_store, today, now, outcome) -> Non
                 ),
                 at=now,
             )
+
+    if not due_catalysts:
+        return
+
+    # The set grows when another hard date arrives. Key the research attempt
+    # to that set so a completed re-analysis is one-shot, while a later newly
+    # due catalyst produces a fresh aggregate hit.
+    dedupe_key = "catalysts:" + "|".join(
+        f"{i}@{catalyst.expected_date.isoformat()}"
+        for i, catalyst in due_catalysts
+    )
+    prior = journal.last_event(
+        events.KIND_RESEARCH_ESCALATION,
+        payload_equals={"memo_id": memo.memo_id, "dedupe_key": dedupe_key},
+    )
+    if prior is not None:
+        prior_hit_id = prior["payload"].get("hit_id")
+        prior_status = (
+            screen_store.hit_status(prior_hit_id)
+            if isinstance(prior_hit_id, int)
+            else None
+        )
+        if prior_status in {"pending", "researched"}:
+            return
+
+    descriptions = [catalyst.description for _, catalyst in due_catalysts]
+    label = "catalyst due" if len(descriptions) == 1 else "catalysts due"
+    reason = f"{label}: {'; '.join(descriptions)}"
+    hit_id = screen_store.enqueue_hit(
+        memo.ticker, asof=today,
+        payload=_escalation_payload(memo.ticker, today, reason),
+    )
+    if hit_id is not None:
+        outcome.escalations += 1
+        journal.record_event(
+            events.KIND_RESEARCH_ESCALATION,
+            events.research_escalation_payload(
+                ticker=memo.ticker, memo_id=memo.memo_id,
+                reason=reason, hit_id=hit_id, dedupe_key=dedupe_key,
+            ),
+            at=now,
+        )
 
 
 def monitor_memos(

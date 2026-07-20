@@ -280,6 +280,21 @@ def test_stub_adapter_default_rating_is_hold():
     assert result.rating == "Hold"
 
 
+def test_stub_adapter_reassess_defaults_empty():
+    result = StubPipelineAdapter().propagate("X", date(2026, 7, 9))
+    assert result.raw["pm_reassess_after"] == ""
+    assert result.raw["pm_reassess_trigger"] == ""
+
+
+def test_stub_adapter_reassess_injectable_per_symbol():
+    stub = StubPipelineAdapter(reassess={"SPCX": ("2026-08-03", "Starship Flight 13 outcome")})
+    result = stub.propagate("SPCX", date(2026, 7, 9))
+    assert result.raw["pm_reassess_after"] == "2026-08-03"
+    assert result.raw["pm_reassess_trigger"] == "Starship Flight 13 outcome"
+    other = stub.propagate("OTHER", date(2026, 7, 9))
+    assert other.raw["pm_reassess_after"] == ""
+
+
 def test_stub_session_is_noop():
     stub = StubPipelineAdapter({})
     with stub.session():

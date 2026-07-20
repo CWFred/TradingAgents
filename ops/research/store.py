@@ -158,6 +158,14 @@ class ScreenStore:
             for r in rows
         ]
 
+    def hit_status(self, hit_id: int) -> str | None:
+        """Return one hit's lifecycle status, or None when it no longer exists."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT status FROM screen_hits WHERE id = ?", (hit_id,),
+            ).fetchone()
+        return str(row["status"]) if row is not None else None
+
     def _set_status(self, hit_id: int, status: str) -> None:
         with self._lock, closing(self._connect()) as conn, conn:
             cur = conn.execute(

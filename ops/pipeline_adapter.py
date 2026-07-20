@@ -242,17 +242,22 @@ class StubPipelineAdapter:
         decisions: dict[str, PipelineDecision] | None = None,
         ratings: dict[str, str] | None = None,
         tiers: dict[str, str] | None = None,
+        reassess: dict[str, tuple[str, str]] | None = None,
     ):
         self._decisions = decisions or {}
         self._ratings = ratings or {}
         self._tiers = tiers or {}
+        self._reassess = reassess or {}
 
     def propagate(
         self, symbol: str, asof_date: date, research_context: str = "",
     ) -> PipelineResult:
         decision = self._decisions.get(symbol, PipelineDecision.HOLD)
+        reassess_after, reassess_trigger = self._reassess.get(symbol, ("", ""))
         raw = {
             "final_trade_decision": "",
+            "pm_reassess_after": reassess_after,
+            "pm_reassess_trigger": reassess_trigger,
             "risk_debate_state": {
                 "history": f"stub risk debate for {symbol}",
                 "judge_decision": "stub judge decision",

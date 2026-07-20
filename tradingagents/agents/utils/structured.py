@@ -46,6 +46,39 @@ def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Any | None:
         return None
 
 
+def invoke_structured_with_result(
+    structured_llm: Any | None,
+    plain_llm: Any,
+    prompt: Any,
+    render: Callable[[T], str],
+    agent_name: str,
+) -> tuple[str, T | None]:
+    """Like the markdown-only path below, but also returns the parsed object.
+
+    Some agents (the Portfolio Manager) need a typed field that doesn't
+    belong in the rendered markdown. The second return value is None
+    whenever the free-text fallback fired — there is no structured object
+    on that path.
+    """
+    if structured_llm is not None:
+        try:
+            result = structured_llm.invoke(prompt)
+            if result is None:
+                # A thinking model can answer in plain text instead of calling
+                # the tool, leaving the parser with nothing to return. Treat it
+                # as a structured miss and fall back, with a clear reason.
+                raise ValueError("structured output returned no parsed result")
+            return render(result), result
+        except Exception as exc:
+            logger.warning(
+                "%s: structured-output invocation failed (%s); retrying once as free text",
+                agent_name, exc,
+            )
+
+    response = plain_llm.invoke(prompt)
+    return response.content, None
+
+
 def invoke_structured_or_freetext(
     structured_llm: Any | None,
     plain_llm: Any,
@@ -60,20 +93,5 @@ def invoke_structured_or_freetext(
     shape). The same value is forwarded to the free-text path so the
     fallback sees the same input the structured call did.
     """
-    if structured_llm is not None:
-        try:
-            result = structured_llm.invoke(prompt)
-            if result is None:
-                # A thinking model can answer in plain text instead of calling
-                # the tool, leaving the parser with nothing to return. Treat it
-                # as a structured miss and fall back, with a clear reason.
-                raise ValueError("structured output returned no parsed result")
-            return render(result)
-        except Exception as exc:
-            logger.warning(
-                "%s: structured-output invocation failed (%s); retrying once as free text",
-                agent_name, exc,
-            )
-
-    response = plain_llm.invoke(prompt)
-    return response.content
+    rendered, _ = invoke_structured_with_result(structured_llm, plain_llm, prompt, render, agent_name)
+    return rendered

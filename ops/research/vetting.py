@@ -29,7 +29,7 @@ from __future__ import annotations
 import gc
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +40,7 @@ from ops.research.memo_validation import (
 )
 from tradingagents.agents.utils.structured import bind_structured
 from tradingagents.memos.schema import (
+    Catalyst,
     ConvictionTier,
     Falsifier,
     Memo,
@@ -189,6 +190,16 @@ def vet_memo(
     conviction_before = memo.conviction_tier
     memo.falsifiers = memo.falsifiers + added
     memo.conviction_tier = tier
+    reassess_after = str(result.raw.get("pm_reassess_after") or "")
+    if reassess_after:
+        reassess_trigger = str(result.raw.get("pm_reassess_trigger") or "") or "PM-scheduled reassessment"
+        memo.catalysts = memo.catalysts + [
+            Catalyst(
+                description=reassess_trigger,
+                expected_date=date.fromisoformat(reassess_after),
+                hard_date=True,
+            )
+        ]
     memo.status = "open"
     memo.vetting = VettingResult(
         verdict="confirm", rating=rating,

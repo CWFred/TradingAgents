@@ -18,6 +18,7 @@ so that:
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Literal
 
@@ -35,6 +36,10 @@ def _coerce_optional_float(value):
         return None
     return value
 
+
+# A reassess date must be a real near-term recheck, not a hallucinated
+# far-future or already-past one — null it out rather than fail the call.
+_MAX_REASSESS_HORIZON_DAYS = 365
 
 # ---------------------------------------------------------------------------
 # Shared rating types
@@ -221,11 +226,71 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    reassess_after: date | None = Field(
+        default=None,
+        description=(
+            "If a specific future date or event should trigger automatic "
+            "re-analysis of this position (e.g. a known binary catalyst — "
+            "earnings, a launch, an FDA date), give that date in YYYY-MM-DD "
+            "form. Null if no scheduled recheck is warranted."
+        ),
+    )
+    reassess_trigger: str | None = Field(
+        default=None,
+        description=(
+            "One-line description of what to check for on reassess_after, "
+            "e.g. 'Starship Flight 13 outcome'. Null if reassess_after is null."
+        ),
+    )
 
     @field_validator("price_target", mode="before")
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
+
+    @field_validator("reassess_after", mode="before")
+    @classmethod
+    def _nullish_reassess_date_to_none(cls, v):
+        if isinstance(v, datetime):
+            return v.date()
+        if isinstance(v, date):
+            return v
+        if isinstance(v, str):
+            coerced = _coerce_optional_float(v)
+            if coerced is None:
+                return None
+            try:
+                return date.fromisoformat(coerced.strip())
+            except ValueError:
+                # A malformed, non-sentinel date string from the LLM (e.g.
+                # "Q3 2026") must never fail the whole structured call —
+                # null it out rather than let Pydantic's own strict `date`
+                # coercion raise a ValidationError (#reassess-drain).
+                return None
+        # The field is optional enrichment. A weak model returning an object,
+        # list, or number here must not discard the entire PM decision.
+        return None
+
+
+def normalize_pm_reassessment(
+    decision: PortfolioDecision, *, as_of: date,
+) -> PortfolioDecision:
+    """Bound a PM reassessment to the graph's analysis date.
+
+    ``PortfolioDecision`` is also constructed by LangChain before the agent
+    node sees graph state, so a field validator cannot know ``trade_date``.
+    Keep parsing in the schema and apply the time window here, where the
+    caller can supply the actual as-of date used by historical and live runs.
+    """
+    reassess_after = decision.reassess_after
+    if (
+        reassess_after is not None
+        and as_of <= reassess_after <= as_of + timedelta(days=_MAX_REASSESS_HORIZON_DAYS)
+    ):
+        return decision
+    if reassess_after is None and decision.reassess_trigger is None:
+        return decision
+    return decision.model_copy(update={"reassess_after": None, "reassess_trigger": None})
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:
@@ -247,6 +312,10 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if decision.reassess_after is not None:
+        parts.extend(["", f"**Reassess After**: {decision.reassess_after.isoformat()}"])
+        if decision.reassess_trigger:
+            parts.extend(["", f"**Reassess Trigger**: {decision.reassess_trigger}"])
     return "\n".join(parts)
 
 
