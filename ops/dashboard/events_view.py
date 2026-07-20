@@ -38,12 +38,33 @@ def _render_activity_started(p: dict[str, Any]) -> str:
     return f"▶ {desc}"
 
 
+def _fmt_duration(seconds: Any) -> str:
+    """Render elapsed seconds compactly without making humans do division."""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError, OverflowError):
+        return f"{seconds}s"
+    if value < 60:
+        return f"{seconds}s"
+
+    total = max(0, round(value))
+    hours, remainder = divmod(total, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {remaining_seconds}s"
+    return f"{minutes}m {remaining_seconds}s"
+
+
 def _render_activity_finished(p: dict[str, Any]) -> str:
     desc = _activity_desc(p)
     dur = p.get("duration_s")
+    rendered_duration = _fmt_duration(dur) if dur is not None else None
     if p.get("ok"):
-        return f"✓ {desc} ({dur}s)" if dur is not None else f"✓ {desc}"
-    return f"✗ {desc} — failed after {dur}s" if dur is not None else f"✗ {desc} — failed"
+        return f"✓ {desc} ({rendered_duration})" if dur is not None else f"✓ {desc}"
+    return (
+        f"✗ {desc} — failed after {rendered_duration}"
+        if dur is not None else f"✗ {desc} — failed"
+    )
 
 
 def _dec_display(v: Any, dp: int, *, strip: bool) -> str:
