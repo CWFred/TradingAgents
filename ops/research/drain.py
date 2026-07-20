@@ -16,6 +16,7 @@ continues — one bad name must not strand the queue.
 """
 from __future__ import annotations
 
+import gc
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -105,6 +106,12 @@ def drain_pending(
             failed += 1
             echo(f"{hit['symbol']}: FAILED ({type(exc).__name__}: {exc})")
             continue
+        finally:
+            # Each item may create library thread-local HTTP/cache state.  A
+            # full reap at the item boundary prevents an uninterrupted weekend
+            # drain from accumulating descriptors faster than the hourly
+            # daemon-level collector can release them.
+            gc.collect()
         store.mark_researched(hit["id"])
         researched += 1
         echo(

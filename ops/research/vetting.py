@@ -26,6 +26,7 @@ night) and never raises out of the loop.
 
 from __future__ import annotations
 
+import gc
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -236,6 +237,13 @@ def vet_pending(
             failed += 1
             echo(f"{memo.ticker}: FAILED ({type(exc).__name__}: {exc})")
             continue
+        finally:
+            # ToolNode runs parallel data tools on short-lived threads.  In a
+            # long vetting batch, yfinance/curl_cffi thread-local cache handles
+            # and CLOSE_WAIT sockets otherwise survive until an eventual gen-2
+            # collection and can exhaust launchd's descriptor limit between
+            # the daemon's hourly reap ticks.
+            gc.collect()
         vetted += 1
         if outcome.verdict == "confirm":
             confirmed += 1
