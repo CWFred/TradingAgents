@@ -1139,7 +1139,7 @@ def _short_vetting_stage(
 
             adapter = TradingAgentsPipelineAdapter(
                 backend=backend, reporter=reporter, activity_job="overnight",
-                activity_stage="vetting",
+                activity_stage="vetting", reuse_completed=True,
             )
         else:
             adapter = adapter_factory(backend)
@@ -1186,7 +1186,7 @@ def _research_vetting_stage(
 
             adapter = TradingAgentsPipelineAdapter(
                 backend=backend, reporter=reporter, activity_job="overnight",
-                activity_stage="vetting",
+                activity_stage="vetting", reuse_completed=True,
             )
         else:
             adapter = adapter_factory(backend)
