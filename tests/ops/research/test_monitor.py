@@ -150,7 +150,7 @@ def test_drawdown_escalates_without_any_falsifier_trip(stores):
 
 
 def test_lapsed_hard_catalyst_surfaces_for_event_memo(stores):
-    memo_store, _, journal = stores
+    memo_store, screen_store, journal = stores
     memo_store.save(_memo(
         ticker="SPIN", thesis_type="event",
         key_dates=[Catalyst(description="distribution date",
@@ -158,10 +158,30 @@ def test_lapsed_hard_catalyst_surfaces_for_event_memo(stores):
     ))
     outcome = _run(stores)
     assert outcome.catalyst_due == 1
+    assert outcome.escalations == 1
     due = _events_of(journal, events.KIND_CATALYST_DUE)
     assert len(due) == 1 and due[0]["payload"]["ticker"] == "SPIN"
-    # Soft/future dates never fire: re-run dedupes too.
-    assert _run(stores).catalyst_due == 0
+    assert [h["symbol"] for h in screen_store.pending_hits()] == ["SPIN"]
+    # Soft/future dates never fire: re-run dedupes too (pending hit already queued).
+    outcome2 = _run(stores)
+    assert outcome2.catalyst_due == 0
+    assert outcome2.escalations == 0
+
+
+def test_pm_reassess_catalyst_on_value_memo_also_escalates(stores):
+    """A value-thesis memo can carry a PM-scheduled reassess date (Task 4)
+    even though it has no event_block — the monitor must not silently
+    ignore top-level catalysts just because thesis_type != 'event'."""
+    memo_store, screen_store, journal = stores
+    memo_store.save(_memo(
+        ticker="SPCX", thesis_type="value",
+        catalysts=[Catalyst(description="Starship Flight 13 outcome",
+                            expected_date=date(2026, 6, 30), hard_date=True)],
+    ))
+    outcome = _run(stores)
+    assert outcome.catalyst_due == 1
+    assert outcome.escalations == 1
+    assert [h["symbol"] for h in screen_store.pending_hits()] == ["SPCX"]
 
 
 def test_resolution_due_with_checklist(stores):
