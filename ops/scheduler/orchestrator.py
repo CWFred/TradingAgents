@@ -101,8 +101,23 @@ class Orchestrator:
         attempts = self._journal.count_events(
             events.KIND_DAILY_CYCLE_RUN, since=trading_day_start(now),
         )
+        recovery_attempt = False
         if attempts >= MAX_DAILY_CYCLE_ATTEMPTS:
-            return
+            # A failed batch may still have complete per-symbol graph states on
+            # disk. Permit exactly one bounded recovery attempt when the live
+            # adapter confirms that useful work can be reused. This preserves
+            # the normal three-attempt cost guard for systemic failures.
+            probe = getattr(self._pipeline_adapter, "has_completed_results", None)
+            try:
+                recovery_attempt = (
+                    attempts == MAX_DAILY_CYCLE_ATTEMPTS
+                    and probe is not None
+                    and probe(asof_date) is True
+                )
+            except (OSError, ValueError, TypeError):
+                recovery_attempt = False
+            if not recovery_attempt:
+                return
         # Attempt marker (recorded BEFORE the run, as before).
         self._journal.record_event(
             events.KIND_DAILY_CYCLE_RUN,
@@ -110,8 +125,11 @@ class Orchestrator:
             at=now,
         )
 
-        reason = f"attempt {attempts + 1} of {MAX_DAILY_CYCLE_ATTEMPTS}"
-        if attempts:
+        if recovery_attempt:
+            reason = "recovery attempt 4 of 4, reusing completed analyses"
+        else:
+            reason = f"attempt {attempts + 1} of {MAX_DAILY_CYCLE_ATTEMPTS}"
+        if attempts and not recovery_attempt:
             reason += ", retrying failed cycle"
         with self._reporter.job("daily_cycle", reason=reason) as activity:
             # Discard fetch counters accumulated outside this cycle so the

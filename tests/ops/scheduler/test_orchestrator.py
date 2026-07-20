@@ -751,6 +751,42 @@ def test_daily_cycle_attempt_cap_stops_retrying_after_max_attempts(monkeypatch):
     assert kinds.count(events.KIND_DAILY_CYCLE_RUN) == MAX_DAILY_CYCLE_ATTEMPTS
 
 
+def test_daily_cycle_allows_one_recovery_when_completed_results_are_reusable(monkeypatch):
+    """Partial graph outputs unlock one fourth attempt, never an unbounded retry."""
+    from ops import events
+    from ops.scheduler.orchestrator import MAX_DAILY_CYCLE_ATTEMPTS
+
+    journal = _make_journal()
+    clock = {"now": _MON}
+    _pin_journal_clock(monkeypatch, clock)
+    universe = _fake_universe([])
+    strategy = _fake_strategy([])
+    strategy.propose_orders.side_effect = [
+        RuntimeError("transient failure"),
+        RuntimeError("transient failure"),
+        RuntimeError("transient failure"),
+        [],
+    ]
+    pipeline = _fake_pipeline()
+    pipeline.has_completed_results.return_value = True
+    orch = _make_orchestrator(
+        universe_builder=universe, strategy=strategy,
+        pipeline_adapter=pipeline, journal=journal,
+        now_fn=lambda: clock["now"],
+    )
+
+    for _ in range(MAX_DAILY_CYCLE_ATTEMPTS + 1):
+        orch.tick()
+
+    assert strategy.propose_orders.call_count == MAX_DAILY_CYCLE_ATTEMPTS + 1
+    kinds = [e["kind"] for e in journal.read_events()]
+    assert kinds.count(events.KIND_DAILY_CYCLE_RUN) == MAX_DAILY_CYCLE_ATTEMPTS + 1
+    assert kinds.count(events.KIND_DAILY_CYCLE_COMPLETED) == 1
+
+    orch.tick()
+    assert strategy.propose_orders.call_count == MAX_DAILY_CYCLE_ATTEMPTS + 1
+
+
 # --- Fix 2: unknown-provenance positions are journaled for audit ---
 
 def test_exit_engine_journals_unknown_provenance_for_position_with_no_entry_event():
