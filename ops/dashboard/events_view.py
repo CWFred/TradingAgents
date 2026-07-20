@@ -117,6 +117,8 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "daily_cycle_run": lambda p: "Daily cycle started",
     "daily_cycle_completed": lambda p: "Daily cycle completed",
     "analysis_decision": lambda p: (
+        f"Analysis failed: {p.get('symbol', '?')} → HOLD — {p['error']}"
+        if p.get("error") else
         f"Analysis: {p.get('symbol', '?')} → {p.get('decision', '?')}"),
     "baseline_screen_run": lambda p: "Baseline screen run",
     "research_vetting_run": lambda p: (

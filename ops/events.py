@@ -829,16 +829,19 @@ def insider_position_closed_payload(
 
 def analysis_decision_payload(
     *, symbol: str, decision: str, source: str, asof: str, rank: int | None = None,
-    rating: str = "",
+    rating: str = "", error: str = "",
 ) -> dict[str, Any]:
     """Momentum sleeve per-name pipeline verdict. `decision` is one of
     "BUY"/"HOLD"/"SELL"/"TRIM"; `rank` is omitted (not None) when the candidate
-    has no momentum payload (an earnings-only candidate)."""
+    has no momentum payload (an earnings-only candidate). `error` identifies a
+    conservative HOLD produced by the per-symbol failure boundary."""
     payload: dict[str, Any] = {
         "symbol": symbol, "decision": decision, "source": source, "asof": asof,
     }
     if rating:
         payload["rating"] = rating
+    if error:
+        payload["error"] = error
     if rank is not None:
         payload["rank"] = rank
     return payload

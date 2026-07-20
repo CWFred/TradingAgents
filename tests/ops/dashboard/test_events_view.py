@@ -39,6 +39,16 @@ def test_render_known_kind_is_a_sentence():
     assert not text.startswith("fill:")  # rendered, not fallback
 
 
+def test_render_failed_analysis_explains_conservative_hold():
+    text = render_event("analysis_decision", {
+        "symbol": "PLD", "decision": "HOLD",
+        "error": "APIConnectionError: Connection error.",
+    })
+    assert text == (
+        "Analysis failed: PLD → HOLD — APIConnectionError: Connection error."
+    )
+
+
 def test_render_unknown_kind_falls_back_compact():
     text = render_event("brand_new_kind", {"a": 1})
     assert text.startswith("brand_new_kind")
