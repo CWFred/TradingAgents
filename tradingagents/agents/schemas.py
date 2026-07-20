@@ -18,6 +18,7 @@ so that:
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Literal
 
@@ -35,6 +36,10 @@ def _coerce_optional_float(value):
         return None
     return value
 
+
+# A reassess date must be a real near-term recheck, not a hallucinated
+# far-future or already-past one — null it out rather than fail the call.
+_MAX_REASSESS_HORIZON_DAYS = 365
 
 # ---------------------------------------------------------------------------
 # Shared rating types
@@ -221,11 +226,42 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    reassess_after: date | None = Field(
+        default=None,
+        description=(
+            "If a specific future date or event should trigger automatic "
+            "re-analysis of this position (e.g. a known binary catalyst — "
+            "earnings, a launch, an FDA date), give that date in YYYY-MM-DD "
+            "form. Null if no scheduled recheck is warranted."
+        ),
+    )
+    reassess_trigger: str | None = Field(
+        default=None,
+        description=(
+            "One-line description of what to check for on reassess_after, "
+            "e.g. 'Starship Flight 13 outcome'. Null if reassess_after is null."
+        ),
+    )
 
     @field_validator("price_target", mode="before")
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
+
+    @field_validator("reassess_after", mode="before")
+    @classmethod
+    def _nullish_reassess_date_to_none(cls, v):
+        return _coerce_optional_float(v)
+
+    @field_validator("reassess_after")
+    @classmethod
+    def _bound_reassess_after(cls, v):
+        if v is None:
+            return v
+        today = datetime.now(timezone.utc).date()
+        if v < today or v > today + timedelta(days=_MAX_REASSESS_HORIZON_DAYS):
+            return None
+        return v
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:
@@ -247,6 +283,10 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
         parts.extend(["", f"**Price Target**: {decision.price_target}"])
     if decision.time_horizon:
         parts.extend(["", f"**Time Horizon**: {decision.time_horizon}"])
+    if decision.reassess_after is not None:
+        parts.extend(["", f"**Reassess After**: {decision.reassess_after.isoformat()}"])
+        if decision.reassess_trigger:
+            parts.extend(["", f"**Reassess Trigger**: {decision.reassess_trigger}"])
     return "\n".join(parts)
 
 

@@ -1,6 +1,7 @@
 """Tests for TradingMemoryLog — storage, deferred reflection, PM injection, legacy removal."""
 
 from unittest.mock import MagicMock, patch
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -726,6 +727,50 @@ class TestPortfolioManagerInjection:
         assert "**Investment Thesis**: AI capex cycle" in md
         assert "**Price Target**: 215.0" in md
         assert "**Time Horizon**: 3-6 months" in md
+
+    def test_pm_reassess_fields_render_when_set(self):
+        captured = {}
+        decision = PortfolioDecision(
+            rating=PortfolioRating.UNDERWEIGHT,
+            executive_summary="Trim ahead of the binary catalyst.",
+            investment_thesis="Explosion risk is not priced in at this multiple.",
+            reassess_after=date(2026, 8, 3),
+            reassess_trigger="Starship Flight 13 outcome",
+        )
+        llm = _structured_pm_llm(captured, decision)
+        pm_node = create_portfolio_manager(llm)
+        result = pm_node(_make_pm_state())
+        md = result["final_trade_decision"]
+        assert "**Reassess After**: 2026-08-03" in md
+        assert "**Reassess Trigger**: Starship Flight 13 outcome" in md
+
+    def test_pm_reassess_fields_omitted_when_unset(self):
+        captured = {}
+        llm = _structured_pm_llm(captured)
+        pm_node = create_portfolio_manager(llm)
+        md = pm_node(_make_pm_state())["final_trade_decision"]
+        assert "Reassess After" not in md
+        assert "Reassess Trigger" not in md
+
+    def test_pm_reassess_after_in_the_past_is_nulled(self):
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after=date(2020, 1, 1),
+        )
+        assert decision.reassess_after is None
+
+    def test_pm_reassess_after_too_far_out_is_nulled(self):
+        from datetime import timedelta
+        far = date.today() + timedelta(days=400)
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after=far,
+        )
+        assert decision.reassess_after is None
 
     def test_pm_falls_back_to_freetext_when_structured_unavailable(self):
         """If a provider does not support with_structured_output, the agent
