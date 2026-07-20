@@ -64,6 +64,9 @@ def invoke_structured_with_result(
         try:
             result = structured_llm.invoke(prompt)
             if result is None:
+                # A thinking model can answer in plain text instead of calling
+                # the tool, leaving the parser with nothing to return. Treat it
+                # as a structured miss and fall back, with a clear reason.
                 raise ValueError("structured output returned no parsed result")
             return render(result), result
         except Exception as exc:
