@@ -57,7 +57,7 @@ class _NameFailed(Exception):
 
 def _research_with_retries(
     research_fn, hit, *, evidence_llm, thesis_llm, memo_store,
-    thesis_model_spec, should_stop, echo,
+    thesis_model_spec, should_stop, deadline, now, echo,
 ):
     """Try one hit up to MAX_ATTEMPTS_PER_HIT times, retrying only on a
     raised exception (transient/resource errors) with a short backoff
@@ -65,11 +65,15 @@ def _research_with_retries(
     it's a config problem shared by every name. A clean "failed"
     ResearchOutcome also returns immediately, unretried — it's a
     deterministic conclusion (e.g. insufficient evidence) that will not
-    change on retry."""
+    change on retry. should_stop() and the deadline are both re-checked
+    before each backoff so an interruption mid-retry leaves the hit
+    pending, same as an interruption between hits."""
     last_exc: Exception | None = None
     for attempt in range(MAX_ATTEMPTS_PER_HIT):
         if attempt > 0:
             if should_stop is not None and should_stop():
+                break
+            if deadline is not None and now() >= deadline:
                 break
             delay = RETRY_BACKOFF_SECONDS[attempt - 1]
             echo(
@@ -134,7 +138,8 @@ def drain_pending(
                     research_fn, hit, evidence_llm=evidence_llm,
                     thesis_llm=thesis_llm, memo_store=memo_store,
                     thesis_model_spec=thesis_model_spec,
-                    should_stop=should_stop, echo=echo,
+                    should_stop=should_stop, deadline=deadline, now=now,
+                    echo=echo,
                 )
                 if outcome.status != "researched":
                     raise _NameFailed(outcome)
@@ -143,12 +148,18 @@ def drain_pending(
         except _NameFailed as nf:
             if should_stop is not None and should_stop():
                 break
+            if deadline is not None and now() >= deadline:
+                hit_deadline = True
+                break
             store.mark_failed(hit["id"])
             failed += 1
             echo(f"{nf.outcome.symbol}: FAILED — " + "; ".join(nf.outcome.errors))
             continue
         except Exception as exc:  # noqa: BLE001 - one bad name must not strand the queue
             if should_stop is not None and should_stop():
+                break
+            if deadline is not None and now() >= deadline:
+                hit_deadline = True
                 break
             store.mark_failed(hit["id"])
             failed += 1

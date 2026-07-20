@@ -188,6 +188,35 @@ def test_should_stop_during_retry_leaves_ticker_pending(monkeypatch):
     assert summary.still_pending == 2
 
 
+def test_deadline_during_retry_leaves_ticker_pending(monkeypatch):
+    store = FakeStore(["AAA", "BBB"])
+    calls = {"n": 0}
+
+    def flaky(hit, **kw):
+        calls["n"] += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("ops.research.drain.research_hit", flaky)
+    monkeypatch.setattr("ops.research.drain.time.sleep", lambda s: None)
+    base = datetime(2026, 7, 9, 6, tzinfo=timezone.utc)
+    deadline = datetime(2026, 7, 9, 8, tzinfo=timezone.utc)
+    past = datetime(2026, 7, 9, 9, tzinfo=timezone.utc)
+    # base for the pre-hit check, then past-deadline from the retry check
+    # onward (as if the deadline landed during the backoff).
+    times = iter([base, past])
+    summary = drain_pending(
+        store=store, memo_store=object(), evidence_llm=None, thesis_llm=None,
+        thesis_model_spec="spec", deadline=deadline,
+        now=lambda: next(times, past),
+    )
+
+    assert calls["n"] == 1
+    assert store.failed == []
+    assert store.researched == []
+    assert summary.hit_deadline is True
+    assert summary.still_pending == 2
+
+
 def test_reaps_resources_after_each_attempt(monkeypatch):
     monkeypatch.setattr("ops.research.drain.time.sleep", lambda s: None)
     store = FakeStore(["AAA", "BBB"])
