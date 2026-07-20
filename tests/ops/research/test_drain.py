@@ -83,19 +83,24 @@ def test_should_stop_halts(monkeypatch):
 
 def test_failed_outcome_marks_failed(monkeypatch):
     store = FakeStore(["AAA"])
-    monkeypatch.setattr(
-        "ops.research.drain.research_hit",
-        lambda hit, **kw: _outcome(hit, "failed"),
-    )
+    calls = {"n": 0}
+
+    def fake_hit(hit, **kw):
+        calls["n"] += 1
+        return _outcome(hit, "failed")
+
+    monkeypatch.setattr("ops.research.drain.research_hit", fake_hit)
     summary = drain_pending(
         store=store, memo_store=object(), evidence_llm=None, thesis_llm=None,
         thesis_model_spec="spec",
     )
+    assert calls["n"] == 1
     assert summary.failed == 1
     assert store.failed == [1]
 
 
 def test_exception_marks_failed_and_continues(monkeypatch):
+    monkeypatch.setattr("ops.research.drain.time.sleep", lambda s: None)
     store = FakeStore(["AAA", "BBB"])
 
     def fake_hit(hit, **kw):
@@ -114,7 +119,77 @@ def test_exception_marks_failed_and_continues(monkeypatch):
                                    hit_deadline=False)
 
 
+def test_retries_transient_exception_then_succeeds(monkeypatch):
+    store = FakeStore(["AAA"])
+    calls = {"n": 0}
+
+    def flaky(hit, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise OSError("too many open files")
+        return _outcome(hit, "researched")
+
+    monkeypatch.setattr("ops.research.drain.research_hit", flaky)
+    monkeypatch.setattr("ops.research.drain.time.sleep", lambda s: None)
+    summary = drain_pending(
+        store=store, memo_store=object(), evidence_llm=None, thesis_llm=None,
+        thesis_model_spec="spec",
+    )
+
+    assert calls["n"] == 3
+    assert summary == DrainSummary(researched=1, failed=0, still_pending=0,
+                                   hit_deadline=False)
+    assert store.researched == [1]
+
+
+def test_exhausts_retries_then_marks_failed(monkeypatch):
+    store = FakeStore(["AAA"])
+    calls = {"n": 0}
+
+    def always_flaky(hit, **kw):
+        calls["n"] += 1
+        raise OSError("too many open files")
+
+    monkeypatch.setattr("ops.research.drain.research_hit", always_flaky)
+    monkeypatch.setattr("ops.research.drain.time.sleep", lambda s: None)
+    summary = drain_pending(
+        store=store, memo_store=object(), evidence_llm=None, thesis_llm=None,
+        thesis_model_spec="spec",
+    )
+
+    assert calls["n"] == 3
+    assert store.failed == [1]
+    assert summary.failed == 1
+
+
+def test_should_stop_during_retry_leaves_ticker_pending(monkeypatch):
+    store = FakeStore(["AAA", "BBB"])
+    calls = {"n": 0}
+
+    def flaky(hit, **kw):
+        calls["n"] += 1
+        raise RuntimeError("boom")
+
+    # First should_stop() call (before AAA starts) is False; the second
+    # (the retry check before attempt 2) is True, as if an operator pause
+    # landed during the backoff sleep.
+    stop_flags = iter([False, True])
+
+    monkeypatch.setattr("ops.research.drain.research_hit", flaky)
+    monkeypatch.setattr("ops.research.drain.time.sleep", lambda s: None)
+    summary = drain_pending(
+        store=store, memo_store=object(), evidence_llm=None, thesis_llm=None,
+        thesis_model_spec="spec", should_stop=lambda: next(stop_flags, True),
+    )
+
+    assert calls["n"] == 1
+    assert store.failed == []
+    assert store.researched == []
+    assert summary.still_pending == 2
+
+
 def test_reaps_resources_after_each_attempt(monkeypatch):
+    monkeypatch.setattr("ops.research.drain.time.sleep", lambda s: None)
     store = FakeStore(["AAA", "BBB"])
     reaps = []
 
@@ -173,8 +248,10 @@ def test_swallowed_model_error_outcome_stays_pending_when_paused(monkeypatch):
 
 def test_research_error_propagates(monkeypatch):
     store = FakeStore(["AAA"])
+    calls = {"n": 0}
 
     def fake_hit(hit, **kw):
+        calls["n"] += 1
         raise ResearchError("config problem")
 
     monkeypatch.setattr("ops.research.drain.research_hit", fake_hit)
@@ -183,6 +260,7 @@ def test_research_error_propagates(monkeypatch):
             store=store, memo_store=object(), evidence_llm=None,
             thesis_llm=None, thesis_model_spec="spec",
         )
+    assert calls["n"] == 1
 
 
 def test_max_names_caps_batch(monkeypatch):

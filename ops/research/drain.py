@@ -11,12 +11,18 @@ and that name remains pending for resume:
   2. now() >= deadline       (08:00 wall-clock reached)
   3. the pending queue is empty
 A ResearchError is a configuration problem and aborts the whole batch
-(re-raised); any other per-name exception marks that hit failed and
+(re-raised, never retried — retrying can't fix a config problem). Any other
+exception from a single name is retried up to MAX_ATTEMPTS_PER_HIT times
+with a short backoff (transient/resource errors, like the fd-exhaustion
+incident, are exactly what this catches); once exhausted, or if a name
+comes back with a clean "failed" ResearchOutcome (a deterministic
+conclusion, never retried), that hit is marked failed and the drain
 continues — one bad name must not strand the queue.
 """
 from __future__ import annotations
 
 import gc
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,12 +43,52 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+MAX_ATTEMPTS_PER_HIT = 3
+RETRY_BACKOFF_SECONDS = (2, 5)  # delay before attempt 2 and attempt 3
+
+
 class _NameFailed(Exception):
     """Internal: routes a failed ResearchOutcome through the item context
     so the breadcrumb records ok=False without changing drain semantics."""
 
     def __init__(self, outcome):
         self.outcome = outcome
+
+
+def _research_with_retries(
+    research_fn, hit, *, evidence_llm, thesis_llm, memo_store,
+    thesis_model_spec, should_stop, echo,
+):
+    """Try one hit up to MAX_ATTEMPTS_PER_HIT times, retrying only on a
+    raised exception (transient/resource errors) with a short backoff
+    between attempts. A ResearchError propagates immediately, unretried —
+    it's a config problem shared by every name. A clean "failed"
+    ResearchOutcome also returns immediately, unretried — it's a
+    deterministic conclusion (e.g. insufficient evidence) that will not
+    change on retry."""
+    last_exc: Exception | None = None
+    for attempt in range(MAX_ATTEMPTS_PER_HIT):
+        if attempt > 0:
+            if should_stop is not None and should_stop():
+                break
+            delay = RETRY_BACKOFF_SECONDS[attempt - 1]
+            echo(
+                f"{hit['symbol']}: attempt {attempt} failed "
+                f"({last_exc}); retrying in {delay}s..."
+            )
+            time.sleep(delay)
+        try:
+            outcome = research_fn(
+                hit, evidence_llm=evidence_llm, thesis_llm=thesis_llm,
+                memo_store=memo_store, thesis_model_spec=thesis_model_spec,
+            )
+        except ResearchError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - retried, then reported by the caller
+            last_exc = exc
+            continue
+        return outcome  # success OR a clean "failed" outcome — not retried
+    raise last_exc
 
 
 def drain_pending(
@@ -84,9 +130,11 @@ def drain_pending(
         try:
             with reporter.item(activity_job, stage="researching",
                                symbol=hit["symbol"], seq=f"{i + 1}/{total}"):
-                outcome = research_fn(
-                    hit, evidence_llm=evidence_llm, thesis_llm=thesis_llm,
-                    memo_store=memo_store, thesis_model_spec=thesis_model_spec,
+                outcome = _research_with_retries(
+                    research_fn, hit, evidence_llm=evidence_llm,
+                    thesis_llm=thesis_llm, memo_store=memo_store,
+                    thesis_model_spec=thesis_model_spec,
+                    should_stop=should_stop, echo=echo,
                 )
                 if outcome.status != "researched":
                     raise _NameFailed(outcome)
