@@ -19,6 +19,14 @@ def test_analysis_decision_payload_omits_empty_rating():
     assert "rating" not in p
 
 
+def test_analysis_decision_payload_includes_degraded_error():
+    p = events.analysis_decision_payload(
+        symbol="PLD", decision="HOLD", source="MOMENTUM", asof="2026-07-20",
+        error="APIConnectionError: Connection error.",
+    )
+    assert p["error"] == "APIConnectionError: Connection error."
+
+
 def test_position_opened_payload_includes_tier_when_given():
     from datetime import date
     p = events.position_opened_payload(

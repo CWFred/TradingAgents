@@ -162,8 +162,12 @@ class Orchestrator:
                 )
                 placed = self._place_entries(proposals, asof_date, now)
                 self._apply_underweight_trims(decisions, asof_date)
+                failed = 0
                 for decision in decisions:
                     cand = decision.candidate
+                    error = decision.pipeline.raw.get("analysis_error", "")
+                    if error:
+                        failed += 1
                     self._journal.record_event(
                         events.KIND_ANALYSIS_DECISION,
                         events.analysis_decision_payload(
@@ -173,14 +177,20 @@ class Orchestrator:
                             asof=asof_date.isoformat(),
                             rank=cand.momentum.rank if cand.momentum else None,
                             rating=decision.pipeline.rating,
+                            error=error,
                         ),
                     )
 
-            activity.outcome = f"analyzed {len(decisions)}, placed {placed}"
+            analyzed = len(decisions) - failed
+            activity.outcome = f"analyzed {analyzed}, placed {placed}"
+            if failed:
+                activity.outcome = (
+                    f"analyzed {analyzed}, failed {failed}, placed {placed}"
+                )
 
-            # Reached only on a clean full run (an uncaught exception anywhere
-            # above propagates to tick()'s handler instead) — this is what the
-            # gate above checks to stop same-day retries.
+            # Reached when the batch completed, including batches with isolated
+            # per-symbol failures that were safely converted to HOLD. Batch-wide
+            # failures still propagate to tick() and remain retryable.
             self._journal.record_event(
                 events.KIND_DAILY_CYCLE_COMPLETED,
                 events.daily_cycle_completed_payload(asof_date=asof_date.isoformat()),

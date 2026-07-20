@@ -1,10 +1,12 @@
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from ops.broker.types import Side, OrderType
 from ops.config import OpsConfig
 from ops.pipeline_adapter import PipelineDecision, StubPipelineAdapter, TIER_STARTER
-from ops.strategy.post_earnings_momentum import PostEarningsMomentumStrategy
+from ops.strategy.post_earnings_momentum import AnalysisBatchError, PostEarningsMomentumStrategy
 from ops.universe import Candidate, CandidateSource
 from ops.universe.earnings import EarningsHit
 from ops.universe.momentum import MomentumHit
@@ -202,6 +204,52 @@ def test_decision_sink_none_by_default_is_unaffected():
         current_equity=Decimal("250"), asof_date=date(2026, 6, 30),
     )
     assert len(orders) == 1
+
+
+def test_one_analysis_failure_holds_that_symbol_and_continues_batch():
+    class PartiallyFailingPipeline(StubPipelineAdapter):
+        def __init__(self):
+            super().__init__({
+                "AAPL": PipelineDecision.BUY,
+                "MSFT": PipelineDecision.BUY,
+            })
+            self.calls = []
+
+        def propagate(self, symbol, asof_date, research_context=""):
+            self.calls.append(symbol)
+            if symbol == "BROKEN":
+                raise ConnectionError("local model disconnected")
+            return super().propagate(symbol, asof_date, research_context)
+
+    pipeline = PartiallyFailingPipeline()
+    sink = []
+    orders = PostEarningsMomentumStrategy(config=OpsConfig()).propose_orders(
+        candidates=[_candidate("AAPL"), _candidate("BROKEN"), _candidate("MSFT")],
+        pipeline=pipeline,
+        current_equity=Decimal("250"),
+        asof_date=date(2026, 7, 20),
+        decision_sink=sink,
+    )
+
+    assert pipeline.calls == ["AAPL", "BROKEN", "MSFT"]
+    assert [order.order.symbol for order in orders] == ["AAPL", "MSFT"]
+    failed = next(item.pipeline for item in sink if item.candidate.symbol == "BROKEN")
+    assert failed.decision is PipelineDecision.HOLD
+    assert failed.raw["analysis_error"] == "ConnectionError: local model disconnected"
+
+
+def test_all_analysis_failures_keep_daily_batch_retryable():
+    class FailingPipeline:
+        def propagate(self, symbol, asof_date, research_context=""):
+            raise ConnectionError(f"{symbol} disconnected")
+
+    with pytest.raises(AnalysisBatchError, match="all 2 candidate analyses failed"):
+        PostEarningsMomentumStrategy(config=OpsConfig()).propose_orders(
+            candidates=[_candidate("AAPL"), _candidate("MSFT")],
+            pipeline=FailingPipeline(),
+            current_equity=Decimal("250"),
+            asof_date=date(2026, 7, 20),
+        )
 
 
 def test_momentum_candidate_gets_momentum_reason():

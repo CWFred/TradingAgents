@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from ops.broker.types import Order, OrderType, Side
 from ops.config import OpsConfig
+from ops.llm_backend import ManagedBackendPaused
 from ops.pipeline_adapter import PipelineAdapter, PipelineDecision, PipelineResult, TIER_STARTER
 from ops.strategy.base import AnalyzedDecision, StrategyOrder
 from ops.universe import Candidate, CandidateSource
@@ -32,6 +33,20 @@ def _client_order_id(symbol: str, asof: date) -> str:
 
 def _quantize_money(d: Decimal) -> Decimal:
     return d.quantize(Decimal("0.01"))
+
+
+class AnalysisBatchError(RuntimeError):
+    """Every candidate failed, indicating a batch-wide/systemic problem."""
+
+
+def _failed_analysis(cand: Candidate, asof_date: date, exc: Exception) -> PipelineResult:
+    """Fail closed for one symbol while retaining an auditable error."""
+    return PipelineResult(
+        symbol=cand.symbol,
+        date=asof_date,
+        decision=PipelineDecision.HOLD,
+        raw={"analysis_error": f"{type(exc).__name__}: {exc}"},
+    )
 
 
 def _reason_for(cand: Candidate, result: PipelineResult) -> str:
@@ -75,10 +90,26 @@ class PostEarningsMomentumStrategy:
         if full_notional < self._cfg.per_trade_dollar_floor:
             return []
         out: list[StrategyOrder] = []
+        successful_analyses = 0
+        failed_results: list[PipelineResult] = []
         for cand in candidates:
-            result = pipeline.propagate(cand.symbol, asof_date)
+            try:
+                result = pipeline.propagate(cand.symbol, asof_date)
+            except ManagedBackendPaused:
+                # An operator pause is a batch-level instruction, not a bad
+                # symbol. Preserve the daily retry by aborting immediately.
+                raise
+            except Exception as exc:  # noqa: BLE001 - per-symbol fault boundary
+                result = _failed_analysis(cand, asof_date, exc)
+                failed_results.append(result)
+            else:
+                successful_analyses += 1
             if decision_sink is not None:
                 decision_sink.append(AnalyzedDecision(candidate=cand, pipeline=result))
+            if result.raw.get("analysis_error"):
+                # No risk-reviewed final verdict exists for this symbol. HOLD
+                # it, but retain completed symbols and continue the batch.
+                continue
             if result.decision != PipelineDecision.BUY:
                 continue
             notional = starter_notional if result.tier == TIER_STARTER else full_notional
@@ -98,4 +129,10 @@ class PostEarningsMomentumStrategy:
                 candidate=cand,
                 pipeline=result,
             ))
+        if failed_results and successful_analyses == 0:
+            first_error = failed_results[0].raw["analysis_error"]
+            raise AnalysisBatchError(
+                f"all {len(failed_results)} candidate analyses failed; "
+                f"first error: {first_error}"
+            )
         return out

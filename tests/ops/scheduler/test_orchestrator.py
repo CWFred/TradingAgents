@@ -128,7 +128,9 @@ def _fake_strategy_with_sink(proposals, decisions):
 def _decision(symbol, decision, rating, tier=""):
     from ops.strategy.base import AnalyzedDecision
     return AnalyzedDecision(
-        candidate=MagicMock(symbol=symbol, momentum=None),
+        candidate=MagicMock(
+            symbol=symbol, momentum=None, source=MagicMock(value="MOMENTUM"),
+        ),
         pipeline=_pipeline_result(symbol, decision=decision, tier=tier, rating=rating),
     )
 
@@ -1005,6 +1007,44 @@ def test_analysis_decision_journals_native_rating(tmp_path):
     orch.tick()
     payloads = _events_of(journal, events.KIND_ANALYSIS_DECISION)
     assert payloads and payloads[0]["rating"] == "Overweight"
+
+
+def test_partial_analysis_failure_is_a_hold_and_completes_daily_cycle():
+    from ops.activity import ActivityReporter
+    from ops.strategy.base import AnalyzedDecision
+
+    journal = _make_journal()
+    failed = AnalyzedDecision(
+        candidate=MagicMock(
+            symbol="PLD", momentum=None, source=MagicMock(value="MOMENTUM"),
+        ),
+        pipeline=PipelineResult(
+            symbol="PLD", date=date(2026, 7, 20),
+            decision=PipelineDecision.HOLD,
+            raw={"analysis_error": "APIConnectionError: Connection error."},
+        ),
+    )
+    succeeded = _decision("NFLX", PipelineDecision.HOLD, rating="Hold")
+    strat = _fake_strategy_with_sink([], [succeeded, failed])
+    orch = _make_orchestrator(
+        journal=journal, strategy=strat, reporter=ActivityReporter(journal),
+    )
+
+    orch.tick()
+
+    kinds = [event["kind"] for event in journal.read_events()]
+    assert events.KIND_DAILY_CYCLE_COMPLETED in kinds
+    assert events.KIND_ORCHESTRATOR_TICK_ERROR not in kinds
+    payloads = _events_of(journal, events.KIND_ANALYSIS_DECISION)
+    pld = next(payload for payload in payloads if payload["symbol"] == "PLD")
+    assert pld["decision"] == "HOLD"
+    assert pld["error"] == "APIConnectionError: Connection error."
+    job_finished = [
+        event["payload"] for event in journal.read_events()
+        if event["kind"] == events.KIND_ACTIVITY_FINISHED
+        and event["payload"]["scope"] == "job"
+    ]
+    assert job_finished[0]["outcome"] == "analyzed 1, failed 1, placed 0"
 
 
 def test_position_opened_carries_tier(tmp_path):
