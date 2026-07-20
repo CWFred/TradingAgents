@@ -26,6 +26,7 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from datetime import date
+from uuid import NAMESPACE_URL, uuid5
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -174,6 +175,18 @@ class ResearchOutcome:
     evidence_dropped: int = 0
 
 
+def memo_id_for_hit(hit: dict, *, thesis_side: str) -> str:
+    """Stable memo identity for one screen hit, making research resumable."""
+    source = ":".join([
+        "tradingagents-research",
+        thesis_side,
+        str(hit.get("run_id", "")),
+        str(hit["id"]),
+        str(hit["symbol"]).upper(),
+    ])
+    return uuid5(NAMESPACE_URL, source).hex
+
+
 def _screen_summary(payload: dict) -> str:
     lines = [f"{payload['symbol']} screened {payload['asof']}: "
              f"cheap={payload['cheap']} quality={payload['quality']} "
@@ -313,6 +326,13 @@ def research_hit(
     symbol = hit["symbol"]
     payload = hit["payload"]
     outcome = ResearchOutcome(symbol=symbol, hit_id=hit["id"], status="failed")
+    memo_id = memo_id_for_hit(hit, thesis_side="long")
+    completed = memo_store.get(memo_id)
+    if completed is not None:
+        outcome.status = "researched"
+        outcome.memo_id = completed.memo_id
+        outcome.recommendation = "pass" if completed.status == "passed" else "buy"
+        return outcome
 
     ctx = price_fetcher(symbol)
     price = ctx.close_on_or_before(today) if ctx is not None else None
@@ -381,8 +401,10 @@ def research_hit(
             )
             continue
         memo = Memo(
+            memo_id=memo_id,
             ticker=symbol, as_of_date=today, entry_price_ref=float(price),
-            evidence=kept, status="pending_vetting",
+            evidence=kept,
+            status="passed" if draft.recommendation == "pass" else "pending_vetting",
             authored_by_model=thesis_model_spec or "",
             **draft.model_dump(exclude={"recommendation"}),
         )
@@ -391,8 +413,6 @@ def research_hit(
         )
         if not errors:
             memo_store.save(memo)
-            if draft.recommendation == "pass":
-                memo_store.mark_passed(memo.memo_id)
             outcome.status = "researched"
             outcome.memo_id = memo.memo_id
             outcome.recommendation = draft.recommendation
