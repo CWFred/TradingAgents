@@ -251,7 +251,21 @@ class PortfolioDecision(BaseModel):
     @field_validator("reassess_after", mode="before")
     @classmethod
     def _nullish_reassess_date_to_none(cls, v):
-        return _coerce_optional_float(v)
+        if isinstance(v, (date, datetime)):
+            return v
+        if isinstance(v, str):
+            coerced = _coerce_optional_float(v)
+            if coerced is None:
+                return None
+            try:
+                return date.fromisoformat(coerced.strip())
+            except ValueError:
+                # A malformed, non-sentinel date string from the LLM (e.g.
+                # "Q3 2026") must never fail the whole structured call —
+                # null it out rather than let Pydantic's own strict `date`
+                # coercion raise a ValidationError (#reassess-drain).
+                return None
+        return v
 
     @field_validator("reassess_after")
     @classmethod

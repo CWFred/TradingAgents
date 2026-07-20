@@ -772,6 +772,30 @@ class TestPortfolioManagerInjection:
         )
         assert decision.reassess_after is None
 
+    def test_pm_reassess_after_malformed_string_is_nulled_not_raised(self):
+        """A non-sentinel, non-ISO string (e.g. an LLM writing "Q3 2026"
+        instead of a YYYY-MM-DD date) must not raise ValidationError — that
+        would otherwise propagate up through invoke_structured_with_result
+        and silently discard the entire structured PM decision."""
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after="Q3 2026",
+        )
+        assert decision.reassess_after is None
+
+    def test_pm_reassess_after_invalid_calendar_date_string_is_nulled(self):
+        """A string that looks ISO-shaped but names an invalid calendar date
+        (August has 31 days) must also null out rather than raise."""
+        decision = PortfolioDecision(
+            rating=PortfolioRating.HOLD,
+            executive_summary="s",
+            investment_thesis="t",
+            reassess_after="2026-08-32",
+        )
+        assert decision.reassess_after is None
+
     def test_pm_state_carries_reassess_fields_when_set(self):
         decision = PortfolioDecision(
             rating=PortfolioRating.UNDERWEIGHT,
