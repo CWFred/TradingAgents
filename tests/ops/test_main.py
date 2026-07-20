@@ -9,6 +9,14 @@ from ops.main import _build_broker, _emit_halt_events, _wire
 from ops.reconcile import PositionDiff, ReconcileResult
 
 
+def _background_now():
+    """Stable weekend clock for tests that exercise an allowed queue pass."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    return datetime(2026, 7, 19, 1, 0, tzinfo=ZoneInfo("America/New_York"))
+
+
 @pytest.fixture(autouse=True)
 def _isolate_new_sleeve_state(monkeypatch, tmp_path_factory):
     """The overnight tick now also services the short and insider sleeves.
@@ -719,7 +727,7 @@ def test_overnight_tick_screens_when_due_then_drains(monkeypatch, tmp_path):
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
         # No prior screen run -> screen is due.
-        main_mod._research_overnight_tick(journal, config)
+        main_mod._research_overnight_tick(journal, config, now=_background_now)
         assert events_seen == ["screen", "drain"]
         assert journal.has_event_today(main_mod.events.KIND_RESEARCH_DRAIN_RUN)
 
@@ -764,7 +772,7 @@ def test_overnight_tick_skips_screen_when_recent(monkeypatch, tmp_path):
 
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
-        main_mod._research_overnight_tick(journal, config)
+        main_mod._research_overnight_tick(journal, config, now=_background_now)
     assert seen == ["drain"]  # screened recently -> only drain
 
 
@@ -799,7 +807,7 @@ def test_overnight_tick_empty_queue_skips_backend(monkeypatch, tmp_path):
 
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
-        main_mod._research_overnight_tick(journal, config)
+        main_mod._research_overnight_tick(journal, config, now=_background_now)
 
         drain_events = [
             e for e in journal.read_events()
@@ -833,7 +841,9 @@ def test_overnight_tick_records_error_event_not_raises(monkeypatch, tmp_path):
 
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
-        main_mod._research_overnight_tick(journal, config)  # must not raise
+        main_mod._research_overnight_tick(
+            journal, config, now=_background_now,
+        )  # must not raise
         assert journal.has_event_today(main_mod.events.KIND_RESEARCH_DRAIN_ERROR)
 
 
@@ -942,6 +952,7 @@ def test_overnight_tick_vets_before_drain_and_records_events(monkeypatch, tmp_pa
     with Journal(str(tmp_path / "j.sqlite")) as journal:
         main_mod._research_overnight_tick(
             journal, config,
+            now=_background_now,
             vet_adapter_factory=lambda backend: sentinel_adapter,
         )
 
@@ -1010,7 +1021,8 @@ def test_overnight_tick_vet_only_night_runs_vetting_without_drain(monkeypatch, t
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
         main_mod._research_overnight_tick(
-            journal, config, vet_adapter_factory=lambda backend: object(),
+            journal, config, now=_background_now,
+            vet_adapter_factory=lambda backend: object(),
         )
 
         assert seen == ["vet"]  # no screen, no drain — vet-only backlog night
@@ -1054,7 +1066,7 @@ def test_overnight_tick_both_queues_empty_skips_backend(monkeypatch, tmp_path):
 
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
-        main_mod._research_overnight_tick(journal, config)
+        main_mod._research_overnight_tick(journal, config, now=_background_now)
 
         drain_events = [
             e for e in journal.read_events()
@@ -1116,7 +1128,8 @@ def test_overnight_tick_vetting_error_recorded_not_raised(monkeypatch, tmp_path)
     with Journal(str(tmp_path / "j.sqlite")) as journal:
         # Must not raise.
         main_mod._research_overnight_tick(
-            journal, config, vet_adapter_factory=lambda backend: object(),
+            journal, config, now=_background_now,
+            vet_adapter_factory=lambda backend: object(),
         )
 
         # Drain's success event survives.
@@ -1219,7 +1232,8 @@ def test_overnight_tick_loops_until_both_queues_clear(monkeypatch, tmp_path):
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
         main_mod._research_overnight_tick(
-            journal, config, vet_adapter_factory=lambda backend: object(),
+            journal, config, now=_background_now,
+            vet_adapter_factory=lambda backend: object(),
         )
 
         # vet AAA -> drain (mints BBB) -> vet BBB -> both queues empty.
@@ -1265,7 +1279,7 @@ def test_overnight_tick_paused_flag_skips_everything(monkeypatch, tmp_path):
 
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
-        main_mod._research_overnight_tick(journal, config)
+        main_mod._research_overnight_tick(journal, config, now=_background_now)
         assert journal.read_events() == []
 
 
@@ -1307,7 +1321,7 @@ def test_overnight_tick_stop_callable_honors_pause_flag(monkeypatch, tmp_path):
 
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
-        main_mod._research_overnight_tick(journal, config)
+        main_mod._research_overnight_tick(journal, config, now=_background_now)
 
     stop = captured["should_stop"]
     assert stop() is False
@@ -1367,8 +1381,8 @@ def test_overnight_tick_zero_event_recorded_once_per_day(monkeypatch, tmp_path):
 
     config = load_config()
     with Journal(str(tmp_path / "j.sqlite")) as journal:
-        main_mod._research_overnight_tick(journal, config)
-        main_mod._research_overnight_tick(journal, config)
+        main_mod._research_overnight_tick(journal, config, now=_background_now)
+        main_mod._research_overnight_tick(journal, config, now=_background_now)
         drain_events = [
             e for e in journal.read_events()
             if e["kind"] == main_mod.events.KIND_RESEARCH_DRAIN_RUN

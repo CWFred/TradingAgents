@@ -34,6 +34,16 @@
 	</dict>
 	<key>ThrottleInterval</key>
 	<integer>60</integer>
+	<!-- The multi-agent graph creates short-lived tool executor threads.
+	     yfinance/curl_cffi can retain per-thread cache connections and sockets
+	     until the next full GC pass, so the macOS default soft limit of 256
+	     descriptors is too small for a long weekend drain.  The daemon also
+	     reaps between queue items; this remains defense-in-depth. -->
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>4096</integer>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardOutPath</key>

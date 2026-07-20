@@ -114,6 +114,26 @@ def test_exception_marks_failed_and_continues(monkeypatch):
                                    hit_deadline=False)
 
 
+def test_reaps_resources_after_each_attempt(monkeypatch):
+    store = FakeStore(["AAA", "BBB"])
+    reaps = []
+
+    def fake_hit(hit, **kw):
+        if hit["symbol"] == "AAA":
+            raise RuntimeError("boom")
+        return _outcome(hit, "researched")
+
+    monkeypatch.setattr("ops.research.drain.research_hit", fake_hit)
+    monkeypatch.setattr("ops.research.drain.gc.collect", lambda: reaps.append(True))
+
+    drain_pending(
+        store=store, memo_store=object(), evidence_llm=None, thesis_llm=None,
+        thesis_model_spec="spec",
+    )
+
+    assert reaps == [True, True]
+
+
 def test_interrupted_name_stays_pending_when_pause_lands(monkeypatch):
     store = FakeStore(["AAA", "BBB"])
     paused = {"value": False}

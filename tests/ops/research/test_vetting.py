@@ -341,6 +341,27 @@ def test_vet_pending_failure_leaves_memo_pending_and_continues(store):
     assert any("AAA" in e and "FAILED" in e for e in echoes)
 
 
+def test_vet_pending_reaps_resources_after_each_attempt(store, monkeypatch):
+    for ticker in ("AAA", "BBB"):
+        store.save(_memo(ticker=ticker))
+    reaps = []
+
+    class FlakyAdapter(StubPipelineAdapter):
+        def propagate(self, symbol, asof_date, research_context=""):
+            if symbol == "AAA":
+                raise RuntimeError("graph exploded")
+            return super().propagate(symbol, asof_date, research_context)
+
+    monkeypatch.setattr("ops.research.vetting.gc.collect", lambda: reaps.append(True))
+
+    vet_pending(
+        memo_store=store, adapter=FlakyAdapter(ratings={"BBB": "Buy"}),
+        falsifier_llm=NoFalsifierLLM(), vetted_by_model="m",
+    )
+
+    assert reaps == [True, True]
+
+
 def test_vet_pending_interruption_is_not_counted_as_failure(store):
     store.save(_memo(ticker="AAA"))
     paused = {"value": False}

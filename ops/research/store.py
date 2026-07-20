@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import closing
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -58,7 +59,7 @@ class ScreenStore:
         self._db_path = Path(db_path).expanduser()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.executescript(_SCHEMA)
             cols = {row[1] for row in conn.execute("PRAGMA table_info(screen_runs)")}
             if "coverage" not in cols:
@@ -88,7 +89,7 @@ class ScreenStore:
         run_id = f"screen-{asof.isoformat()}-{uuid4().hex[:8]}"
         passed = [r for r in results if r.passed]
         now = _now_iso()
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO screen_runs (run_id, asof, created_at, universe_size, passed_count, coverage)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
@@ -126,7 +127,7 @@ class ScreenStore:
         owns that contract.
         """
         symbol = symbol.upper()
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             pending = conn.execute(
                 "SELECT 1 FROM screen_hits WHERE symbol = ? AND status = 'pending'",
                 (symbol,),
@@ -143,7 +144,7 @@ class ScreenStore:
             return cur.lastrowid
 
     def pending_hits(self) -> list[dict]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT id, run_id, symbol, asof, status, payload FROM screen_hits"
                 " WHERE status = 'pending' ORDER BY id"
@@ -158,7 +159,7 @@ class ScreenStore:
         ]
 
     def _set_status(self, hit_id: int, status: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             cur = conn.execute(
                 "UPDATE screen_hits SET status = ? WHERE id = ?", (status, hit_id)
             )
@@ -180,7 +181,7 @@ class ScreenStore:
         self._set_status(hit_id, "failed")
 
     def last_run(self) -> dict | None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT run_id, asof, created_at, universe_size, passed_count, coverage"
                 " FROM screen_runs ORDER BY created_at DESC LIMIT 1"

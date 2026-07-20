@@ -3,6 +3,7 @@
 The renderer only writes a file and prints the launchctl command — it must
 never invoke launchctl itself (installing/loading is the user's explicit,
 reviewable action)."""
+import plistlib
 import shutil
 import subprocess
 
@@ -40,6 +41,8 @@ def test_render_contains_required_launchd_keys():
     assert "<key>ThrottleInterval</key>" in rendered
     assert "<integer>60</integer>" in rendered
     assert "<key>RunAtLoad</key>" in rendered
+    parsed = plistlib.loads(rendered.encode())
+    assert parsed["SoftResourceLimits"]["NumberOfFiles"] == 4096
     # Broker mode deliberately NOT set: paper is the default and the live
     # flip must go through the interactive A5 ritual, never a supervisor.
     # (The template's comment may mention the variable; it must never be
@@ -75,5 +78,4 @@ def test_install_service_writes_rendered_file_and_prints_bootstrap(tmp_path, mon
     # Prints (never runs) the load command.
     assert "launchctl bootstrap" in result.output
     assert str(output) in result.output
-
 
