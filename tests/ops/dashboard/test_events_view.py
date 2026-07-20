@@ -69,3 +69,17 @@ def test_render_activity_finished_failed_job():
     text = render_event("activity_finished", {
         "scope": "job", "job": "daily_cycle", "ok": False, "duration_s": 12.0})
     assert text == "✗ daily_cycle — failed after 12.0s"
+
+
+def test_render_activity_finished_uses_minutes_for_long_item():
+    text = render_event("activity_finished", {
+        "scope": "item", "job": "daily_cycle", "stage": "analyzing",
+        "symbol": "NFLX", "seq": "4", "ok": True, "duration_s": 1762.791})
+    assert text == "✓ daily_cycle: analyzing NFLX (4) (29m 23s)"
+
+
+def test_render_activity_finished_uses_hours_for_very_long_item():
+    text = render_event("activity_finished", {
+        "scope": "item", "job": "daily_cycle", "stage": "analyzing",
+        "symbol": "NFLX", "ok": False, "duration_s": 7325.2})
+    assert text == "✗ daily_cycle: analyzing NFLX — failed after 2h 2m 5s"
