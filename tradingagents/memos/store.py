@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,7 +61,7 @@ class MemoStore:
         self._db_path = Path(db_path).expanduser()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.executescript(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
@@ -78,7 +79,7 @@ class MemoStore:
                 "the populated thesis block (exactly one of value_block/event_block/"
                 "short_block, matching the type, must be set)"
             )
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 """
                 INSERT INTO memos (memo_id, ticker, thesis_type, status, conviction_tier,
@@ -108,7 +109,7 @@ class MemoStore:
             raise ValueError(f"memo {memo_id!r} is already resolved")
         memo.status = "resolved"
         memo.resolution = resolution
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 """
                 UPDATE memos
@@ -134,7 +135,7 @@ class MemoStore:
         if memo.status == "resolved":
             raise ValueError(f"memo {memo_id!r} is already resolved")
         memo.status = "passed"
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "UPDATE memos SET status = 'passed', payload = ? WHERE memo_id = ?",
                 (memo.model_dump_json(), memo_id),
@@ -157,7 +158,7 @@ class MemoStore:
                 f"memo {memo.memo_id}: apply_vetting expects status open/rejected, "
                 f"got {memo.status!r}"
             )
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT status FROM memos WHERE memo_id = ?", (memo.memo_id,)
             ).fetchone()
@@ -176,7 +177,7 @@ class MemoStore:
     # --- Read path ---
 
     def get(self, memo_id: str) -> Memo | None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT payload FROM memos WHERE memo_id = ?", (memo_id,)
             ).fetchone()
@@ -201,7 +202,7 @@ class MemoStore:
             clauses.append("thesis_type = ?")
             params.append(thesis_type)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute(
                 f"SELECT payload FROM memos {where} ORDER BY created_at DESC", params
             ).fetchall()

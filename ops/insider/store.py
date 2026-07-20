@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -45,7 +46,7 @@ class SignalStore:
         self._db_path = Path(db_path).expanduser()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             conn.executescript(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
@@ -58,7 +59,7 @@ class SignalStore:
     def record_transactions(self, symbol: str, txns) -> int:
         """Upsert Form 4 rows; returns how many were actually new."""
         inserted = 0
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             for t in txns:
                 cur = conn.execute(
                     "INSERT OR IGNORE INTO insider_transactions"
@@ -81,7 +82,7 @@ class SignalStore:
 
     def buys_in_window(self, symbol: str, *, since: date, until: date) -> list[dict]:
         """Open-market (code P), non-10b5-1 buys for ``symbol`` in the window."""
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT insider_name, insider_title, is_director, is_officer,"
                 "       transaction_date, shares, price, accession"
@@ -102,7 +103,7 @@ class SignalStore:
         return out
 
     def symbols_with_new_buys(self, *, since: date) -> list[str]:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT DISTINCT symbol FROM insider_transactions"
                 " WHERE code = 'P' AND ten_b5_1 = 0"
@@ -115,7 +116,7 @@ class SignalStore:
     # --- entries / cooldown / memo queue ---
 
     def record_entry(self, symbol: str, *, asof: date, memo_id: str = "") -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT OR IGNORE INTO sleeve_entries (symbol, asof, memo_id)"
                 " VALUES (?, ?, ?)",
@@ -123,7 +124,7 @@ class SignalStore:
             )
 
     def last_entry_date(self, symbol: str) -> date | None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT MAX(asof) AS asof FROM sleeve_entries WHERE symbol = ?",
                 (symbol.upper(),),
@@ -132,7 +133,7 @@ class SignalStore:
 
     def entries_without_memo(self) -> list[dict]:
         """The overnight memo-lite queue: entries whose memo isn't authored yet."""
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             rows = conn.execute(
                 "SELECT symbol, asof FROM sleeve_entries WHERE memo_id = ''"
                 " ORDER BY asof",
@@ -147,7 +148,7 @@ class SignalStore:
         time — BEFORE the overnight memo pass exists — and journal events
         are immutable, so this table is the only live source of the id.
         The exit pass must read it from here (review finding P1)."""
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT memo_id FROM sleeve_entries WHERE symbol = ? AND asof = ?",
                 (symbol.upper(), asof.isoformat()),
@@ -155,7 +156,7 @@ class SignalStore:
         return row["memo_id"] if row else ""
 
     def set_entry_memo(self, symbol: str, asof: date, memo_id: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "UPDATE sleeve_entries SET memo_id = ? WHERE symbol = ? AND asof = ?",
                 (memo_id, symbol.upper(), asof.isoformat()),
@@ -164,14 +165,14 @@ class SignalStore:
     # --- scan watermark ---
 
     def scan_watermark(self) -> date | None:
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT v FROM scan_state WHERE k = ?", (_WATERMARK_KEY,),
             ).fetchone()
         return date.fromisoformat(row["v"]) if row else None
 
     def set_scan_watermark(self, d: date) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO scan_state (k, v) VALUES (?, ?)"
                 " ON CONFLICT(k) DO UPDATE SET v = excluded.v",

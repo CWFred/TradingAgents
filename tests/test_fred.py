@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 import pytest
+import requests
 
 import tradingagents.dataflows.config as config_module
 import tradingagents.default_config as default_config
@@ -85,6 +86,17 @@ class FredConfigTests(unittest.TestCase):
     def test_not_configured_is_a_value_error(self):
         # Routing relies on this subclassing for "vendor unavailable" handling.
         self.assertTrue(issubclass(fred.FredNotConfiguredError, ValueError))
+
+    def test_transport_error_never_exposes_api_key(self):
+        secret = "fred-secret-value"
+        leaked = requests.ConnectionError(
+            f"failed: https://api.stlouisfed.org/fred/series?api_key={secret}"
+        )
+        with mock.patch.dict("os.environ", {"FRED_API_KEY": secret}), \
+                mock.patch.object(fred.requests, "get", side_effect=leaked), \
+                self.assertRaises(fred.FredRequestError) as caught:
+            fred._request("series", {"series_id": "DGS10"})
+        self.assertNotIn(secret, str(caught.exception))
 
 
 @pytest.mark.unit

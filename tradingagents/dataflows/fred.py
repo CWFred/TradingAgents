@@ -81,6 +81,10 @@ class FredNotConfiguredError(VendorNotConfiguredError):
     """
 
 
+class FredRequestError(RuntimeError):
+    """Transport failure whose message never contains the credentialed URL."""
+
+
 def get_api_key() -> str:
     """Retrieve the FRED API key from the environment."""
     api_key = os.getenv("FRED_API_KEY")
@@ -118,19 +122,30 @@ def _resolve_series_id(indicator: str) -> str:
 def _request(path: str, params: dict) -> dict:
     """GET a FRED endpoint, surfacing FRED's JSON error body on a bad request."""
     api_params = {**params, "api_key": get_api_key(), "file_type": "json"}
-    response = requests.get(
-        f"{FRED_API_BASE}/{path}", params=api_params, timeout=REQUEST_TIMEOUT
-    )
-    # FRED returns 400 with a JSON {"error_message": ...} for unknown series IDs
-    # or malformed params; turn that into a clear, actionable error.
-    if response.status_code == 400:
-        try:
-            message = response.json().get("error_message", response.text)
-        except ValueError:
-            message = response.text
-        raise ValueError(f"FRED request failed: {message}")
-    response.raise_for_status()
-    return response.json()
+    response = None
+    try:
+        response = requests.get(
+            f"{FRED_API_BASE}/{path}", params=api_params, timeout=REQUEST_TIMEOUT
+        )
+        # FRED returns 400 with a JSON {"error_message": ...} for unknown series IDs
+        # or malformed params; turn that into a clear, actionable error.
+        if response.status_code == 400:
+            try:
+                message = response.json().get("error_message", response.text)
+            except ValueError:
+                message = response.text
+            raise ValueError(f"FRED request failed: {message}")
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        # requests includes the fully prepared URL in transport exceptions;
+        # that URL contains api_key. Replace it before router/launchd logging.
+        raise FredRequestError(
+            f"FRED transport failed for {path}: {type(exc).__name__}"
+        ) from None
+    finally:
+        if response is not None:
+            response.close()
 
 
 def get_macro_data(
