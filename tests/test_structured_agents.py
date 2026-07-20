@@ -171,6 +171,42 @@ def test_invoke_structured_falls_back_when_result_is_none():
 
 
 @pytest.mark.unit
+def test_invoke_structured_with_result_returns_parsed_object_on_success():
+    from tradingagents.agents.utils.structured import invoke_structured_with_result
+
+    class Obj:
+        def __init__(self):
+            self.rating = "Buy"
+
+    structured = MagicMock()
+    structured.invoke.return_value = Obj()
+    plain = MagicMock()
+
+    rendered, obj = invoke_structured_with_result(
+        structured, plain, "prompt", render=lambda r: r.rating, agent_name="t"
+    )
+    assert rendered == "Buy"
+    assert isinstance(obj, Obj)
+    plain.invoke.assert_not_called()
+
+
+@pytest.mark.unit
+def test_invoke_structured_with_result_returns_none_object_on_fallback():
+    from tradingagents.agents.utils.structured import invoke_structured_with_result
+
+    structured = MagicMock()
+    structured.invoke.side_effect = ValueError("bad JSON")
+    plain = MagicMock()
+    plain.invoke.return_value = MagicMock(content="FREETEXT")
+
+    rendered, obj = invoke_structured_with_result(
+        structured, plain, "prompt", render=lambda r: r.rating, agent_name="t"
+    )
+    assert rendered == "FREETEXT"
+    assert obj is None
+
+
+@pytest.mark.unit
 class TestTraderAgent:
     def test_structured_path_produces_rendered_markdown(self):
         captured = {}

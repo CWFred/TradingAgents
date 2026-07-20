@@ -772,6 +772,36 @@ class TestPortfolioManagerInjection:
         )
         assert decision.reassess_after is None
 
+    def test_pm_state_carries_reassess_fields_when_set(self):
+        decision = PortfolioDecision(
+            rating=PortfolioRating.UNDERWEIGHT,
+            executive_summary="Trim ahead of the binary catalyst.",
+            investment_thesis="Explosion risk is not priced in at this multiple.",
+            reassess_after=date(2026, 8, 3),
+            reassess_trigger="Starship Flight 13 outcome",
+        )
+        llm = _structured_pm_llm({}, decision)
+        pm_node = create_portfolio_manager(llm)
+        result = pm_node(_make_pm_state())
+        assert result["pm_reassess_after"] == "2026-08-03"
+        assert result["pm_reassess_trigger"] == "Starship Flight 13 outcome"
+
+    def test_pm_state_reassess_fields_empty_when_unset(self):
+        llm = _structured_pm_llm({})
+        pm_node = create_portfolio_manager(llm)
+        result = pm_node(_make_pm_state())
+        assert result["pm_reassess_after"] == ""
+        assert result["pm_reassess_trigger"] == ""
+
+    def test_pm_state_reassess_fields_empty_on_freetext_fallback(self):
+        llm = MagicMock()
+        llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
+        llm.invoke.return_value = MagicMock(content="**Rating**: Hold")
+        pm_node = create_portfolio_manager(llm)
+        result = pm_node(_make_pm_state())
+        assert result["pm_reassess_after"] == ""
+        assert result["pm_reassess_trigger"] == ""
+
     def test_pm_falls_back_to_freetext_when_structured_unavailable(self):
         """If a provider does not support with_structured_output, the agent
         falls back to a plain invoke and returns whatever prose the model

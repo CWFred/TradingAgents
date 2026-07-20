@@ -73,6 +73,8 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
+    pm_reassess_after: Annotated[str, "ISO date (YYYY-MM-DD) the Portfolio Manager flagged for scheduled re-analysis, or empty"]
+    pm_reassess_trigger: Annotated[str, "One-line description of what to recheck at pm_reassess_after, or empty"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
     research_memo_context: Annotated[
         str,
