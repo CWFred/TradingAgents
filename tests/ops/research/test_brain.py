@@ -182,6 +182,23 @@ def test_pass_recommendation_shadow_tracks(memo_store):
     assert memo_store.get(outcome.memo_id).status == "passed"
 
 
+def test_completed_hit_resume_reuses_memo_without_any_llm_work(memo_store):
+    first = _run(
+        _good_evidence_llm(), FakeLLM(["bear case", _draft()]), memo_store,
+    )
+
+    evidence = FakeLLM([])
+    thesis = FakeLLM([])
+    resumed = _run(evidence, thesis, memo_store)
+
+    assert resumed.status == "researched"
+    assert resumed.memo_id == first.memo_id
+    assert resumed.recommendation == "buy"
+    assert evidence.prompts == []
+    assert thesis.prompts == []
+    assert len(memo_store.list()) == 1
+
+
 def test_uncited_evidence_stripped_and_thin_research_fails(memo_store):
     # Model cites a section that was never read -> all items dropped -> fail
     # before any thesis-stage spend.
@@ -265,7 +282,10 @@ def test_past_memos_feed_precedents(memo_store):
     prior_id = first.memo_id
 
     thesis_llm2 = FakeLLM(["bear", _draft(precedent_memo_ids=[prior_id])])
-    second = _run(_good_evidence_llm(), thesis_llm2, memo_store)
+    next_hit = _hit()
+    next_hit["id"] = 8
+    next_hit["run_id"] = "screen-2026-07-06-efgh5678"
+    second = _run(_good_evidence_llm(), thesis_llm2, memo_store, hit=next_hit)
     assert second.status == "researched"
     # The thesis prompt actually contained the precedent summary.
     assert prior_id in thesis_llm2.prompts[1]

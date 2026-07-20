@@ -21,6 +21,7 @@ from ops.research.brain import (
     MIN_EVIDENCE_ITEMS,
     ResearchError,
     ResearchOutcome,
+    memo_id_for_hit,
     _build_reading_plan,
     _evidence_bullets,
     _run_evidence_stage,
@@ -155,6 +156,13 @@ def research_short_hit(
     symbol = hit["symbol"]
     payload = hit["payload"]
     outcome = ResearchOutcome(symbol=symbol, hit_id=hit["id"], status="failed")
+    memo_id = memo_id_for_hit(hit, thesis_side="short")
+    completed = memo_store.get(memo_id)
+    if completed is not None:
+        outcome.status = "researched"
+        outcome.memo_id = completed.memo_id
+        outcome.recommendation = "pass" if completed.status == "passed" else "short"
+        return outcome
 
     ctx = price_fetcher(symbol)
     price = ctx.close_on_or_before(today) if ctx is not None else None
@@ -226,8 +234,10 @@ def research_short_hit(
             )
             continue
         memo = Memo(
+            memo_id=memo_id,
             ticker=symbol, as_of_date=today, entry_price_ref=float(price),
-            evidence=kept, status="pending_vetting",
+            evidence=kept,
+            status="passed" if draft.recommendation == "pass" else "pending_vetting",
             authored_by_model=thesis_model_spec or "",
             **draft.model_dump(exclude={"recommendation"}),
         )
@@ -250,8 +260,6 @@ def research_short_hit(
             )
         if not errors:
             memo_store.save(memo)
-            if draft.recommendation == "pass":
-                memo_store.mark_passed(memo.memo_id)
             outcome.status = "researched"
             outcome.memo_id = memo.memo_id
             outcome.recommendation = draft.recommendation

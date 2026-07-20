@@ -168,6 +168,23 @@ def test_pass_draft_is_shadow_tracked(memo_store):
     assert memo_store.get(outcome.memo_id).status == "passed"
 
 
+def test_completed_short_hit_resume_reuses_memo_without_any_llm_work(memo_store):
+    first = _run(
+        _good_evidence_llm(), FakeLLM(["defense", _draft()]), memo_store,
+    )
+
+    evidence = FakeLLM([])
+    thesis = FakeLLM([])
+    resumed = _run(evidence, thesis, memo_store)
+
+    assert resumed.status == "researched"
+    assert resumed.memo_id == first.memo_id
+    assert resumed.recommendation == "short"
+    assert evidence.prompts == []
+    assert thesis.prompts == []
+    assert len(memo_store.list()) == 1
+
+
 def test_insufficient_evidence_fails_without_saving(memo_store):
     starved = FakeLLM([EvidenceBatch(items=[])] * 5)
     thesis_llm = FakeLLM([])  # must never be consulted
