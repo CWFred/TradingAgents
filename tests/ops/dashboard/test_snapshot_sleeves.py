@@ -166,7 +166,7 @@ def test_short_sleeve_positions_replay_through_short_broker(tmp_path):
     cfg = _config(tmp_path)
     with Journal(cfg.short_journal_path) as j:
         j.record_equity_snapshot(
-            equity=Decimal("10000"), cash=Decimal("10400"), kind="short_run", at=NOW)
+            equity=Decimal("10020"), cash=Decimal("10400"), kind="short_run", at=NOW)
         j.record_order(
             client_order_id="s1", symbol="GHST", side="SHORT",
             notional_dollars=Decimal("400"), stop_loss_price=None)
@@ -178,8 +178,22 @@ def test_short_sleeve_positions_replay_through_short_broker(tmp_path):
     # the ShortPaperBroker dispatch is what makes this visible.
     assert short["positions"] == [
         {"symbol": "GHST", "quantity": "40", "entry": "10", "stop": None}]
-    assert short["equity"] == "10000"
+    assert short["equity"] == "10020"
+    assert short["collateral_cash"] == "10400"
+    assert short["gross_short_exposure"] == "380"
+    assert Decimal(short["gross_short_exposure_pct"]) == Decimal("380") / Decimal("10020")
+    assert short["unrealized_pnl"] == "20"
     assert len(short["fills_today"]) == 1
+
+
+def test_long_sleeve_short_metrics_are_null(tmp_path):
+    cfg = _config(tmp_path)
+    _seed_momentum(cfg, NOW)
+    mom = build_snapshot(cfg, now=NOW)["sleeves"]["momentum"]
+    assert mom["collateral_cash"] is None
+    assert mom["gross_short_exposure"] is None
+    assert mom["gross_short_exposure_pct"] is None
+    assert mom["unrealized_pnl"] is None
 
 
 def test_insider_sleeve_uses_long_replay(tmp_path):

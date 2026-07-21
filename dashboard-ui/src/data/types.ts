@@ -29,6 +29,10 @@ export interface SeriesPoint { at: string; equity: string }
 export interface Sleeve {
   equity: string | null;
   cash: string | null;
+  collateral_cash: string | null;
+  gross_short_exposure: string | null;
+  gross_short_exposure_pct: string | null;
+  unrealized_pnl: string | null;
   day_pnl_pct: string | null;
   lifetime_pnl_pct: string | null;
   series: SeriesPoint[];

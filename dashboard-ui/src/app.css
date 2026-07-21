@@ -113,6 +113,32 @@ a:hover { color: #5fe0d2; }
 .card-eq { font-family: var(--mono); font-size: 21px; font-weight: 600; letter-spacing: -.01em; }
 .card svg { display: block; margin: 8px 0 9px; }
 .card-foot { display: flex; align-items: center; justify-content: space-between; font-family: var(--mono); font-size: 11px; color: var(--tx3); }
+.card-short { grid-column: span 2; border-color: var(--bd2); }
+.card-short .card-top { margin-bottom: 7px; }
+.metric-label {
+  color: var(--tx3); font-family: var(--mono); font-size: 9.5px;
+  letter-spacing: .06em; text-transform: uppercase;
+}
+.short-card-metrics {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--bd); margin-top: 3px; padding-top: 10px; gap: 12px;
+}
+.short-metric { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.metric-value {
+  color: var(--tx); font-family: var(--mono); font-size: 12px;
+  font-weight: 600; white-space: nowrap;
+}
+.metric-value.pos { color: var(--pos); }
+.metric-value.neg { color: var(--neg); }
+.metric-value.flat, .metric-value.muted { color: var(--tx2); }
+.metric-note {
+  color: var(--tx3); font-family: var(--mono); font-size: 9.5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+@media (max-width: 700px) {
+  .card-short { grid-column: span 1; }
+  .short-card-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: 10px; }
+}
 
 /* ---- UNAVAIL chip ---- */
 .unavail { display: flex; align-items: center; gap: 7px; padding: 10px 0 4px; color: var(--tx3); font-size: 11.5px; min-width: 0; }
@@ -225,6 +251,19 @@ select.filter {
 .drawer-eq .big { font-family: var(--mono); font-size: 30px; font-weight: 600; letter-spacing: -.01em; }
 .drawer-eq .day { font-family: var(--mono); font-size: 14px; font-weight: 600; }
 .drawer-sub { display: flex; gap: 18px; font-family: var(--mono); font-size: 12px; color: var(--tx3); margin-bottom: 16px; }
+.drawer-eq-label {
+  display: block; color: var(--tx3); font-family: var(--mono); font-size: 10px;
+  letter-spacing: .07em; text-transform: uppercase; margin-bottom: 2px;
+}
+.short-drawer-metrics {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px; padding: 13px 14px; margin: 12px 0 9px;
+  border: 1px solid var(--bd); border-radius: 9px; background: var(--panel2);
+}
+.short-drawer-metrics .metric-value { font-size: 14px; }
+.short-accounting-note {
+  color: var(--tx3); font-size: 11px; line-height: 1.5; margin: 0 2px 16px;
+}
 .drawer svg.big { display: block; background: var(--panel2); border: 1px solid var(--bd); border-radius: 9px; margin-bottom: 20px; }
 .drawer .mini-label { display: block; margin-bottom: 8px; }
 .drawer .none { color: var(--tx3); font-size: 12px; font-style: italic; margin-bottom: 20px; }

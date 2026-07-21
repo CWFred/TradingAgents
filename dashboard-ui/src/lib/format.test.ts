@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fmt2, fmtMoney, fmtPct, fmtQty, guardAge, relAge } from "./format";
+import { fmt2, fmtMoney, fmtPct, fmtQty, fmtSignedMoney, guardAge, relAge } from "./format";
 
 describe("fmtMoney (string decimal, never floats)", () => {
   it("rounds half-up and groups thousands", () => {
@@ -24,6 +24,16 @@ describe("fmtMoney (string decimal, never floats)", () => {
   });
   it("survives values beyond float precision", () => {
     expect(fmtMoney("90071992547409929.05", 2)).toBe("$90,071,992,547,409,929.05");
+  });
+});
+
+describe("fmtSignedMoney", () => {
+  it("adds an explicit profit sign and returns a semantic class", () => {
+    expect(fmtSignedMoney("8.578", 2)).toEqual({ text: "+$8.58", cls: "pos" });
+    expect(fmtSignedMoney("-12.4", 2)).toEqual({ text: "−$12.40", cls: "neg" });
+    expect(fmtSignedMoney("0.00", 2)).toEqual({ text: "$0.00", cls: "flat" });
+    expect(fmtSignedMoney("-0.001", 2)).toEqual({ text: "$0.00", cls: "flat" });
+    expect(fmtSignedMoney(null, 2)).toEqual({ text: "—", cls: "flat" });
   });
 });
 
