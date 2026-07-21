@@ -47,6 +47,8 @@ describe("fmtQty", () => {
     expect(fmtQty("100.005")).toBe("100.01");
     expect(fmtQty("7")).toBe("7");
     expect(fmtQty("-30.128")).toBe("-30.13");
+    expect(fmtQty("5000")).toBe("5000");
+    expect(fmtQty("12345.678")).toBe("12345.68");
   });
 });
 

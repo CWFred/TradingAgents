@@ -49,8 +49,9 @@ export function fmtQty(q: string): string {
   // zeros so whole shares read "12" not "12.00".
   const bare = fmt2(q);
   if (bare === "—") return q;
-  // fmt2 emits a Unicode minus (−); quantities read as plain ASCII "-".
-  return bare.replace("−", "-").replace(/\.?0+$/, "");
+  // fmt2 emits a Unicode minus (−) and thousands separators; quantities
+  // read as plain ASCII "-" with no grouping commas.
+  return bare.replace("−", "-").replace(/,/g, "").replace(/\.?0+$/, "");
 }
 
 // Bare 2dp number (no currency symbol) reusing fmtMoney's string-safe,
