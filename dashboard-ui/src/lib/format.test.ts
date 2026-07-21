@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fmtMoney, fmtPct, fmtQty, guardAge, relAge } from "./format";
+import { fmt2, fmtMoney, fmtPct, fmtQty, guardAge, relAge } from "./format";
 
 describe("fmtMoney (string decimal, never floats)", () => {
   it("rounds half-up and groups thousands", () => {
@@ -41,6 +41,24 @@ describe("fmtQty", () => {
     expect(fmtQty("12.0000")).toBe("12");
     expect(fmtQty("0.5000")).toBe("0.5");
     expect(fmtQty("-30")).toBe("-30");
+  });
+  it("rounds long quantities to 2dp", () => {
+    expect(fmtQty("12.3456789")).toBe("12.35");
+    expect(fmtQty("100.005")).toBe("100.01");
+    expect(fmtQty("7")).toBe("7");
+    expect(fmtQty("-30.128")).toBe("-30.13");
+    expect(fmtQty("5000")).toBe("5000");
+    expect(fmtQty("12345.678")).toBe("12345.68");
+  });
+});
+
+describe("fmt2 (bare 2dp number)", () => {
+  it("formats decimal strings to 2dp without a currency symbol", () => {
+    expect(fmt2("142.3")).toBe("142.30");
+    expect(fmt2("12.3456")).toBe("12.35");
+    expect(fmt2("-5.005")).toBe("−5.01");
+    expect(fmt2(null)).toBe("—");
+    expect(fmt2("")).toBe("—");
   });
 });
 

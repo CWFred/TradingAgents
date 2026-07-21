@@ -10,13 +10,17 @@ from __future__ import annotations
 import json
 import os
 from collections import deque
+from collections.abc import Callable
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from ops.config import OpsConfig, load_config
 from ops.dashboard.events_view import merged_events
+from ops.dashboard.pnl import build_sleeve_pnl
 from ops.dashboard.snapshot import build_snapshot
+from ops.quotes import make_yfinance_quote_source
 
 DEFAULT_PORT = 8321
 _HOST = "127.0.0.1"
@@ -48,6 +52,10 @@ def _tail(path: Path, lines: int) -> str:
 
 class _Handler(BaseHTTPRequestHandler):
     config: OpsConfig  # injected by make_server via subclassing
+    # One shared quote source for the server's lifetime: the yfinance client
+    # is built once (not per thread/request), so its 60s TTL cache amortizes
+    # across the frontend's 5s polls instead of being discarded each time.
+    quote_source: Callable[[str], Decimal]  # injected by make_server
 
     def log_message(self, *args) -> None:  # noqa: D102 — quiet by design
         pass
@@ -74,6 +82,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._api_events(query)
             elif parsed.path == "/api/logs":
                 self._api_logs(query)
+            elif parsed.path == "/api/pnl":
+                self._api_pnl(query)
             elif parsed.path.startswith("/api/"):
                 self._send_json({"error": "not found"}, status=404)
             else:
@@ -110,6 +120,29 @@ class _Handler(BaseHTTPRequestHandler):
         lines = min(_MAX_LOG_LINES, max(1, int(query.get("lines", ["200"])[0])))
         self._send_json({"file": key, "text": _tail(files[key], lines)})
 
+    # Sleeve name -> (journal path, short?, broker_cls). The one dashboard
+    # code path allowed to fetch quotes; build_snapshot stays journal-only.
+    def _api_pnl(self, query) -> None:
+        from ops.broker.short_paper import ShortPaperBroker
+        sleeves = {
+            "momentum": (self.config.journal_path, False, None),
+            "research": (self.config.research_journal_path, False, None),
+            "baseline": (self.config.baseline_journal_path, False, None),
+            "short": (self.config.short_journal_path, True, ShortPaperBroker),
+            "insider": (self.config.insider_journal_path, False, None),
+        }
+        name = query.get("sleeve", [""])[0]
+        if name not in sleeves:
+            self._send_json(
+                {"error": f"sleeve must be one of {sorted(sleeves)}"},
+                status=400)
+            return
+        path, is_short, broker_cls = sleeves[name]
+        result = build_sleeve_pnl(
+            path, is_short=is_short, quote_source=self.quote_source,
+            broker_cls=broker_cls)
+        self._send_json({"sleeve": name, **result})
+
     def _static(self, path: str) -> None:
         name = "index.html" if path in ("", "/") else path.lstrip("/")
         target = (_STATIC_DIR / name).resolve()
@@ -122,7 +155,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def make_server(config: OpsConfig, port: int) -> ThreadingHTTPServer:
-    handler = type("Handler", (_Handler,), {"config": config})
+    # staticmethod so the source stays a plain callable: a bare function on
+    # the class would bind `self` and get called as quote_source(self, symbol).
+    handler = type("Handler", (_Handler,),
+                   {"config": config,
+                    "quote_source": staticmethod(make_yfinance_quote_source())})
     return ThreadingHTTPServer((_HOST, port), handler)
 
 

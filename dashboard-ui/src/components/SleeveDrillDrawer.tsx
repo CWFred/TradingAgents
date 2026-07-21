@@ -1,9 +1,11 @@
 import { useEffect } from "react";
 import type { Section, Sleeve } from "../data/types";
 import { isErr } from "../data/types";
-import { fmtMoney, fmtPct, fmtQty, hhmmss } from "../lib/format";
+import { fmt2, fmtMoney, fmtPct, fmtQty, hhmmss } from "../lib/format";
 import { sideClass } from "../lib/colors";
+import { usePnl, usePnlMode } from "../data/pnl";
 import Sparkline from "./Sparkline";
+import { PnlCell, PnlHeader } from "./PnlCell";
 import Unavail from "./Unavail";
 
 const KIND_LABELS: Record<string, string> = {
@@ -23,6 +25,10 @@ export default function SleeveDrillDrawer({ name, sleeve, onClose }: {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const [mode, toggleMode] = usePnlMode();
+  const active = !!sleeve && !isErr(sleeve);
+  const { rows: pnl } = usePnl(name, active);
+
   const body = () => {
     if (!sleeve) return <div className="panel-empty">no data</div>;
     if (isErr(sleeve)) return <Unavail msg={sleeve.error} />;
@@ -41,7 +47,7 @@ export default function SleeveDrillDrawer({ name, sleeve, onClose }: {
           <span>lifetime <span className={life.cls}>{life.text}</span></span>
           <span>cash <span style={{ color: "var(--tx2)" }}>{fmtMoney(sleeve.cash, 2)}</span></span>
         </div>
-        <Sparkline series={sleeve.series} w={520} h={120}
+        <Sparkline series={sleeve.series} w={700} h={120}
           up={day.cls !== "neg"} className="big" />
 
         <span className="mini-label">Positions</span>
@@ -51,14 +57,16 @@ export default function SleeveDrillDrawer({ name, sleeve, onClose }: {
             <thead><tr>
               <th>symbol</th><th className="num">qty</th>
               <th className="num">entry</th><th className="num">stop</th>
+              <PnlHeader mode={mode} onToggle={toggleMode} />
             </tr></thead>
             <tbody>
               {sleeve.positions.map((p) => (
                 <tr key={p.symbol}>
                   <td className="sym">{p.symbol}</td>
                   <td className={`num ${shortSleeve || p.quantity.startsWith("-") ? "neg" : ""}`}>{fmtQty(p.quantity)}</td>
-                  <td className="num">{p.entry ?? "—"}</td>
-                  <td className="num" style={{ color: "var(--tx3)" }}>{p.stop ?? "—"}</td>
+                  <td className="num">{p.entry ? fmt2(p.entry) : "—"}</td>
+                  <td className="num" style={{ color: "var(--tx3)" }}>{p.stop ? fmt2(p.stop) : "—"}</td>
+                  <PnlCell row={pnl[p.symbol]} mode={mode} />
                 </tr>
               ))}
             </tbody>
@@ -76,7 +84,7 @@ export default function SleeveDrillDrawer({ name, sleeve, onClose }: {
                   <td><span className={`badge ${sideClass(f.side)}`}>{f.side.toUpperCase()}</span></td>
                   <td className="sym">{f.symbol}</td>
                   <td className="num">{fmtQty(f.quantity)}</td>
-                  <td className="num" style={{ color: "var(--tx)" }}>{f.price}</td>
+                  <td className="num" style={{ color: "var(--tx)" }}>{fmt2(f.price)}</td>
                 </tr>
               ))}
             </tbody>

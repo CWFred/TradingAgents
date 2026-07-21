@@ -211,7 +211,7 @@ select.filter {
 .overlay { position: fixed; inset: 0; z-index: 80; background: rgba(6,8,11,.6); backdrop-filter: blur(2px); border: none; }
 .drawer {
   position: fixed; top: 0; right: 0; bottom: 0; z-index: 81;
-  width: 480px; max-width: 92vw; background: var(--panel);
+  width: min(760px, 92vw); max-width: 92vw; background: var(--panel);
   border-left: 1px solid var(--bd2); box-shadow: -20px 0 50px rgba(0,0,0,.5);
   display: flex; flex-direction: column; animation: slidein .22s ease;
 }
@@ -259,3 +259,10 @@ select.filter {
   display: flex; flex-direction: column; gap: 8px;
   padding: 10px 16px 14px; border-top: 1px solid var(--bd);
 }
+
+.pnl-h { padding: 0; }
+.pnl-toggle {
+  font: inherit; color: var(--tx3); background: none; border: none;
+  cursor: pointer; padding: 6px 8px; text-transform: none;
+}
+.pnl-toggle:hover { color: var(--tx); }

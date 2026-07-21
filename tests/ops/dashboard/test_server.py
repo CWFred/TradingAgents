@@ -91,6 +91,47 @@ def test_unknown_route_404(base_url):
     assert e.value.code == 404
 
 
+def test_pnl_unknown_sleeve_400(base_url):
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _get(base_url + "/api/pnl?sleeve=nope")
+    assert e.value.code == 400
+
+
+def test_pnl_route_returns_rows(cfg, monkeypatch):
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    # Real replay-accepted BUY: side="BUY" plus a matching order row, mirroring
+    # tests/ops/dashboard/test_pnl.py::_seed_long / test_snapshot_sleeves.py.
+    at = datetime(2026, 7, 15, 18, 0, tzinfo=timezone.utc)
+    with Journal(cfg.journal_path) as j:
+        j.record_event("service_started", {"pid": 1})
+        j.record_cash_adjustment(kind="seed", amount=Decimal("10000"), note="t")
+        j.record_order(client_order_id="c1", symbol="BAH", side="BUY",
+                       notional_dollars=Decimal("1000"),
+                       stop_loss_price=Decimal("92"))
+        j.record_fill(order_id="o1", client_order_id="c1", symbol="BAH",
+                      side="BUY", quantity=Decimal("10"), price=Decimal("100"),
+                      filled_at=at, stop_loss_price=Decimal("92"))
+    monkeypatch.setattr(
+        "ops.dashboard.server.make_yfinance_quote_source",
+        lambda **_: (lambda s: Decimal("110")))
+    server = make_server(cfg, port=0)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    host, port = server.server_address
+    try:
+        status, body = _get(f"http://127.0.0.1:{port}/api/pnl?sleeve=momentum")
+        data = json.loads(body)
+        assert status == 200
+        assert data["sleeve"] == "momentum"
+        assert data["positions"][0]["symbol"] == "BAH"
+        assert data["positions"][0]["pnl_dollar"] == "100"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_events_route_merges_short_and_insider(base_url, cfg):
     with Journal(cfg.short_journal_path) as j:
         j.record_event("fill", {"side": "SHORT", "quantity": "30",

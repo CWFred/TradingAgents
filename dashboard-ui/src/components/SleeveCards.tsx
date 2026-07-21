@@ -43,7 +43,7 @@ function Card({ name, sleeve, onOpen }: {
       <Sparkline series={sleeve.series} w={120} h={30} up={up} />
       <div className="card-foot">
         <span>life <span className={life.cls}>{life.text}</span></span>
-        <span>cash {fmtMoney(sleeve.cash, 0)}</span>
+        <span>cash {fmtMoney(sleeve.cash, 2)}</span>
       </div>
     </button>
   );
