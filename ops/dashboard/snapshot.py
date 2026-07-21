@@ -175,6 +175,22 @@ def _refuse_quotes(symbol: str) -> Decimal:
     )
 
 
+def replay_positions(path: str, *, broker_cls=None) -> list[dict[str, Any]]:
+    """Open positions for one ledger via journal replay (readonly,
+    refuse-quotes guard). Shared by the snapshot's _one_sleeve and the
+    /api/pnl builder so both see identical positions."""
+    if broker_cls is None:
+        from ops.broker.paper import PaperBroker as broker_cls
+    with Journal(path, readonly=True) as j:
+        replay = broker_cls.from_journal(
+            journal=j, quote_source=_refuse_quotes, starting_cash=Decimal("0"))
+        return [
+            {"symbol": p.symbol, "quantity": p.quantity,
+             "entry": p.avg_entry_price, "stop": p.stop_loss_price}
+            for p in replay.get_positions()
+        ]
+
+
 def _one_sleeve(path: str, now: datetime, *, broker_cls=None) -> dict[str, Any]:
     """One ledger's P&L / positions / fills.
 
@@ -209,12 +225,12 @@ def _one_sleeve(path: str, now: datetime, *, broker_cls=None) -> dict[str, Any]:
         has_cash_basis = bool(j.read_cash_adjustments())
         replay = broker_cls.from_journal(
             journal=j, quote_source=_refuse_quotes, starting_cash=Decimal("0"))
-        positions = [
-            {"symbol": p.symbol, "quantity": p.quantity,
-             "entry": p.avg_entry_price, "stop": p.stop_loss_price}
-            for p in replay.get_positions()
-        ]
         replay_cash = replay.get_cash()
+    positions = [
+        {"symbol": p["symbol"], "quantity": p["quantity"],
+         "entry": p["entry"], "stop": p["stop"]}
+        for p in replay_positions(path, broker_cls=broker_cls)
+    ]
 
     latest = snaps[-1] if snaps else None
     # day_pnl needs a snapshot taken TODAY (latest["at"] >= day_start): a

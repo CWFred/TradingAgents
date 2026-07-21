@@ -6,7 +6,11 @@ position profits when the price falls.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
+from typing import Any
+
+from ops.broker.base import QuoteUnavailable
 
 
 def position_pnl(
@@ -31,3 +35,37 @@ def position_pnl(
     pnl_dollar = move * quantity
     pnl_pct = (move / entry) if entry != 0 else None
     return pnl_dollar, pnl_pct
+
+
+def build_sleeve_pnl(
+    path: str,
+    *,
+    is_short: bool,
+    quote_source: Callable[[str], Decimal],
+    broker_cls=None,
+) -> dict[str, Any]:
+    """Per-position P&L for one sleeve ledger. Replays positions
+    (journal-only), then marks each with a live quote. A quote failure
+    degrades that row only (null P&L + error); every other row resolves."""
+    from ops.dashboard.snapshot import replay_positions
+
+    rows: list[dict[str, Any]] = []
+    for pos in replay_positions(path, broker_cls=broker_cls):
+        symbol = pos["symbol"]
+        row: dict[str, Any] = {"symbol": symbol}
+        try:
+            price = quote_source(symbol)
+        except QuoteUnavailable as exc:
+            row.update(price=None, pnl_dollar=None, pnl_pct=None,
+                       error=str(exc))
+            rows.append(row)
+            continue
+        d, p = position_pnl(pos["entry"], pos["quantity"], price,
+                            is_short=is_short)
+        row.update(
+            price=str(price),
+            pnl_dollar=None if d is None else str(d),
+            pnl_pct=None if p is None else str(p),
+        )
+        rows.append(row)
+    return {"positions": rows}
