@@ -45,8 +45,21 @@ export function fmtPct(
 }
 
 export function fmtQty(q: string): string {
-  if (!q.includes(".")) return q;
-  return q.replace(/0+$/, "").replace(/\.$/, "");
+  // Round paper-fill precision noise to at most 2dp, then strip trailing
+  // zeros so whole shares read "12" not "12.00".
+  const bare = fmt2(q);
+  if (bare === "—") return q;
+  // fmt2 emits a Unicode minus (−); quantities read as plain ASCII "-".
+  return bare.replace("−", "-").replace(/\.?0+$/, "");
+}
+
+// Bare 2dp number (no currency symbol) reusing fmtMoney's string-safe,
+// float-free rounding. For prices/entries/stops that are decimal strings.
+export function fmt2(value: string | null | undefined): string {
+  const m = fmtMoney(value, 2);
+  return m.startsWith("$") ? m.slice(1)
+    : m.startsWith("−$") ? "−" + m.slice(2)
+    : m;
 }
 
 export function relAge(iso: string | null | undefined, nowMs = Date.now()): string {
