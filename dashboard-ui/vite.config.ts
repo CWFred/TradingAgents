@@ -18,5 +18,5 @@ export default defineConfig({
   server: {
     proxy: { "/api": "http://127.0.0.1:8321" },
   },
-  test: { environment: "node" },
+  test: { environment: "node", setupFiles: ["./src/test-setup.ts"] },
 });

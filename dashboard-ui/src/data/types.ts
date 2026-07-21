@@ -73,6 +73,12 @@ export interface EventItem {
   source: string; id: number; at: string; kind: string; text: string;
 }
 
+export interface PnlRow {
+  symbol: string; price: string | null;
+  pnl_dollar: string | null; pnl_pct: string | null; error?: string;
+}
+export interface PnlResponse { sleeve: string; positions: PnlRow[] }
+
 export interface CurrentActivity {
   job: string; stage: string | null; symbol: string | null;
   seq: string | null; reason: string | null;
