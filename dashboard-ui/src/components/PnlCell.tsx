@@ -21,7 +21,6 @@ export function PnlCell({ row, mode }: { row: PnlRow | undefined; mode: PnlMode 
     const v = row.pnl_dollar;
     const neg = v != null && v.startsWith("-");
     const cls = v == null ? "" : neg ? "neg" : /[1-9]/.test(v) ? "pos" : "flat";
-    // fmtMoney handles the sign; strip its leading "-" source since it signs itself
     return <td className={`num ${cls}`}>{fmtMoney(v, 2)}</td>;
   }
   const p = fmtPct(row.pnl_pct);

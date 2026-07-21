@@ -1,6 +1,6 @@
 import type { Fill, Section, Sleeve } from "../data/types";
 import { SLEEVE_ORDER, isErr } from "../data/types";
-import { fmtQty, hhmmss } from "../lib/format";
+import { fmtQty, fmt2, hhmmss } from "../lib/format";
 import { sideClass } from "../lib/colors";
 import Unavail from "./Unavail";
 
@@ -40,7 +40,7 @@ export default function FillsPanel({ sleeves }: { sleeves: SleevesSection }) {
                   <td><span className={`badge ${sideClass(f.side)}`}>{f.side.toUpperCase()}</span></td>
                   <td className="sym">{f.symbol}</td>
                   <td className="num">{fmtQty(f.quantity)}</td>
-                  <td className="num" style={{ color: "var(--tx)" }}>{f.price}</td>
+                  <td className="num" style={{ color: "var(--tx)" }}>{fmt2(f.price)}</td>
                 </tr>
               ))}
             </tbody>

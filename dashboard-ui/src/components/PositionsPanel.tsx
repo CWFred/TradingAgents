@@ -1,16 +1,21 @@
 import { useState } from "react";
 import type { Section, Sleeve } from "../data/types";
 import { SLEEVE_ORDER, isErr } from "../data/types";
-import { fmtQty } from "../lib/format";
+import { fmtQty, fmt2 } from "../lib/format";
+import { usePnl, usePnlMode } from "../data/pnl";
+import type { PnlMode } from "../data/pnl";
+import { PnlCell, PnlHeader } from "./PnlCell";
 import Unavail from "./Unavail";
 
 type SleevesSection = Section<Record<string, Section<Sleeve>>> | null;
 
-function Group({ name, sleeve, open, onToggle, short }: {
+function Group({ name, sleeve, open, onToggle, short, mode, onToggleMode }: {
   name: string; sleeve: Section<Sleeve>; open: boolean; onToggle: () => void;
   // short broker journals positive magnitudes, so short exposure is flagged by sleeve, not by sign
   short: boolean;
+  mode: PnlMode; onToggleMode: () => void;
 }) {
+  const { rows: pnl } = usePnl(name, open);
   const err = isErr(sleeve);
   const rows = err ? [] : sleeve.positions;
   const summary = err ? "unavailable"
@@ -32,6 +37,7 @@ function Group({ name, sleeve, open, onToggle, short }: {
               <thead><tr>
                 <th>symbol</th><th className="num">qty</th>
                 <th className="num">entry</th><th className="num">stop</th>
+                <PnlHeader mode={mode} onToggle={onToggleMode} />
               </tr></thead>
               <tbody>
                 {rows.map((r) => (
@@ -40,8 +46,9 @@ function Group({ name, sleeve, open, onToggle, short }: {
                     <td className={`num ${short || r.quantity.startsWith("-") ? "neg" : ""}`}>
                       {fmtQty(r.quantity)}
                     </td>
-                    <td className="num">{r.entry ?? "—"}</td>
-                    <td className="num" style={{ color: "var(--tx3)" }}>{r.stop ?? "—"}</td>
+                    <td className="num">{r.entry ? fmt2(r.entry) : "—"}</td>
+                    <td className="num" style={{ color: "var(--tx3)" }}>{r.stop ? fmt2(r.stop) : "—"}</td>
+                    <PnlCell row={pnl[r.symbol]} mode={mode} />
                   </tr>
                 ))}
               </tbody>
@@ -55,6 +62,7 @@ function Group({ name, sleeve, open, onToggle, short }: {
 
 export default function PositionsPanel({ sleeves }: { sleeves: SleevesSection }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ momentum: true });
+  const [mode, toggleMode] = usePnlMode();
   const err = sleeves && isErr(sleeves) ? sleeves : null;
   // TS can't narrow `sleeves?.[name]` on the union — narrow once here.
   const data = sleeves && !isErr(sleeves) ? sleeves : null;
@@ -74,7 +82,7 @@ export default function PositionsPanel({ sleeves }: { sleeves: SleevesSection })
           return (
             <Group key={name} name={name} sleeve={s} open={!!expanded[name]}
               onToggle={() => setExpanded((e) => ({ ...e, [name]: !e[name] }))}
-              short={name === "short"} />
+              short={name === "short"} mode={mode} onToggleMode={toggleMode} />
           );
         })
       )}
