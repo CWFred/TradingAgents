@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 from collections import deque
+from collections.abc import Callable
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -50,6 +52,10 @@ def _tail(path: Path, lines: int) -> str:
 
 class _Handler(BaseHTTPRequestHandler):
     config: OpsConfig  # injected by make_server via subclassing
+    # One shared quote source for the server's lifetime: the yfinance client
+    # is built once (not per thread/request), so its 60s TTL cache amortizes
+    # across the frontend's 5s polls instead of being discarded each time.
+    quote_source: Callable[[str], Decimal]  # injected by make_server
 
     def log_message(self, *args) -> None:  # noqa: D102 — quiet by design
         pass
@@ -132,9 +138,8 @@ class _Handler(BaseHTTPRequestHandler):
                 status=400)
             return
         path, is_short, broker_cls = sleeves[name]
-        quote_source = make_yfinance_quote_source()
         result = build_sleeve_pnl(
-            path, is_short=is_short, quote_source=quote_source,
+            path, is_short=is_short, quote_source=self.quote_source,
             broker_cls=broker_cls)
         self._send_json({"sleeve": name, **result})
 
@@ -150,7 +155,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def make_server(config: OpsConfig, port: int) -> ThreadingHTTPServer:
-    handler = type("Handler", (_Handler,), {"config": config})
+    # staticmethod so the source stays a plain callable: a bare function on
+    # the class would bind `self` and get called as quote_source(self, symbol).
+    handler = type("Handler", (_Handler,),
+                   {"config": config,
+                    "quote_source": staticmethod(make_yfinance_quote_source())})
     return ThreadingHTTPServer((_HOST, port), handler)
 
 

@@ -14,8 +14,13 @@ export function PnlHeader({ mode, onToggle }: { mode: PnlMode; onToggle: () => v
 }
 
 export function PnlCell({ row, mode }: { row: PnlRow | undefined; mode: PnlMode }) {
-  if (!row || (row.pnl_dollar == null && row.pnl_pct == null)) {
+  if (!row) {
+    // Not fetched yet: loading placeholder.
     return <td className="num" style={{ color: "var(--tx3)" }}>…</td>;
+  }
+  if (row.pnl_dollar == null && row.pnl_pct == null) {
+    // Fetched but unquotable (per-symbol quote error): dash, reason on hover.
+    return <td className="num" style={{ color: "var(--tx3)" }} title={row.error}>—</td>;
   }
   if (mode === "dollar") {
     const v = row.pnl_dollar;
