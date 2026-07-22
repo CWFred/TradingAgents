@@ -251,6 +251,33 @@ def _one_sleeve(path: str, now: datetime, *, broker_cls=None) -> dict[str, Any]:
             and first["equity"] != 0):
         lifetime_pnl = (latest["equity"] - first["equity"]) / first["equity"]
 
+    # A short sale credits borrowed-share proceeds to the broker's ledger
+    # cash, so that number is collateral rather than spendable capital or
+    # performance. Surface the economically useful decomposition explicitly:
+    #
+    #   net equity = collateral cash - current short liability
+    #
+    # All values share the latest persisted snapshot timestamp. Entry basis
+    # comes from fill replay and lets the UI distinguish open-position P&L
+    # from total sleeve return without using JavaScript float arithmetic.
+    is_short = broker_cls is not None and broker_cls.__name__ == "ShortPaperBroker"
+    collateral_cash: Decimal | None = None
+    gross_short_exposure: Decimal | None = None
+    gross_short_exposure_pct: Decimal | None = None
+    unrealized_pnl: Decimal | None = None
+    if is_short and latest is not None:
+        collateral_cash = latest["cash"]
+        gross_short_exposure = max(
+            Decimal("0"), collateral_cash - latest["equity"],
+        )
+        if latest["equity"] != 0:
+            gross_short_exposure_pct = gross_short_exposure / latest["equity"]
+        entry_basis = sum(
+            (p["quantity"] * p["entry"] for p in positions),
+            Decimal("0"),
+        )
+        unrealized_pnl = entry_basis - gross_short_exposure
+
     return {
         "equity": latest["equity"] if latest else None,
         "cash": replay_cash if has_cash_basis else (latest["cash"] if latest else None),
@@ -258,6 +285,10 @@ def _one_sleeve(path: str, now: datetime, *, broker_cls=None) -> dict[str, Any]:
         "equity_kind": latest["kind"] if latest else None,
         "day_pnl_pct": day_pnl,
         "lifetime_pnl_pct": lifetime_pnl,
+        "collateral_cash": collateral_cash,
+        "gross_short_exposure": gross_short_exposure,
+        "gross_short_exposure_pct": gross_short_exposure_pct,
+        "unrealized_pnl": unrealized_pnl,
         "series": [{"at": s["at"], "equity": s["equity"]} for s in snaps[-60:]],
         "positions": positions,
         "fills_today": [

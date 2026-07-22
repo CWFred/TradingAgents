@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import type { Section, Sleeve } from "../data/types";
 import { isErr } from "../data/types";
-import { fmt2, fmtMoney, fmtPct, fmtQty, hhmmss } from "../lib/format";
+import { fmt2, fmtMoney, fmtPct, fmtQty, fmtSignedMoney, hhmmss } from "../lib/format";
 import { sideClass } from "../lib/colors";
 import { usePnl, usePnlMode } from "../data/pnl";
 import Sparkline from "./Sparkline";
@@ -35,18 +35,49 @@ export default function SleeveDrillDrawer({ name, sleeve, onClose }: {
     const shortSleeve = name === "short"; // short broker journals positive magnitudes — flag exposure by sleeve, not sign
     const day = fmtPct(sleeve.day_pnl_pct);
     const life = fmtPct(sleeve.lifetime_pnl_pct);
+    const unrealized = fmtSignedMoney(sleeve.unrealized_pnl, 2);
+    const grossPct = fmtPct(sleeve.gross_short_exposure_pct).text.replace(/^\+/, "");
     return (
       <>
+        {shortSleeve && <span className="drawer-eq-label">net equity</span>}
         <div className="drawer-eq">
           <span className="big" title={sleeve.equity ? `$${sleeve.equity}` : undefined}>
             {fmtMoney(sleeve.equity, 2)}
           </span>
           <span className={`day ${day.cls}`}>{day.text}</span>
         </div>
-        <div className="drawer-sub">
-          <span>lifetime <span className={life.cls}>{life.text}</span></span>
-          <span>cash <span style={{ color: "var(--tx2)" }}>{fmtMoney(sleeve.cash, 2)}</span></span>
-        </div>
+        {shortSleeve ? (
+          <>
+            <div className="short-drawer-metrics">
+              <div className="short-metric">
+                <span className="metric-label">total return</span>
+                <span className={`metric-value ${life.cls}`}>{life.text}</span>
+              </div>
+              <div className="short-metric">
+                <span className="metric-label">open P&amp;L</span>
+                <span className={`metric-value ${unrealized.cls}`}>{unrealized.text}</span>
+              </div>
+              <div className="short-metric">
+                <span className="metric-label">gross short exposure</span>
+                <span className="metric-value">{fmtMoney(sleeve.gross_short_exposure, 2)}</span>
+                <span className="metric-note">{grossPct} of net equity</span>
+              </div>
+              <div className="short-metric">
+                <span className="metric-label">collateral cash</span>
+                <span className="metric-value muted">{fmtMoney(sleeve.collateral_cash, 2)}</span>
+                <span className="metric-note">includes borrowed-share proceeds</span>
+              </div>
+            </div>
+            <div className="short-accounting-note">
+              Collateral cash is not profit. Net equity subtracts the current cost to cover every open short.
+            </div>
+          </>
+        ) : (
+          <div className="drawer-sub">
+            <span>lifetime <span className={life.cls}>{life.text}</span></span>
+            <span>cash <span style={{ color: "var(--tx2)" }}>{fmtMoney(sleeve.cash, 2)}</span></span>
+          </div>
+        )}
         <Sparkline series={sleeve.series} w={700} h={120}
           up={day.cls !== "neg"} className="big" />
 

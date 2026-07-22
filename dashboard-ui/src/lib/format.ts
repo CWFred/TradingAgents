@@ -33,6 +33,19 @@ export function fmtMoney(value: string | null | undefined, dp: number): string {
   return (neg && !isZero ? "−" : "") + "$" + ip + (dp ? "." + fp : "");
 }
 
+export function fmtSignedMoney(
+  value: string | null | undefined,
+  dp: number,
+): { text: string; cls: "pos" | "neg" | "flat" } {
+  if (value == null || value === "") return { text: "—", cls: "flat" };
+  const raw = String(value);
+  if (!/^-?\d+(\.\d*)?$/.test(raw)) return { text: raw, cls: "flat" };
+  const rendered = fmtMoney(raw, dp);
+  const isZero = !/[1-9]/.test(rendered);
+  const cls = isZero ? "flat" : raw.startsWith("-") ? "neg" : "pos";
+  return { text: cls === "pos" ? `+${rendered}` : rendered, cls };
+}
+
 export function fmtPct(
   ratio: string | null | undefined,
 ): { text: string; cls: "pos" | "neg" | "flat" } {

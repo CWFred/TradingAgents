@@ -1,6 +1,6 @@
 import type { Section, Sleeve } from "../data/types";
 import { SLEEVE_ORDER, isErr } from "../data/types";
-import { fmtMoney, fmtPct } from "../lib/format";
+import { fmtMoney, fmtPct, fmtSignedMoney } from "../lib/format";
 import Sparkline from "./Sparkline";
 import Unavail from "./Unavail";
 
@@ -28,23 +28,50 @@ function Card({ name, sleeve, onOpen }: {
       </button>
     );
   }
+  const shortSleeve = name === "short";
   const day = fmtPct(sleeve.day_pnl_pct);
   const life = fmtPct(sleeve.lifetime_pnl_pct);
+  const unrealized = fmtSignedMoney(sleeve.unrealized_pnl, 2);
+  const grossPct = fmtPct(sleeve.gross_short_exposure_pct).text.replace(/^\+/, "");
   const up = day.cls !== "neg";
   return (
-    <button type="button" className="card" onClick={onOpen}>
+    <button type="button" className={`card${shortSleeve ? " card-short" : ""}`} onClick={onOpen}>
       <div className="card-top">
         <span className="nm">{name}</span>
-        <span className={`day ${day.cls}`}>{day.text}</span>
+        <span className={`day ${day.cls}`}>{shortSleeve ? "today " : ""}{day.text}</span>
       </div>
+      {shortSleeve && <div className="metric-label">net equity</div>}
       <div className="card-eq" title={sleeve.equity ? `$${sleeve.equity}` : undefined}>
         {fmtMoney(sleeve.equity, 2)}
       </div>
-      <Sparkline series={sleeve.series} w={120} h={30} up={up} />
-      <div className="card-foot">
-        <span>life <span className={life.cls}>{life.text}</span></span>
-        <span>cash {fmtMoney(sleeve.cash, 2)}</span>
-      </div>
+      <Sparkline series={sleeve.series} w={shortSleeve ? 260 : 120} h={30} up={up} />
+      {shortSleeve ? (
+        <div className="short-card-metrics">
+          <div className="short-metric">
+            <span className="metric-label">total return</span>
+            <span className={`metric-value ${life.cls}`}>{life.text}</span>
+          </div>
+          <div className="short-metric">
+            <span className="metric-label">open P&amp;L</span>
+            <span className={`metric-value ${unrealized.cls}`}>{unrealized.text}</span>
+          </div>
+          <div className="short-metric">
+            <span className="metric-label">gross short</span>
+            <span className="metric-value">{fmtMoney(sleeve.gross_short_exposure, 0)}</span>
+            <span className="metric-note">{grossPct} of equity</span>
+          </div>
+          <div className="short-metric">
+            <span className="metric-label">collateral cash</span>
+            <span className="metric-value muted">{fmtMoney(sleeve.collateral_cash, 0)}</span>
+            <span className="metric-note">includes short proceeds</span>
+          </div>
+        </div>
+      ) : (
+        <div className="card-foot">
+          <span>life <span className={life.cls}>{life.text}</span></span>
+          <span>cash {fmtMoney(sleeve.cash, 2)}</span>
+        </div>
+      )}
     </button>
   );
 }
