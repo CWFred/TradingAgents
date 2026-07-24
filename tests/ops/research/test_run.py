@@ -102,6 +102,21 @@ def _run(config, *, dry_run=False, facts=None, triggers=None):
     )
 
 
+def test_screen_inputs_and_results_pairs_inputs_with_results():
+    """The public PIT wrapper returns each name's NameInputs paired with its
+    ScreenResult, in universe order, stamped with the asof — no store touched."""
+    universe = [_name("AAA"), _name("BBB")]
+    pairs = run_mod.screen_inputs_and_results(
+        universe, asof=date(2025, 6, 16),
+        facts_fetcher=lambda t: _facts_for_passer(),
+        triggers_finder=lambda t, *, asof, **kw: [],
+        price_context_fetcher=lambda s: _price_ctx(),
+    )
+    assert [ni.symbol for ni, _ in pairs] == ["AAA", "BBB"]
+    assert [res.symbol for _, res in pairs] == ["AAA", "BBB"]
+    assert all(res.asof == date(2025, 6, 16) for _, res in pairs)
+
+
 def test_current_pe_price_is_in_the_latest_eps_era():
     """A split between the latest fiscal year end and asof must not deflate
     the current-P/E leg: the asof price is expressed in the era of the
