@@ -828,6 +828,7 @@ def generate_cases(
     max_jobs: int | None = None,
     brain_version: str = DEFAULT_BRAIN_VERSION,
     prompt_version: str = DEFAULT_PROMPT_VERSION,
+    source: str = "recorded",
     executor: Callable[..., GenerationSummary] | None = None,
     preparer: Callable[..., Sequence[BacktestCase]] | None = None,
 ) -> GenerationResult:
@@ -850,7 +851,14 @@ def generate_cases(
             if start <= case.asof <= end
         ]
         if not available:
-            prepare = preparer or _default_prepare_cases
+            if preparer is not None:
+                prepare = preparer
+            elif source == "reconstruction":
+                prepare = _reconstruction_prepare_cases
+            elif source == "recorded":
+                prepare = _default_prepare_cases
+            else:
+                raise InvalidBacktestRequest(f"unknown case source {source!r}")
             prepare(
                 store=store, config=config, sleeve=sleeve,
                 start=start, end=end, case_count=case_count,

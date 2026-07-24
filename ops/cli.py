@@ -223,9 +223,12 @@ def backtest_run(
               help="Let the live-first background queue run missing jobs when ds4 is idle.")
 @click.option("--max-jobs", default=None, type=int,
               help="Stop after this many claimed jobs (resumable).")
+@click.option("--source", type=click.Choice(["recorded", "reconstruction"]),
+              default="recorded", show_default=True,
+              help="recorded live hits (default) or historical reconstruction screen.")
 def backtest_generate(
     sleeve: str, start: str, end: str, case_count: int | None,
-    execute: bool, enqueue: bool, max_jobs: int | None,
+    execute: bool, enqueue: bool, max_jobs: int | None, source: str,
 ) -> None:
     """Plan or explicitly execute resumable frozen-memo generation."""
     from ops.backtest.service import generate_cases
@@ -236,7 +239,7 @@ def backtest_generate(
         result = generate_cases(
             config=config, sleeve=sleeve, start=start_date, end=end_date,
             case_count=case_count or config.backtest_case_count, today=today,
-            execute=execute, enqueue=enqueue, max_jobs=max_jobs,
+            execute=execute, enqueue=enqueue, max_jobs=max_jobs, source=source,
         )
     except Exception as exc:
         raise _backtest_error(exc) from exc

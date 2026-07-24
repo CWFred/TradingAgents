@@ -3,6 +3,7 @@ import sys
 from datetime import date, datetime, timezone
 from types import ModuleType
 
+import pytest
 from click.testing import CliRunner
 
 from ops.backtest.cases import CaseCandidate
@@ -11,6 +12,8 @@ from ops.backtest.models import BacktestCase, CaseSource, ContextItem, ContextMa
 from ops.backtest.service import (
     DEFAULT_BRAIN_VERSION,
     DEFAULT_PROMPT_VERSION,
+    GenerationResult,
+    InvalidBacktestRequest,
     generate_cases,
     prepare_cases,
     process_enqueued_generation,
@@ -253,6 +256,173 @@ def test_generate_prepares_empty_store_through_injected_pit_seams(tmp_path):
         cases = store.list_cases(sleeve="research")
         assert [case.source for case in cases] == [CaseSource.LIVE_IMPORT]
         assert store.get_context_manifest(cases[0].case_id) is not None
+
+
+def _prepared_from_candidate(candidate):
+    def prepare(**kwargs):
+        return prepare_cases(
+            store=kwargs["store"], sleeve=kwargs["sleeve"],
+            start=kwargs["start"], end=kwargs["end"],
+            case_count=kwargs["case_count"],
+            case_source=lambda **_window: [candidate],
+            context_builder=lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            ),
+        )
+
+    return prepare
+
+
+def test_generate_source_reconstruction_selects_reconstruction_preparer(
+    tmp_path, monkeypatch,
+):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    candidate = CaseCandidate(
+        symbol="AAA", asof=date(2025, 6, 15), score=3,
+        trigger={"kind": "reconstruction"},
+        screen_payload={"symbol": "AAA", "asof": "2025-06-15"},
+        source_ref="reconstruction:1",
+    )
+    calls: list[str] = []
+
+    def fake_reconstruction(**kwargs):
+        calls.append("reconstruction")
+        return _prepared_from_candidate(candidate)(**kwargs)
+
+    def forbidden_default(**_kwargs):
+        raise AssertionError("recorded preparer must not run for reconstruction")
+
+    monkeypatch.setattr(
+        "ops.backtest.service._reconstruction_prepare_cases", fake_reconstruction,
+    )
+    monkeypatch.setattr(
+        "ops.backtest.service._default_prepare_cases", forbidden_default,
+    )
+
+    result = generate_cases(
+        config=cfg, sleeve="research", start=date(2025, 6, 1),
+        end=date(2025, 6, 30), case_count=40, today=date(2025, 7, 1),
+        source="reconstruction",
+    )
+
+    assert calls == ["reconstruction"]
+    assert (result.total, result.cached, result.pending) == (1, 0, 1)
+
+
+def test_generate_default_source_selects_recorded_preparer(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    candidate = CaseCandidate(
+        symbol="AAA", asof=date(2025, 6, 15), score=3,
+        trigger={"kind": "recorded_live_screen"},
+        screen_payload={"symbol": "AAA", "asof": "2025-06-15"},
+        source_ref="screen:run:1",
+    )
+    calls: list[str] = []
+
+    def fake_default(**kwargs):
+        calls.append("recorded")
+        return _prepared_from_candidate(candidate)(**kwargs)
+
+    def forbidden_reconstruction(**_kwargs):
+        raise AssertionError("reconstruction preparer must not run by default")
+
+    monkeypatch.setattr(
+        "ops.backtest.service._default_prepare_cases", fake_default,
+    )
+    monkeypatch.setattr(
+        "ops.backtest.service._reconstruction_prepare_cases", forbidden_reconstruction,
+    )
+
+    generate_cases(
+        config=cfg, sleeve="research", start=date(2025, 6, 1),
+        end=date(2025, 6, 30), case_count=40, today=date(2025, 7, 1),
+    )
+
+    assert calls == ["recorded"]
+
+
+def test_generate_explicit_preparer_overrides_source(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    candidate = CaseCandidate(
+        symbol="AAA", asof=date(2025, 6, 15), score=3,
+        trigger={"kind": "explicit"},
+        screen_payload={"symbol": "AAA", "asof": "2025-06-15"},
+        source_ref="explicit:1",
+    )
+    calls: list[str] = []
+
+    def explicit_preparer(**kwargs):
+        calls.append("explicit")
+        return _prepared_from_candidate(candidate)(**kwargs)
+
+    def forbidden(**_kwargs):
+        raise AssertionError("source selection must not run when preparer is passed")
+
+    monkeypatch.setattr(
+        "ops.backtest.service._reconstruction_prepare_cases", forbidden,
+    )
+    monkeypatch.setattr("ops.backtest.service._default_prepare_cases", forbidden)
+
+    generate_cases(
+        config=cfg, sleeve="research", start=date(2025, 6, 1),
+        end=date(2025, 6, 30), case_count=40, today=date(2025, 7, 1),
+        source="reconstruction", preparer=explicit_preparer,
+    )
+
+    assert calls == ["explicit"]
+
+
+def test_generate_unknown_source_is_rejected(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    with pytest.raises(InvalidBacktestRequest, match="unknown case source"):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 1),
+            end=date(2025, 6, 30), case_count=40, today=date(2025, 7, 1),
+            source="bogus",
+        )
+
+
+def test_generate_cli_threads_source_into_service(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--source", "reconstruction",
+        "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["source"] == "reconstruction"
+
+
+def test_generate_cli_defaults_source_to_recorded(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["source"] == "recorded"
 
 
 def test_contaminated_probe_cutoff_blocks_run_and_generation_selection(tmp_path):
