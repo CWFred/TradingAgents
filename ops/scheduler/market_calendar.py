@@ -36,6 +36,11 @@ class MarketCalendar:
         sched = self._cal.schedule(start_date=d, end_date=d)
         return not sched.empty
 
+    def sessions_between(self, start: date, end: date) -> list[date]:
+        """Return NYSE trading days in ``[start, end]`` inclusive, ascending."""
+        sched = self._cal.schedule(start_date=start, end_date=end)
+        return [ts.date() for ts in sched.index]
+
     def previous_close(self, at: datetime | None = None) -> datetime:
         when = at if at is not None else datetime.now(timezone.utc)
         start = (when - timedelta(days=7)).date()

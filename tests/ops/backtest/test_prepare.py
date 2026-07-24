@@ -5,8 +5,10 @@ import pytest
 
 from ops.backtest.cases import CaseCandidate, HistoricalCaseSource
 from ops.backtest.context import ContextArtifact
+from ops.backtest.models import CaseSource, ContextManifest
 from ops.backtest.prepare import PreparedContext, prepare_cases
 from ops.backtest.store import BacktestStore
+from ops.config import OpsConfig
 
 pytestmark = pytest.mark.unit
 
@@ -65,3 +67,69 @@ def test_prepare_rejects_future_context_without_persisting_manifest(tmp_path):
         manifest = store.get_context_manifest(summary.selected_case_ids[0])
         assert manifest.included == ()
         assert manifest.excluded[0].source_ref == "future"
+
+
+class _FakeReconstructionFetcher:
+    """Stands in for ReconstructionScreenerFetcher: __call__(asof) -> candidates."""
+
+    def __init__(self, symbols):
+        self._symbols = symbols
+        self.calls = []
+
+    def __call__(self, asof):
+        self.calls.append(asof)
+        return tuple(
+            CaseCandidate(
+                symbol=symbol,
+                asof=asof,
+                score=Decimal(str(score)),
+                trigger={"kind": "historical_screener_replay", "asof": asof.isoformat()},
+                screen_payload={"passed": True},
+                source_ref=f"reconstruction:{asof.isoformat()}:{symbol}",
+            )
+            for symbol, score in self._symbols
+        )
+
+
+def test_reconstruction_prepare_inserts_matured_cases(tmp_path, monkeypatch):
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    # Deterministic session list: 11 trading days in the window. With
+    # spacing_sessions=10 this samples index 0 and index 10 -> two dates.
+    sessions = [date(2025, 6, d) for d in (2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    # Reuse a fake sealed context builder so no EDGAR/network access happens.
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    fetcher = _FakeReconstructionFetcher([("AAA", 2), ("BBB", 1)])
+    with BacktestStore(path) as store:
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=4,
+            spacing_sessions=10, universe=["AAA", "BBB"], fetcher=fetcher,
+        )
+        assert len(cases) == 4
+        assert {c.source for c in cases} == {CaseSource.RECONSTRUCTION}
+        assert all(date(2025, 6, 2) <= c.asof <= date(2025, 7, 1) for c in cases)
+        assert fetcher.calls == [date(2025, 6, 2), date(2025, 6, 16)]
+
+        stored = store.list_cases(sleeve="research")
+        assert len(stored) == 4
+        assert {c.source for c in stored} == {CaseSource.RECONSTRUCTION}
+        for case in stored:
+            assert store.get_context_manifest(case.case_id) is not None
