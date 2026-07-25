@@ -755,7 +755,7 @@ def _reconstruction_prepare_cases(
 ) -> tuple[BacktestCase, ...]:
     """Reconstruct cases by replaying the screener at sampled historical dates.
 
-    Every case is stamped :attr:`CaseSource.RECONSTRUCTION` and the fetcher is
+    Every case is stamped :attr:`CaseSource.CURRENT_UNIVERSE_RECONSTRUCTION` and the fetcher is
     wrapped in :class:`CurrentUniverseReconstructionSource`: these cases are
     survivorship-biased over today's universe membership and must never be
     rendered as a clean point-in-time historical screen.
@@ -791,14 +791,14 @@ def _reconstruction_prepare_cases(
     candidates = collect_candidates(source, sampled)
     selected = select_candidates(
         candidates, target_count=case_count,
-        per_date_cap=max(1, case_count // max(1, len(sampled))),
+        per_date_cap=max(1, -(-case_count // max(1, len(sampled)))),
     )
     prepared: list[BacktestCase] = []
     context_builder = _sealed_context_builder(config)
     for candidate in selected:
         case = construct_case(
             candidate, sleeve=sleeve, cutoff=store.effective_cutoff,
-            source=CaseSource.RECONSTRUCTION,
+            source=CaseSource.CURRENT_UNIVERSE_RECONSTRUCTION,
         )
         manifest = context_builder(case, candidate)
         if manifest.case_id != case.case_id or manifest.asof != case.asof:

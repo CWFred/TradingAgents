@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -124,12 +124,53 @@ def test_reconstruction_prepare_inserts_matured_cases(tmp_path, monkeypatch):
             spacing_sessions=10, universe=["AAA", "BBB"], fetcher=fetcher,
         )
         assert len(cases) == 4
-        assert {c.source for c in cases} == {CaseSource.RECONSTRUCTION}
+        assert {c.source for c in cases} == {CaseSource.CURRENT_UNIVERSE_RECONSTRUCTION}
         assert all(date(2025, 6, 2) <= c.asof <= date(2025, 7, 1) for c in cases)
         assert fetcher.calls == [date(2025, 6, 2), date(2025, 6, 16)]
 
         stored = store.list_cases(sleeve="research")
         assert len(stored) == 4
-        assert {c.source for c in stored} == {CaseSource.RECONSTRUCTION}
+        assert {c.source for c in stored} == {CaseSource.CURRENT_UNIVERSE_RECONSTRUCTION}
         for case in stored:
             assert store.get_context_manifest(case.case_id) is not None
+
+
+def test_reconstruction_prepare_reaches_case_count_on_floor_edge(tmp_path, monkeypatch):
+    """per_date_cap must use CEIL: floor(5/3)==1 would cap selection at 3.
+
+    Three sampled dates each yield two candidates (six available). Requesting
+    five cases must actually insert five: ceil(5/3)==2 per date allows up to
+    six, whereas the old floor(5/3)==1 would have capped at one-per-date -> 3.
+    """
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    # 21 sessions so spacing_sessions=10 samples indices 0, 10, 20 -> three dates.
+    sessions = [date(2025, 6, 1) + timedelta(days=d) for d in range(21)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    fetcher = _FakeReconstructionFetcher([("AAA", 2), ("BBB", 1)])
+    with BacktestStore(path) as store:
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=sessions[0], end=sessions[-1], case_count=5,
+            spacing_sessions=10, universe=["AAA", "BBB"], fetcher=fetcher,
+        )
+        # ceil path reaches 5; floor path would have stopped at 3.
+        assert len(cases) == 5
+        assert len(fetcher.calls) == 3

@@ -29,7 +29,6 @@ class CaseSource(str, Enum):
     POINT_IN_TIME = "point-in-time"
     CURRENT_UNIVERSE_RECONSTRUCTION = "exploratory/current-universe-reconstruction"
     LIVE_IMPORT = "live-import"
-    RECONSTRUCTION = "reconstruction"
 
 
 class DecisionAction(str, Enum):
