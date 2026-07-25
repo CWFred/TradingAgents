@@ -63,3 +63,28 @@ def test_quote_source_raises_quote_unavailable_on_yfinance_exception():
         q = make_yfinance_quote_source()
         with pytest.raises(QuoteUnavailable, match="AAPL"):
             q("AAPL")
+
+
+def test_quote_source_times_out_instead_of_hanging():
+    """A yfinance fetch that hangs must not block the caller forever — with
+    timeout_seconds set it raises QuoteUnavailable promptly (the /api/pnl
+    thread-stranding fix)."""
+    import time as _time
+    from ops.broker.base import QuoteUnavailable
+
+    def hang(symbol):
+        _time.sleep(30)  # simulate a wedged yfinance network call
+
+    with patch("ops.quotes.yf.Ticker", side_effect=hang):
+        q = make_yfinance_quote_source(timeout_seconds=1)
+        started = _time.monotonic()
+        with pytest.raises(QuoteUnavailable, match="timed out"):
+            q("AAPL")
+        assert _time.monotonic() - started < 5  # returned promptly, not 30s
+
+
+def test_no_timeout_preserves_inline_fetch():
+    """Default (timeout_seconds=None) keeps the original inline behavior."""
+    with patch("ops.quotes.yf.Ticker", return_value=_fake_ticker(200.05)):
+        q = make_yfinance_quote_source()
+        assert q("AAPL") == Decimal("200.05")

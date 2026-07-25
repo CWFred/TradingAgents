@@ -159,7 +159,8 @@ def make_server(config: OpsConfig, port: int) -> ThreadingHTTPServer:
     # the class would bind `self` and get called as quote_source(self, symbol).
     handler = type("Handler", (_Handler,),
                    {"config": config,
-                    "quote_source": staticmethod(make_yfinance_quote_source())})
+                    "quote_source": staticmethod(
+                        make_yfinance_quote_source(timeout_seconds=8))})
     return ThreadingHTTPServer((_HOST, port), handler)
 
 
