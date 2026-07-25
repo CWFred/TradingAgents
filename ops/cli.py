@@ -259,6 +259,35 @@ def backtest_generate(
         click.echo("plan only; pass --execute to run local-model generation")
 
 
+@backtest.command("prices")
+@click.option("--sleeve", default="research", show_default=True,
+              type=click.Choice(["research"]))
+@click.option("--start", required=True, help="First case date (YYYY-MM-DD).")
+@click.option("--end", default="today", show_default=True,
+              help="Last case date (YYYY-MM-DD or today).")
+def backtest_prices(sleeve: str, start: str, end: str) -> None:
+    """Backfill the price cache for a sleeve's cases plus the benchmark."""
+    from ops.backtest.price_backfill import backfill_prices
+    from ops.backtest.store import BacktestStore
+
+    config = load_config()
+    try:
+        start_date, end_date, _today = _backtest_window(start, end)
+        with BacktestStore(
+            config.backtest_store_path, cutoff=config.backtest_cutoff,
+        ) as store:
+            summary = backfill_prices(
+                config, store, sleeve=sleeve, start=start_date, end=end_date,
+            )
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    click.echo(f"prices: {summary.symbols} symbol(s), {summary.bars} bar(s)")
+    if summary.failures:
+        click.echo(f"failures: {len(summary.failures)}")
+        for symbol, reason in summary.failures:
+            click.echo(f"  {symbol}: {reason}")
+
+
 @backtest.command("report")
 @click.argument("run_id")
 def backtest_report(run_id: str) -> None:
