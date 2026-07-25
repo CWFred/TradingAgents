@@ -52,3 +52,11 @@ def test_previous_close_is_before_at():
     at = datetime(2026, 7, 2, 14, tzinfo=timezone.utc)
     prev = cal.previous_close(at=at)
     assert prev < at
+
+
+def test_sessions_between_returns_trading_days_only():
+    cal = MarketCalendar()
+    # 07-03 is closed (July 4 observed), 07-04/07-05 are the weekend.
+    sessions = cal.sessions_between(date(2026, 7, 2), date(2026, 7, 6))
+    assert sessions == [date(2026, 7, 2), date(2026, 7, 6)]
+    assert all(isinstance(d, date) for d in sessions)

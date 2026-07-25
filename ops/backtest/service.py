@@ -741,6 +741,80 @@ def _default_prepare_cases(
     )
 
 
+def _reconstruction_prepare_cases(
+    *,
+    store: BacktestStore,
+    config: OpsConfig,
+    sleeve: str,
+    start: date,
+    end: date,
+    case_count: int,
+    spacing_sessions: int = 10,
+    universe: Any = None,
+    fetcher: Callable[[date], Sequence[CaseCandidate]] | None = None,
+) -> tuple[BacktestCase, ...]:
+    """Reconstruct cases by replaying the screener at sampled historical dates.
+
+    Every case is stamped :attr:`CaseSource.CURRENT_UNIVERSE_RECONSTRUCTION` and the fetcher is
+    wrapped in :class:`CurrentUniverseReconstructionSource`: these cases are
+    survivorship-biased over today's universe membership and must never be
+    rendered as a clean point-in-time historical screen.
+    """
+    from ops.backtest.cases import (
+        CurrentUniverseReconstructionSource,
+        collect_candidates,
+        sample_sessions,
+    )
+    from ops.scheduler.market_calendar import MarketCalendar
+
+    if fetcher is None:
+        from ops.backtest.historical_source import ReconstructionScreenerFetcher
+        from ops.research.run import fetch_price_context
+        from ops.research.triggers import find_triggers
+        from ops.universe.smallcap import build_smallcap_universe
+        from tradingagents.dataflows import edgar
+        from tradingagents.dataflows.edgar_facts import get_company_facts
+
+        edgar.get_user_agent()  # fail fast, same as run_screen
+        universe = universe if universe is not None else build_smallcap_universe()
+        fetcher = ReconstructionScreenerFetcher(
+            universe=universe, facts_fetcher=get_company_facts,
+            price_context_fetcher=fetch_price_context,
+            triggers_finder=find_triggers,
+        )
+
+    sessions = MarketCalendar().sessions_between(start, end)
+    sampled = sample_sessions(
+        sessions, start=start, end=end, spacing_sessions=spacing_sessions,
+    )
+    source = CurrentUniverseReconstructionSource(fetch=fetcher)
+    candidates = collect_candidates(source, sampled)
+    selected = select_candidates(
+        candidates, target_count=case_count,
+        per_date_cap=max(1, -(-case_count // max(1, len(sampled)))),
+    )
+    prepared: list[BacktestCase] = []
+    context_builder = _sealed_context_builder(config)
+    for candidate in selected:
+        case = construct_case(
+            candidate, sleeve=sleeve, cutoff=store.effective_cutoff,
+            source=CaseSource.CURRENT_UNIVERSE_RECONSTRUCTION,
+        )
+        manifest = context_builder(case, candidate)
+        if manifest.case_id != case.case_id or manifest.asof != case.asof:
+            raise InvalidBacktestRequest(
+                f"context builder returned a manifest for another case: {case.symbol}"
+            )
+        store.insert_case(case)
+        store.save_context_manifest(manifest)
+        prepared.append(case)
+    if not prepared:
+        raise MissingBacktestArtifacts(
+            f"reconstruction screen produced no passing cases in {start}..{end}"
+        )
+    return tuple(prepared)
+
+
 def generate_cases(
     *,
     config: OpsConfig,
@@ -754,6 +828,7 @@ def generate_cases(
     max_jobs: int | None = None,
     brain_version: str = DEFAULT_BRAIN_VERSION,
     prompt_version: str = DEFAULT_PROMPT_VERSION,
+    source: str = "recorded",
     executor: Callable[..., GenerationSummary] | None = None,
     preparer: Callable[..., Sequence[BacktestCase]] | None = None,
 ) -> GenerationResult:
@@ -776,7 +851,14 @@ def generate_cases(
             if start <= case.asof <= end
         ]
         if not available:
-            prepare = preparer or _default_prepare_cases
+            if preparer is not None:
+                prepare = preparer
+            elif source == "reconstruction":
+                prepare = _reconstruction_prepare_cases
+            elif source == "recorded":
+                prepare = _default_prepare_cases
+            else:
+                raise InvalidBacktestRequest(f"unknown case source {source!r}")
             prepare(
                 store=store, config=config, sleeve=sleeve,
                 start=start, end=end, case_count=case_count,

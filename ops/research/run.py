@@ -17,7 +17,7 @@ from ops.journal import Journal
 from ops.quotes import make_yfinance_quote_source
 from ops.research.baseline import auto_write_off_delisted, update_baseline_portfolio
 from ops.research.prices import PriceContext, fetch_price_context
-from ops.research.screener import NameInputs, screen_universe
+from ops.research.screener import NameInputs, ScreenResult, screen_universe
 from ops.research.store import ScreenStore
 from ops.research.triggers import (
     SELLOFF_LOOKBACK_DAYS,
@@ -159,6 +159,25 @@ def _build_screen_inputs(
             print(f"[screen] skipped {msg}", file=sys.stderr)
             errors.append(msg)
     return inputs, errors
+
+
+def screen_inputs_and_results(
+    universe, *, asof, facts_fetcher, triggers_finder, price_context_fetcher,
+) -> tuple[tuple[NameInputs, ScreenResult], ...]:
+    """Public PIT screen returning (NameInputs, ScreenResult) pairs, without
+    touching the screen store. Shared by the live screen and the backtest
+    historical case source so both use identical input assembly.
+
+    screen_universe returns results in input order; strict=True fails loudly
+    if that invariant ever changes.
+    """
+    inputs, _errors = _build_screen_inputs(
+        universe, asof=asof, facts_fetcher=facts_fetcher,
+        triggers_finder=triggers_finder,
+        price_context_fetcher=price_context_fetcher,
+    )
+    results = screen_universe(inputs, asof=asof)
+    return tuple(zip(inputs, results, strict=True))
 
 
 def run_short_screen(
