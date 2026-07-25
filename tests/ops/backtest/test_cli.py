@@ -425,6 +425,36 @@ def test_generate_cli_defaults_source_to_recorded(tmp_path, monkeypatch):
     assert captured["source"] == "recorded"
 
 
+def test_prices_cli_backfills_window_and_prints_summary(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    BacktestStore(path).close()
+    from ops.backtest.price_backfill import BackfillSummary
+
+    captured: dict = {}
+
+    def fake_backfill_prices(config, store, **kwargs):
+        captured.update(kwargs)
+        captured["store"] = store
+        return BackfillSummary(
+            symbols=3, bars=120, failures=(("ZZZ", "no data"),),
+        )
+
+    monkeypatch.setattr(
+        "ops.backtest.price_backfill.backfill_prices", fake_backfill_prices,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "prices", "--start", "2025-06-02", "--end", "2025-07-15",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["sleeve"] == "research"
+    assert captured["start"] == date(2025, 6, 2)
+    assert captured["end"] == date(2025, 7, 15)
+    assert isinstance(captured["store"], BacktestStore)
+    assert "3" in result.output and "120" in result.output
+    assert "ZZZ" in result.output and "no data" in result.output
+
+
 def test_contaminated_probe_cutoff_blocks_run_and_generation_selection(tmp_path):
     path = tmp_path / "backtest.sqlite"
     _seed_case(path)
