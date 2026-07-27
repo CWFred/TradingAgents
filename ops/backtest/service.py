@@ -714,15 +714,19 @@ def _sealed_context_builder(
             ))
         prices = PriceCache(config.backtest_store_path)
         bars = prices.bars(case.symbol, end=case.asof, adjusted_to=case.asof)
-        if bars:
-            artifacts.append(ContextArtifact(
-                kind="price_history", source_ref=f"price-cache:{case.symbol}:{case.asof}",
-                available_at=case.asof,
-                content=canonical_json({
-                    "closes": {bar.session: bar.adjusted_close for bar in bars},
-                }),
-                metadata={"symbol": case.symbol},
-            ))
+        if not bars:
+            raise MissingBacktestArtifacts(
+                f"price cache has no bars for {case.symbol} on/before {case.asof}; "
+                "backfill prices for the case window before sealing manifests"
+            )
+        artifacts.append(ContextArtifact(
+            kind="price_history", source_ref=f"price-cache:{case.symbol}:{case.asof}",
+            available_at=case.asof,
+            content=canonical_json({
+                "closes": {bar.session: bar.adjusted_close for bar in bars},
+            }),
+            metadata={"symbol": case.symbol},
+        ))
         return build_context_manifest(
             case_id=case.case_id, asof=case.asof, artifacts=artifacts,
         )

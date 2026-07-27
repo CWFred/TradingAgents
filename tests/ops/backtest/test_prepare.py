@@ -174,3 +174,19 @@ def test_reconstruction_prepare_reaches_case_count_on_floor_edge(tmp_path, monke
         # ceil path reaches 5; floor path would have stopped at 3.
         assert len(cases) == 5
         assert len(fetcher.calls) == 3
+
+
+def test_sealed_context_builder_fails_closed_without_price_bars(tmp_path, monkeypatch):
+    """An empty price cache must abort manifest sealing, not silently omit
+    price history (2026-07-27 incident: 40 memos guardrail-rejected because
+    manifests were sealed minutes before the price backfill ran)."""
+    from ops.backtest.models import BacktestCase
+    from ops.backtest.service import MissingBacktestArtifacts, _sealed_context_builder
+    from tradingagents.dataflows import edgar
+
+    monkeypatch.setattr(edgar, "get_user_agent", lambda: "test-agent")
+    monkeypatch.setattr(edgar, "list_filings", lambda ticker, **kwargs: [])
+    config = OpsConfig(backtest_store_path=str(tmp_path / "backtest.sqlite"))
+    case = BacktestCase.create(sleeve="research", symbol="AAA", asof=date(2025, 6, 16))
+    with pytest.raises(MissingBacktestArtifacts, match="price"):
+        _sealed_context_builder(config)(case, None)
