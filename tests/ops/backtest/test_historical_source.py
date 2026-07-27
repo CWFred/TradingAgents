@@ -6,7 +6,7 @@ facts/price fetchers once per universe symbol -- that is what makes the caching
 assertion meaningful: the fetcher wraps them in per-symbol caches, so a two-date
 sweep fetches each symbol's data once, not once per date.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
@@ -79,7 +79,14 @@ def test_fetcher_returns_passing_candidates_and_caches_per_symbol(monkeypatch):
     assert a[0].trigger["asof"] == "2025-06-16"
     assert a[0].asof == date(2025, 6, 16)
     assert a[0].score == Decimal(1)
-    assert a[0].screen_payload == {"passed": True, "cheap": True, "quality": True}
+    # Full live-shaped payload: the entire ScreenResult dump plus the
+    # symbol/asof keys the brain's screen summary requires (2026-07-27
+    # incident: the old 3-key payload KeyError'd every regenerated memo).
+    assert a[0].screen_payload["passed"] is True
+    assert a[0].screen_payload["cheap"] is True
+    assert a[0].screen_payload["quality"] is True
+    assert a[0].screen_payload["symbol"] == "AAA"
+    assert a[0].screen_payload["asof"] == "2025-06-16"
     assert a[0].source_ref == "reconstruction:2025-06-16:AAA"
     # per-symbol data fetched once total, reused across both asofs:
     assert calls["facts"] == 2 and calls["price"] == 2  # AAA + BBB, not x2 dates

@@ -4,13 +4,26 @@ survivorship-biased and never rendered as a clean point-in-time screen.
 Per-name facts/prices are fetched once and reused across every sampled asof."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
-from ops.backtest.cases import CaseCandidate, RECONSTRUCTION_SOURCE_MODE
+from ops.backtest.cases import RECONSTRUCTION_SOURCE_MODE, CaseCandidate
 from ops.research.run import screen_inputs_and_results
+
+
+def _result_payload(result: Any, symbol: str, asof: date) -> dict:
+    """Full live-shaped hit payload: the ScreenResult dump (mirroring the
+    screen store's ``json.dumps(asdict(result), default=str)``) with the
+    symbol/asof keys the research brain's screen summary requires."""
+    raw = asdict(result) if is_dataclass(result) else dict(result)
+    payload = json.loads(json.dumps(raw, default=str))
+    payload.setdefault("symbol", symbol)
+    payload.setdefault("asof", asof.isoformat())
+    return payload
 
 
 @dataclass
@@ -51,8 +64,7 @@ class ReconstructionScreenerFetcher:
                 score=Decimal(len(inputs.triggers) or 1),
                 trigger={"kind": "historical_screener_replay",
                          "asof": asof.isoformat()},
-                screen_payload={"passed": True, "cheap": result.cheap,
-                                "quality": result.quality},
+                screen_payload=_result_payload(result, inputs.symbol, asof),
                 source_ref=f"reconstruction:{asof.isoformat()}:{inputs.symbol}",
             ))
         return tuple(out)

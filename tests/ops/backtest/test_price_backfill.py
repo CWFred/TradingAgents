@@ -8,7 +8,6 @@ from decimal import Decimal
 
 import pytest
 
-from ops.backtest.models import CaseSource
 from ops.backtest.models import BacktestCase
 from ops.backtest.price_backfill import BackfillSummary, backfill_prices
 from ops.backtest.price_fetch import YfBar

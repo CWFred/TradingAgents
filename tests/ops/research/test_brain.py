@@ -289,3 +289,29 @@ def test_past_memos_feed_precedents(memo_store):
     assert second.status == "researched"
     # The thesis prompt actually contained the precedent summary.
     assert prior_id in thesis_llm2.prompts[1]
+
+
+def test_screen_summary_tolerates_sparse_reconstruction_payload():
+    """Backtest reconstruction payloads carry only symbol/asof/cheap/quality;
+    the summary must render without KeyError (2026-07-27 incident) while
+    keeping the full format when every field is present."""
+    from ops.research.brain import _screen_summary
+
+    sparse = _screen_summary({
+        "symbol": "PVH", "asof": "2025-06-02",
+        "passed": True, "cheap": True, "quality": True,
+    })
+    assert "PVH screened 2025-06-02" in sparse
+    assert "cheap=True quality=True" in sparse
+
+    full = _screen_summary({
+        "symbol": "ACM", "asof": "2026-07-09", "passed": True,
+        "cheap": True, "quality": False, "market_cap": 100, "ev_ebit": 9.1,
+        "valuation_bars": [{"name": "fcf_yield", "passed": True, "detail": "d"}],
+        "quality_bars": [], "triggers": [],
+    })
+    assert full.startswith(
+        "ACM screened 2026-07-09: cheap=True quality=False "
+        "market_cap=100 ev_ebit=9.1"
+    )
+    assert "[PASS] fcf_yield: d" in full

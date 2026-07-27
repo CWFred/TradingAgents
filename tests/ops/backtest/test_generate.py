@@ -387,3 +387,25 @@ def test_worker_requires_aware_stale_boundary():
             plan, store=store, generator=_terminal,
             stale_before=datetime(2025, 1, 1),
         )
+
+
+def test_generation_request_payload_always_carries_symbol_and_asof():
+    """Reconstruction screen payloads lack symbol/asof (2026-07-27 incident:
+    brain's _screen_summary KeyError'd on every regenerated memo). The request
+    must inject them from the authoritative case fields."""
+    case = _case("XYZ", date(2025, 6, 15))
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof)
+    request = GenerationRequest.create(
+        case=case, manifest=manifest, brain_version="b", prompt_version="p",
+        evidence_model_id=LOCAL_MODEL, thesis_model_id=LOCAL_MODEL,
+        hit_payload={"passed": True, "cheap": True, "quality": True},
+    )
+    assert request.hit_payload["symbol"] == "XYZ"
+    assert request.hit_payload["asof"] == "2025-06-15"
+    # live payloads that already carry them are not overridden
+    request2 = GenerationRequest.create(
+        case=case, manifest=manifest, brain_version="b", prompt_version="p",
+        evidence_model_id=LOCAL_MODEL, thesis_model_id=LOCAL_MODEL,
+        hit_payload={"symbol": "XYZ", "asof": "2025-06-15", "passed": True},
+    )
+    assert request2.hit_payload["asof"] == "2025-06-15"
