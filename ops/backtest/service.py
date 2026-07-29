@@ -757,6 +757,7 @@ def _reconstruction_prepare_cases(
     universe: Any = None,
     fetcher: Callable[[date], Sequence[CaseCandidate]] | None = None,
     existing: Collection[tuple[str, date]] = (),
+    controls_count: int = 0,
 ) -> tuple[BacktestCase, ...]:
     """Reconstruct cases by replaying the screener at sampled historical dates.
 
@@ -764,6 +765,10 @@ def _reconstruction_prepare_cases(
     wrapped in :class:`CurrentUniverseReconstructionSource`: these cases are
     survivorship-biased over today's universe membership and must never be
     rendered as a clean point-in-time historical screen.
+
+    ``controls_count`` near-miss control cases (names failing exactly one
+    screen condition) are selected via a *separate* ``select_candidates``
+    call so they never crowd out passer selection.
     """
     from ops.backtest.cases import (
         CurrentUniverseReconstructionSource,
@@ -786,6 +791,7 @@ def _reconstruction_prepare_cases(
             universe=universe, facts_fetcher=get_company_facts,
             price_context_fetcher=fetch_price_context,
             triggers_finder=find_triggers,
+            include_near_misses=controls_count > 0,
         )
 
     sessions = MarketCalendar().sessions_between(start, end)
@@ -799,10 +805,23 @@ def _reconstruction_prepare_cases(
         candidate for candidate in candidates
         if (candidate.normalized_symbol(), candidate.asof) not in existing_keys
     ]
-    selected = select_candidates(
-        candidates, target_count=case_count,
+    passer_candidates = [
+        candidate for candidate in candidates
+        if candidate.trigger.get("kind") != "near_miss_control"
+    ]
+    control_candidates = [
+        candidate for candidate in candidates
+        if candidate.trigger.get("kind") == "near_miss_control"
+    ]
+    selected = list(select_candidates(
+        passer_candidates, target_count=case_count,
         per_date_cap=max(1, -(-case_count // max(1, len(sampled)))),
-    )
+    ))
+    if controls_count > 0:
+        selected.extend(select_candidates(
+            control_candidates, target_count=controls_count,
+            per_date_cap=max(1, -(-controls_count // max(1, len(sampled)))),
+        ))
     prepared: list[BacktestCase] = []
     context_builder = _sealed_context_builder(config)
     for candidate in selected:
@@ -843,6 +862,7 @@ def generate_cases(
     preparer: Callable[..., Sequence[BacktestCase]] | None = None,
     spacing_sessions: int = 10,
     append: bool = False,
+    controls_count: int = 0,
 ) -> GenerationResult:
     if execute and enqueue:
         raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
@@ -878,6 +898,7 @@ def generate_cases(
                 {
                     "spacing_sessions": spacing_sessions,
                     "existing": tuple((c.symbol, c.asof) for c in available),
+                    "controls_count": controls_count,
                 }
                 if preparer is not None or source == "reconstruction"
                 else {}

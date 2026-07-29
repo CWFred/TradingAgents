@@ -91,6 +91,42 @@ class _FakeReconstructionFetcher:
         )
 
 
+class _FakeMixedFetcher:
+    """Emits both passers and near-miss controls per sampled asof."""
+
+    def __init__(self, passers, controls):
+        self._passers = passers
+        self._controls = controls
+        self.calls = []
+
+    def __call__(self, asof):
+        self.calls.append(asof)
+        out = [
+            CaseCandidate(
+                symbol=symbol,
+                asof=asof,
+                score=Decimal(str(score)),
+                trigger={"kind": "historical_screener_replay", "asof": asof.isoformat()},
+                screen_payload={"passed": True},
+                source_ref=f"reconstruction:{asof.isoformat()}:{symbol}",
+            )
+            for symbol, score in self._passers
+        ]
+        out.extend(
+            CaseCandidate(
+                symbol=symbol,
+                asof=asof,
+                score=Decimal(str(score)),
+                trigger={"kind": "near_miss_control", "asof": asof.isoformat(),
+                         "failed": "trigger"},
+                screen_payload={"passed": False},
+                source_ref=f"nearmiss:{asof.isoformat()}:{symbol}",
+            )
+            for symbol, score in self._controls
+        )
+        return tuple(out)
+
+
 def test_reconstruction_prepare_inserts_matured_cases(tmp_path, monkeypatch):
     import ops.backtest.service as service
     from ops.backtest.service import _reconstruction_prepare_cases
@@ -210,6 +246,47 @@ def test_reconstruction_prepare_tops_up_and_never_duplicates(tmp_path, monkeypat
             existing=(("AAA", date(2025, 6, 16)),),
         )
         assert [c.symbol for c in cases] == ["CCC"]
+
+
+def test_reconstruction_prepare_selects_controls_separately(tmp_path, monkeypatch):
+    """controls_count selects near-miss controls via a separate
+    select_candidates call, so they never crowd out passer selection."""
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    fetcher = _FakeMixedFetcher(
+        passers=[("AAA", 3), ("BBB", 2), ("CCC", 1)],
+        controls=[("NM1", 1), ("NM2", 1), ("NM3", 1)],
+    )
+    with BacktestStore(path) as store:
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=2,
+            spacing_sessions=10, universe=["AAA", "BBB", "CCC", "NM1", "NM2", "NM3"],
+            fetcher=fetcher, controls_count=2,
+        )
+        kinds = [c.trigger["kind"] for c in cases]
+        assert kinds.count("historical_screener_replay") == 2
+        assert kinds.count("near_miss_control") == 2
+        assert len(cases) == 4
 
 
 def test_sealed_context_builder_fails_closed_without_price_bars(tmp_path, monkeypatch):

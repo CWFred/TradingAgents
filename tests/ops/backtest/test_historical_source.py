@@ -129,3 +129,28 @@ def test_skips_failing_names(monkeypatch):
     out = fetcher(date(2025, 6, 16))
     assert [c.symbol for c in out] == ["BBB"]
     assert out[0].screen_payload["cheap"] is False
+
+
+def test_near_miss_controls_emitted_and_flagged():
+    def fake_screen(universe, *, asof, facts_fetcher, triggers_finder,
+                    price_context_fetcher):
+        return (
+            (_FakeInputs("PASS1", triggers=("t",)), _FakeResult(passed=True)),
+            # cheap+quality but zero triggers -> near miss (failed=trigger)
+            (_FakeInputs("NM1"), _FakeResult(passed=False)),
+            # fails two conditions -> NOT a near miss
+            (_FakeInputs("FAR"), _FakeResult(passed=False, cheap=False, quality=False)),
+        )
+    fetcher = ReconstructionScreenerFetcher(
+        universe=("PASS1", "NM1", "FAR"),
+        facts_fetcher=lambda s: {}, price_context_fetcher=lambda s: {},
+        triggers_finder=lambda s, *, asof: [], screen=fake_screen,
+        include_near_misses=True,
+    )
+    out = fetcher(date(2025, 6, 16))
+    kinds = {c.symbol: c.trigger["kind"] for c in out}
+    assert kinds == {"PASS1": "historical_screener_replay",
+                     "NM1": "near_miss_control"}
+    nm = next(c for c in out if c.symbol == "NM1")
+    assert nm.trigger["failed"] == "trigger"
+    assert nm.source_ref == "nearmiss:2025-06-16:NM1"

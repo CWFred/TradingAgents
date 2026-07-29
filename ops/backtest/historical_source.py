@@ -34,6 +34,7 @@ class ReconstructionScreenerFetcher:
     triggers_finder: Callable[..., Any]
     screen: Callable[..., Any] = screen_inputs_and_results
     source_mode: str = RECONSTRUCTION_SOURCE_MODE
+    include_near_misses: bool = False
     _facts: dict[str, Any] = field(default_factory=dict, init=False)
     _ctx: dict[str, Any] = field(default_factory=dict, init=False)
 
@@ -47,6 +48,22 @@ class ReconstructionScreenerFetcher:
             self._ctx[symbol] = self.price_context_fetcher(symbol)
         return self._ctx[symbol]
 
+    def _candidate(
+        self, inputs: Any, result: Any, asof: date, *, kind: str, failed: str | None = None,
+    ) -> CaseCandidate:
+        trigger = {"kind": kind, "asof": asof.isoformat()}
+        if failed is not None:
+            trigger["failed"] = failed
+        prefix = "reconstruction" if kind == "historical_screener_replay" else "nearmiss"
+        return CaseCandidate(
+            symbol=inputs.symbol,
+            asof=asof,
+            score=Decimal(len(inputs.triggers) or 1),
+            trigger=trigger,
+            screen_payload=_result_payload(result, inputs.symbol, asof),
+            source_ref=f"{prefix}:{asof.isoformat()}:{inputs.symbol}",
+        )
+
     def __call__(self, asof: date) -> tuple[CaseCandidate, ...]:
         pairs = self.screen(
             self.universe, asof=asof,
@@ -56,15 +73,18 @@ class ReconstructionScreenerFetcher:
         )
         out: list[CaseCandidate] = []
         for inputs, result in pairs:
-            if not result.passed:
-                continue
-            out.append(CaseCandidate(
-                symbol=inputs.symbol,
-                asof=asof,
-                score=Decimal(len(inputs.triggers) or 1),
-                trigger={"kind": "historical_screener_replay",
-                         "asof": asof.isoformat()},
-                screen_payload=_result_payload(result, inputs.symbol, asof),
-                source_ref=f"reconstruction:{asof.isoformat()}:{inputs.symbol}",
-            ))
+            conditions = {
+                "cheap": bool(result.cheap),
+                "quality": bool(result.quality),
+                "trigger": len(inputs.triggers) >= 1,
+            }
+            if result.passed:
+                out.append(self._candidate(
+                    inputs, result, asof, kind="historical_screener_replay",
+                ))
+            elif self.include_near_misses and sum(conditions.values()) == 2:
+                failed = next(k for k, ok in conditions.items() if not ok)
+                out.append(self._candidate(
+                    inputs, result, asof, kind="near_miss_control", failed=failed,
+                ))
         return tuple(out)

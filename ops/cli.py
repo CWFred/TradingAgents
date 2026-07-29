@@ -231,10 +231,13 @@ def backtest_run(
 @click.option("--append", is_flag=True,
               help="Top up an existing window with new cases instead of skipping "
                    "prepare; reconstruction sources only.")
+@click.option("--controls", "controls_count", type=int, default=0, show_default=True,
+              help="Near-miss control cases to add alongside passers; "
+                   "reconstruction sources only.")
 def backtest_generate(
     sleeve: str, start: str, end: str, case_count: int | None,
     execute: bool, enqueue: bool, max_jobs: int | None, source: str,
-    spacing: int, append: bool,
+    spacing: int, append: bool, controls_count: int,
 ) -> None:
     """Plan or explicitly execute resumable frozen-memo generation."""
     from ops.backtest.service import generate_cases
@@ -246,7 +249,7 @@ def backtest_generate(
             config=config, sleeve=sleeve, start=start_date, end=end_date,
             case_count=case_count or config.backtest_case_count, today=today,
             execute=execute, enqueue=enqueue, max_jobs=max_jobs, source=source,
-            spacing_sessions=spacing, append=append,
+            spacing_sessions=spacing, append=append, controls_count=controls_count,
         )
     except Exception as exc:
         raise _backtest_error(exc) from exc

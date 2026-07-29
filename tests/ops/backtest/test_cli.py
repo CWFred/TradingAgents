@@ -533,6 +533,64 @@ def test_generate_cli_defaults_append_to_false(tmp_path, monkeypatch):
     assert captured["append"] is False
 
 
+def test_generate_cli_passes_controls_to_service(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--source", "reconstruction",
+        "--start", "2025-06-02", "--end", "2025-10-01", "--controls", "5",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["controls_count"] == 5
+
+
+def test_generate_cli_defaults_controls_to_zero(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["controls_count"] == 0
+
+
+def test_generate_explicit_preparer_receives_controls_count(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    seen: dict = {}
+
+    def preparer(**kwargs):
+        seen.update(kwargs)
+        raise SystemExit
+
+    with pytest.raises(SystemExit):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 2),
+            end=date(2026, 3, 31), case_count=40, today=date(2026, 7, 28),
+            source="reconstruction", preparer=preparer, controls_count=3,
+        )
+
+    assert seen["controls_count"] == 3
+
+
 def test_prices_cli_backfills_window_and_prints_summary(tmp_path, monkeypatch):
     path = tmp_path / "backtest.sqlite"
     BacktestStore(path).close()
