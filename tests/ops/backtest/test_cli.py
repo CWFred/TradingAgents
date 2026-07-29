@@ -579,7 +579,7 @@ def test_invalid_dates_case_count_and_settings_fail_cleanly(tmp_path):
         "backtest", "run", "--start", "2025-06-01", "--cases", "29",
     ])
     assert bad_count.exit_code != 0
-    assert "approved range 30..50" in bad_count.output
+    assert "approved range 30..100" in bad_count.output
 
     settings = tmp_path / "settings.toml"
     settings.write_text("unknown = true\n")
