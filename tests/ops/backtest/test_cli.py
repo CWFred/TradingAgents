@@ -425,6 +425,64 @@ def test_generate_cli_defaults_source_to_recorded(tmp_path, monkeypatch):
     assert captured["source"] == "recorded"
 
 
+def test_generate_cli_passes_spacing_to_service(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--source", "reconstruction",
+        "--start", "2025-06-02", "--end", "2025-10-01", "--spacing", "5",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["spacing_sessions"] == 5
+
+
+def test_generate_cli_defaults_spacing_to_ten(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["spacing_sessions"] == 10
+
+
+def test_generate_explicit_preparer_receives_spacing_sessions(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    seen: dict = {}
+
+    def preparer(**kwargs):
+        seen.update(kwargs)
+        raise SystemExit
+
+    with pytest.raises(SystemExit):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 2),
+            end=date(2026, 3, 31), case_count=40, today=date(2026, 7, 28),
+            source="reconstruction", preparer=preparer, spacing_sessions=5,
+        )
+
+    assert seen["spacing_sessions"] == 5
+
+
 def test_prices_cli_backfills_window_and_prints_summary(tmp_path, monkeypatch):
     path = tmp_path / "backtest.sqlite"
     BacktestStore(path).close()

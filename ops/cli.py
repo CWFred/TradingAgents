@@ -226,9 +226,12 @@ def backtest_run(
 @click.option("--source", type=click.Choice(["recorded", "reconstruction"]),
               default="recorded", show_default=True,
               help="recorded live hits (default) or historical reconstruction screen.")
+@click.option("--spacing", "spacing", type=int, default=10, show_default=True,
+              help="Sessions between sampled reconstruction dates.")
 def backtest_generate(
     sleeve: str, start: str, end: str, case_count: int | None,
     execute: bool, enqueue: bool, max_jobs: int | None, source: str,
+    spacing: int,
 ) -> None:
     """Plan or explicitly execute resumable frozen-memo generation."""
     from ops.backtest.service import generate_cases
@@ -240,6 +243,7 @@ def backtest_generate(
             config=config, sleeve=sleeve, start=start_date, end=end_date,
             case_count=case_count or config.backtest_case_count, today=today,
             execute=execute, enqueue=enqueue, max_jobs=max_jobs, source=source,
+            spacing_sessions=spacing,
         )
     except Exception as exc:
         raise _backtest_error(exc) from exc

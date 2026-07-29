@@ -835,6 +835,7 @@ def generate_cases(
     source: str = "recorded",
     executor: Callable[..., GenerationSummary] | None = None,
     preparer: Callable[..., Sequence[BacktestCase]] | None = None,
+    spacing_sessions: int = 10,
 ) -> GenerationResult:
     if execute and enqueue:
         raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
@@ -863,9 +864,15 @@ def generate_cases(
                 prepare = _default_prepare_cases
             else:
                 raise InvalidBacktestRequest(f"unknown case source {source!r}")
+            prepare_kwargs = (
+                {"spacing_sessions": spacing_sessions}
+                if preparer is not None or source == "reconstruction"
+                else {}
+            )
             prepare(
                 store=store, config=config, sleeve=sleeve,
                 start=start, end=end, case_count=case_count,
+                **prepare_kwargs,
             )
         cases = _selected_cases(
             store, sleeve=sleeve, start=start, end=end, case_count=case_count,
