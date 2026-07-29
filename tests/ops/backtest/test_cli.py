@@ -483,6 +483,56 @@ def test_generate_explicit_preparer_receives_spacing_sessions(tmp_path):
     assert seen["spacing_sessions"] == 5
 
 
+def test_generate_append_with_recorded_source_is_rejected(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    with pytest.raises(InvalidBacktestRequest, match="append is reconstruction-only"):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 1),
+            end=date(2025, 6, 30), case_count=40, today=date(2025, 7, 1),
+            source="recorded", append=True,
+        )
+
+
+def test_generate_cli_threads_append_into_service(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--source", "reconstruction",
+        "--start", "2025-06-02", "--end", "2025-10-01", "--append",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["append"] is True
+
+
+def test_generate_cli_defaults_append_to_false(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["append"] is False
+
+
 def test_prices_cli_backfills_window_and_prints_summary(tmp_path, monkeypatch):
     path = tmp_path / "backtest.sqlite"
     BacktestStore(path).close()

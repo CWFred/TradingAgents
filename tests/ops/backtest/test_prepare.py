@@ -176,6 +176,42 @@ def test_reconstruction_prepare_reaches_case_count_on_floor_edge(tmp_path, monke
         assert len(fetcher.calls) == 3
 
 
+def test_reconstruction_prepare_tops_up_and_never_duplicates(tmp_path, monkeypatch):
+    """--append top-up: a candidate whose (symbol, asof) is already in the
+    store must be skipped so the same case is never inserted twice."""
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    # AAA is already present (dup, must be skipped); CCC is new.
+    fetcher = _FakeReconstructionFetcher([("AAA", 2), ("CCC", 1)])
+    with BacktestStore(path) as store:
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=1,
+            spacing_sessions=10, universe=["AAA", "CCC"], fetcher=fetcher,
+            existing=(("AAA", date(2025, 6, 16)),),
+        )
+        assert [c.symbol for c in cases] == ["CCC"]
+
+
 def test_sealed_context_builder_fails_closed_without_price_bars(tmp_path, monkeypatch):
     """An empty price cache must abort manifest sealing, not silently omit
     price history (2026-07-27 incident: 40 memos guardrail-rejected because

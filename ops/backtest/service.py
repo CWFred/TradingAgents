@@ -12,7 +12,7 @@ import importlib
 import json
 import sqlite3
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -756,6 +756,7 @@ def _reconstruction_prepare_cases(
     spacing_sessions: int = 10,
     universe: Any = None,
     fetcher: Callable[[date], Sequence[CaseCandidate]] | None = None,
+    existing: Collection[tuple[str, date]] = (),
 ) -> tuple[BacktestCase, ...]:
     """Reconstruct cases by replaying the screener at sampled historical dates.
 
@@ -793,6 +794,11 @@ def _reconstruction_prepare_cases(
     )
     source = CurrentUniverseReconstructionSource(fetch=fetcher)
     candidates = collect_candidates(source, sampled)
+    existing_keys = set(existing)
+    candidates = [
+        candidate for candidate in candidates
+        if (candidate.normalized_symbol(), candidate.asof) not in existing_keys
+    ]
     selected = select_candidates(
         candidates, target_count=case_count,
         per_date_cap=max(1, -(-case_count // max(1, len(sampled)))),
@@ -836,9 +842,12 @@ def generate_cases(
     executor: Callable[..., GenerationSummary] | None = None,
     preparer: Callable[..., Sequence[BacktestCase]] | None = None,
     spacing_sessions: int = 10,
+    append: bool = False,
 ) -> GenerationResult:
     if execute and enqueue:
         raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
+    if append and source == "recorded":
+        raise InvalidBacktestRequest("append is reconstruction-only")
     _validate_window(
         start=start, end=end, today=today, cutoff=config.backtest_cutoff,
         case_count=case_count,
@@ -855,7 +864,8 @@ def generate_cases(
             case for case in store.list_cases(sleeve=sleeve)
             if start <= case.asof <= end
         ]
-        if not available:
+        need_prepare = (not available) or (append and len(available) < case_count)
+        if need_prepare:
             if preparer is not None:
                 prepare = preparer
             elif source == "reconstruction":
@@ -865,13 +875,16 @@ def generate_cases(
             else:
                 raise InvalidBacktestRequest(f"unknown case source {source!r}")
             prepare_kwargs = (
-                {"spacing_sessions": spacing_sessions}
+                {
+                    "spacing_sessions": spacing_sessions,
+                    "existing": tuple((c.symbol, c.asof) for c in available),
+                }
                 if preparer is not None or source == "reconstruction"
                 else {}
             )
             prepare(
                 store=store, config=config, sleeve=sleeve,
-                start=start, end=end, case_count=case_count,
+                start=start, end=end, case_count=case_count - len(available),
                 **prepare_kwargs,
             )
         cases = _selected_cases(
