@@ -409,3 +409,14 @@ def test_generation_request_payload_always_carries_symbol_and_asof():
         hit_payload={"symbol": "XYZ", "asof": "2025-06-15", "passed": True},
     )
     assert request2.hit_payload["asof"] == "2025-06-15"
+
+
+def test_window_allows_up_to_100_cases():
+    from ops.backtest.service import InvalidBacktestRequest, _validate_window
+    _validate_window(start=date(2025, 6, 2), end=date(2026, 3, 31),
+                     today=date(2026, 7, 28), cutoff=date(2025, 6, 1),
+                     case_count=80)          # must not raise
+    with pytest.raises(InvalidBacktestRequest):
+        _validate_window(start=date(2025, 6, 2), end=date(2026, 3, 31),
+                         today=date(2026, 7, 28), cutoff=date(2025, 6, 1),
+                         case_count=101)

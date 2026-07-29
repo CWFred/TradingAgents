@@ -216,8 +216,8 @@ def _validate_window(
         raise InvalidBacktestRequest(f"end {end} is before start {start}")
     if end > today:
         raise InvalidBacktestRequest(f"end {end} is after resolved today {today}")
-    if not 30 <= case_count <= 50:
-        raise InvalidBacktestRequest("cases must be in the approved range 30..50")
+    if not 30 <= case_count <= 100:
+        raise InvalidBacktestRequest("cases must be in the approved range 30..100")
 
 
 def _selected_cases(
