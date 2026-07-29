@@ -220,6 +220,10 @@ def _validate_window(
         raise InvalidBacktestRequest("cases must be in the approved range 30..100")
 
 
+def _is_control_case(case) -> bool:
+    return case.trigger.get("kind") == "near_miss_control"
+
+
 def _selected_cases(
     store: BacktestStore,
     *,
@@ -228,10 +232,20 @@ def _selected_cases(
     end: date,
     case_count: int,
 ):
-    cases = [
+    """Select cases for replay: passers are budgeted, controls are additive.
+
+    ``case_count`` truncates only non-control cases, in (asof, symbol) order.
+    Near-miss control cases in the window are always included in full -- they
+    exist to falsify the screen and must never be displaced by passer top-up,
+    nor count against the passer budget.
+    """
+    windowed = [
         case for case in store.list_cases(sleeve=sleeve)
         if start <= case.asof <= end
-    ][:case_count]
+    ]
+    passers = [case for case in windowed if not _is_control_case(case)][:case_count]
+    controls = [case for case in windowed if _is_control_case(case)]
+    cases = passers + controls
     if not cases:
         raise MissingBacktestArtifacts(
             f"no {sleeve!r} cases in {start}..{end}; preload/select cases first"
@@ -758,6 +772,7 @@ def _reconstruction_prepare_cases(
     fetcher: Callable[[date], Sequence[CaseCandidate]] | None = None,
     existing: Collection[tuple[str, date]] = (),
     controls_count: int = 0,
+    price_backfiller: Callable[..., Any] | None = None,
 ) -> tuple[BacktestCase, ...]:
     """Reconstruct cases by replaying the screener at sampled historical dates.
 
@@ -769,6 +784,13 @@ def _reconstruction_prepare_cases(
     ``controls_count`` near-miss control cases (names failing exactly one
     screen condition) are selected via a *separate* ``select_candidates``
     call so they never crowd out passer selection.
+
+    Before sealing, prices are backfilled for exactly the selected
+    candidates: ``_sealed_context_builder`` fails closed when the price
+    cache has no bars for a symbol, and the only other cache writer
+    (``backfill_prices``) derives its symbols from *already-stored* cases --
+    a fresh symbol could otherwise never be prepared (2026-07-28 review,
+    finding 1: prepare/prices sequencing deadlock).
     """
     from ops.backtest.cases import (
         CurrentUniverseReconstructionSource,
@@ -822,6 +844,15 @@ def _reconstruction_prepare_cases(
             control_candidates, target_count=controls_count,
             per_date_cap=max(1, -(-controls_count // max(1, len(sampled)))),
         ))
+    if selected:
+        if price_backfiller is None:
+            from ops.backtest.price_backfill import backfill_symbol_windows
+
+            price_backfiller = backfill_symbol_windows
+        pairs = [(candidate.normalized_symbol(), candidate.asof) for candidate in selected]
+        pairs.append((config.backtest_benchmark, min(candidate.asof for candidate in selected)))
+        price_backfiller(config, pairs)
+
     prepared: list[BacktestCase] = []
     context_builder = _sealed_context_builder(config)
     for candidate in selected:
@@ -884,7 +915,12 @@ def generate_cases(
             case for case in store.list_cases(sleeve=sleeve)
             if start <= case.asof <= end
         ]
-        need_prepare = (not available) or (append and len(available) < case_count)
+        # case_count budgets passers only; controls are additive and must
+        # never shrink the passer top-up (see finding 2, 2026-07-28 review).
+        available_passers = [case for case in available if not _is_control_case(case)]
+        need_prepare = (
+            not available_passers
+        ) or (append and len(available_passers) < case_count)
         if need_prepare:
             if preparer is not None:
                 prepare = preparer
@@ -897,6 +933,8 @@ def generate_cases(
             prepare_kwargs = (
                 {
                     "spacing_sessions": spacing_sessions,
+                    # Dedupe against ALL stored cases (including controls) so
+                    # a control is never re-inserted as a duplicate.
                     "existing": tuple((c.symbol, c.asof) for c in available),
                     "controls_count": controls_count,
                 }
@@ -905,7 +943,8 @@ def generate_cases(
             )
             prepare(
                 store=store, config=config, sleeve=sleeve,
-                start=start, end=end, case_count=case_count - len(available),
+                start=start, end=end,
+                case_count=case_count - len(available_passers),
                 **prepare_kwargs,
             )
         cases = _selected_cases(

@@ -780,3 +780,80 @@ def test_postmortem_cli_loads_adapter_persists_assessment_and_updates_quadrant(
         assert conn.execute(
             "SELECT quadrant FROM case_results WHERE run_id = ?", (run_id,),
         ).fetchone()[0] == "wrong-thesis-lucky"
+
+
+def test_selected_cases_includes_all_controls_beyond_case_count_budget(tmp_path):
+    """Finding 2 (2026-07-28 review): case_count budgets passers only.
+    Near-miss control cases are additive -- they must never be truncated or
+    displace a passer from the top-up, since the whole point of a control is
+    that it failed the screen and is still there to falsify it."""
+    from ops.backtest.service import _selected_cases
+
+    path = tmp_path / "backtest.sqlite"
+    with BacktestStore(path) as store:
+        for offset, symbol in enumerate(["AAA", "BBB", "CCC"]):
+            store.insert_case(BacktestCase.create(
+                sleeve="research", symbol=symbol, asof=date(2025, 6, 1 + offset),
+                trigger={"kind": "historical_screener_replay"},
+            ))
+        for offset, symbol in enumerate(["NM1", "NM2"]):
+            store.insert_case(BacktestCase.create(
+                sleeve="research", symbol=symbol, asof=date(2025, 6, 10 + offset),
+                trigger={"kind": "near_miss_control"},
+            ))
+
+        cases = _selected_cases(
+            store, sleeve="research", start=date(2025, 6, 1), end=date(2025, 6, 30),
+            case_count=2,
+        )
+
+    passers = [c.symbol for c in cases if c.trigger.get("kind") != "near_miss_control"]
+    controls = [c.symbol for c in cases if c.trigger.get("kind") == "near_miss_control"]
+    assert passers == ["AAA", "BBB"]
+    assert controls == ["NM1", "NM2"]
+    assert len(cases) == 4
+
+
+def test_generate_append_top_up_ignores_controls_in_passer_budget(tmp_path):
+    """Finding 2 (2026-07-28 review): the append top-up must compute how many
+    more passers to fetch from the stored PASSER count, not the stored total.
+    Otherwise stored controls silently shrink (or zero out) the top-up."""
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    with BacktestStore(path) as store:
+        store.insert_case(BacktestCase.create(
+            sleeve="research", symbol="AAA", asof=date(2025, 6, 15),
+            trigger={"kind": "historical_screener_replay"},
+        ))
+        store.insert_case(BacktestCase.create(
+            sleeve="research", symbol="NM1", asof=date(2025, 6, 16),
+            trigger={"kind": "near_miss_control"},
+        ))
+        store.insert_case(BacktestCase.create(
+            sleeve="research", symbol="NM2", asof=date(2025, 6, 17),
+            trigger={"kind": "near_miss_control"},
+        ))
+
+    seen: dict = {}
+
+    def preparer(**kwargs):
+        seen.update(kwargs)
+        raise SystemExit
+
+    with pytest.raises(SystemExit):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 1),
+            end=date(2025, 6, 30), case_count=30, today=date(2025, 7, 1),
+            source="reconstruction", preparer=preparer, append=True,
+        )
+
+    # 1 stored passer + 2 controls; case_count=30 must top up by 29 (30-1),
+    # never 27 (30-3) -- controls must not eat into the passer budget.
+    assert seen["case_count"] == 29
+    # Dedupe must still see ALL stored cases so a control is never
+    # re-inserted as a duplicate.
+    assert set(seen["existing"]) == {
+        ("AAA", date(2025, 6, 15)),
+        ("NM1", date(2025, 6, 16)),
+        ("NM2", date(2025, 6, 17)),
+    }

@@ -188,7 +188,7 @@ def _backtest_error(exc: Exception) -> click.ClickException:
               type=click.Path(exists=True, dir_okay=False),
               help="TOML replay-setting overrides; never triggers generation.")
 @click.option("--cases", "case_count", default=None, type=int,
-              help="Target cases, 30..50 (default: configured count).")
+              help="Target cases, 30..100 (default: configured count).")
 def backtest_run(
     sleeve: str, start: str, end: str, settings_path: str | None,
     case_count: int | None,
@@ -216,7 +216,7 @@ def backtest_run(
 @click.option("--end", default="today", show_default=True,
               help="Last case date (YYYY-MM-DD or today).")
 @click.option("--cases", "case_count", default=None, type=int,
-              help="Target cases, 30..50 (default: configured count).")
+              help="Target cases, 30..100 (default: configured count).")
 @click.option("--execute", is_flag=True,
               help="Actually run missing local-model jobs; default only prints the plan.")
 @click.option("--enqueue", is_flag=True,

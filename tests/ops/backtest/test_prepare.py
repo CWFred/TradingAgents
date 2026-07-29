@@ -158,6 +158,7 @@ def test_reconstruction_prepare_inserts_matured_cases(tmp_path, monkeypatch):
             store=store, config=config, sleeve="research",
             start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=4,
             spacing_sessions=10, universe=["AAA", "BBB"], fetcher=fetcher,
+            price_backfiller=lambda *_args, **_kwargs: None,
         )
         assert len(cases) == 4
         assert {c.source for c in cases} == {CaseSource.CURRENT_UNIVERSE_RECONSTRUCTION}
@@ -206,6 +207,7 @@ def test_reconstruction_prepare_reaches_case_count_on_floor_edge(tmp_path, monke
             store=store, config=config, sleeve="research",
             start=sessions[0], end=sessions[-1], case_count=5,
             spacing_sessions=10, universe=["AAA", "BBB"], fetcher=fetcher,
+            price_backfiller=lambda *_args, **_kwargs: None,
         )
         # ceil path reaches 5; floor path would have stopped at 3.
         assert len(cases) == 5
@@ -244,6 +246,7 @@ def test_reconstruction_prepare_tops_up_and_never_duplicates(tmp_path, monkeypat
             start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=1,
             spacing_sessions=10, universe=["AAA", "CCC"], fetcher=fetcher,
             existing=(("AAA", date(2025, 6, 16)),),
+            price_backfiller=lambda *_args, **_kwargs: None,
         )
         assert [c.symbol for c in cases] == ["CCC"]
 
@@ -282,11 +285,63 @@ def test_reconstruction_prepare_selects_controls_separately(tmp_path, monkeypatc
             start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=2,
             spacing_sessions=10, universe=["AAA", "BBB", "CCC", "NM1", "NM2", "NM3"],
             fetcher=fetcher, controls_count=2,
+            price_backfiller=lambda *_args, **_kwargs: None,
         )
         kinds = [c.trigger["kind"] for c in cases]
         assert kinds.count("historical_screener_replay") == 2
         assert kinds.count("near_miss_control") == 2
         assert len(cases) == 4
+
+
+def test_reconstruction_prepare_backfills_prices_before_sealing(tmp_path, monkeypatch):
+    """Finding 1 (2026-07-28 review): prepare must backfill prices for the
+    selected candidates itself, before sealing, so a fresh symbol that has
+    never been stored as a case can still be sealed. ``backfill_prices``
+    alone cannot do this -- it derives its symbols from already-stored
+    cases, so a brand-new symbol would deadlock: prepare needs prices to
+    seal, but prices need a stored case to know what to fetch."""
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    calls: list = []
+
+    def fake_sealed_context_builder(cfg):
+        def build(case, _candidate):
+            # By the time sealing runs, the backfiller must already have
+            # been invoked for this case's symbol.
+            assert calls, "price backfill must run before sealing starts"
+            return ContextManifest.create(case_id=case.case_id, asof=case.asof)
+
+        return build
+
+    monkeypatch.setattr(service, "_sealed_context_builder", fake_sealed_context_builder)
+
+    def fake_backfiller(cfg, pairs, **kwargs):
+        calls.append((cfg, tuple(pairs)))
+
+    fetcher = _FakeReconstructionFetcher([("AAA", 2), ("BBB", 1)])
+    with BacktestStore(path) as store:
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=2,
+            spacing_sessions=10, universe=["AAA", "BBB"], fetcher=fetcher,
+            price_backfiller=fake_backfiller,
+        )
+
+    assert len(calls) == 1
+    seen_config, seen_pairs = calls[0]
+    assert seen_config is config
+    selected_pairs = {(c.symbol, c.asof) for c in cases}
+    assert selected_pairs.issubset(set(seen_pairs))
+    assert (config.backtest_benchmark, date(2025, 6, 16)) in seen_pairs
 
 
 def test_sealed_context_builder_fails_closed_without_price_bars(tmp_path, monkeypatch):

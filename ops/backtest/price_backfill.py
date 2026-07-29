@@ -22,7 +22,7 @@ Two invariants make this safe to run against a live corpus:
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -60,43 +60,43 @@ def _horizon_end(asof: date, max_horizon: int, calendar: MarketCalendar | None) 
     return asof + timedelta(days=pad)
 
 
-def backfill_prices(
+def backfill_symbol_windows(
     config,
-    store,
+    pairs: Sequence[tuple[str, date]],
     *,
-    sleeve: str,
-    start: date,
-    end: date,
     fetcher: Fetcher | None = None,
     calendar: MarketCalendar | None = None,
     today: date | None = None,
 ) -> BackfillSummary:
-    """Backfill price bars for a sleeve's cases plus the benchmark.
+    """Backfill price bars for explicit ``(symbol, asof)`` pairs.
 
-    Returns counts of symbols attempted (case symbols + benchmark, including
-    failures), total bars persisted, and the per-symbol failures.
+    One fetch window per distinct symbol, spanning
+    ``[min_asof - PRE_ASOF_PAD, min(today, horizon_end(max_asof))]`` across
+    that symbol's pairs. This is the single window implementation shared by
+    :func:`backfill_prices` (post-hoc, derives pairs from stored cases) and
+    prepare-time callers that need to backfill a fresh symbol before it is
+    ever stored as a case (see ``_reconstruction_prepare_cases``).
+
+    Returns counts of symbols attempted (including failures), total bars
+    persisted, and the per-symbol failures; one bad symbol never aborts the
+    rest (see module docstring).
     """
     fetcher = fetcher or yfinance_bar_fetcher
     today = today or date.today()
     max_horizon = max(config.backtest_horizons)
 
-    cases = [
-        case
-        for case in store.list_cases(sleeve=sleeve)
-        if start <= case.asof <= end
-    ]
-    if not cases:
+    if not pairs:
         return BackfillSummary(symbols=0, bars=0, failures=())
 
     # Per-symbol as-of extents (distinct symbols, deterministic order).
     extents: dict[str, tuple[date, date]] = {}
-    for case in cases:
-        symbol = case.symbol.strip().upper()
-        if symbol in extents:
-            lo, hi = extents[symbol]
-            extents[symbol] = (min(lo, case.asof), max(hi, case.asof))
+    for symbol, asof in pairs:
+        normalized = symbol.strip().upper()
+        if normalized in extents:
+            lo, hi = extents[normalized]
+            extents[normalized] = (min(lo, asof), max(hi, asof))
         else:
-            extents[symbol] = (case.asof, case.asof)
+            extents[normalized] = (asof, asof)
 
     cache = PriceCache(config.backtest_store_path)
     symbols = 0
@@ -117,11 +117,42 @@ def backfill_prices(
         w1 = min(today, _horizon_end(max_asof, max_horizon, calendar))
         _fetch(symbol, w0, w1)
 
-    # Benchmark once over the global union window.
-    global_min = min(lo for lo, _ in extents.values())
-    global_max = max(hi for _, hi in extents.values())
-    bench_w0 = global_min - PRE_ASOF_PAD
-    bench_w1 = min(today, _horizon_end(global_max, max_horizon, calendar))
-    _fetch(config.backtest_benchmark.strip().upper(), bench_w0, bench_w1)
-
     return BackfillSummary(symbols=symbols, bars=bars, failures=tuple(failures))
+
+
+def backfill_prices(
+    config,
+    store,
+    *,
+    sleeve: str,
+    start: date,
+    end: date,
+    fetcher: Fetcher | None = None,
+    calendar: MarketCalendar | None = None,
+    today: date | None = None,
+) -> BackfillSummary:
+    """Backfill price bars for a sleeve's cases plus the benchmark.
+
+    Returns counts of symbols attempted (case symbols + benchmark, including
+    failures), total bars persisted, and the per-symbol failures.
+    """
+    cases = [
+        case
+        for case in store.list_cases(sleeve=sleeve)
+        if start <= case.asof <= end
+    ]
+    if not cases:
+        return BackfillSummary(symbols=0, bars=0, failures=())
+
+    pairs = [(case.symbol, case.asof) for case in cases]
+    # Benchmark over the global union window: pin both extremes explicitly
+    # since backfill_symbol_windows derives a symbol's window from the min
+    # and max asof across all pairs sharing that symbol.
+    global_min = min(case.asof for case in cases)
+    global_max = max(case.asof for case in cases)
+    pairs.append((config.backtest_benchmark, global_min))
+    pairs.append((config.backtest_benchmark, global_max))
+
+    return backfill_symbol_windows(
+        config, pairs, fetcher=fetcher, calendar=calendar, today=today,
+    )
