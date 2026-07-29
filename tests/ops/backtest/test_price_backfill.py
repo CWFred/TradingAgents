@@ -76,10 +76,10 @@ def test_backfills_case_symbols_and_benchmark_once(tmp_path):
     assert summary.bars == 3
     # Benchmark fetched exactly once, over the global union window start.
     assert "SPY" in fetcher.calls
-    assert fetcher.calls["SPY"][0] == date(2025, 6, 10) - timedelta(days=10)
-    # Per-symbol window opens 10 calendar days before that symbol's earliest asof.
-    assert fetcher.calls["AAA"][0] == date(2025, 6, 10) - timedelta(days=10)
-    assert fetcher.calls["BBB"][0] == date(2025, 6, 20) - timedelta(days=10)
+    assert fetcher.calls["SPY"][0] == date(2025, 6, 10) - timedelta(days=400)
+    # Per-symbol window opens 400 calendar days before that symbol's earliest asof.
+    assert fetcher.calls["AAA"][0] == date(2025, 6, 10) - timedelta(days=400)
+    assert fetcher.calls["BBB"][0] == date(2025, 6, 20) - timedelta(days=400)
 
     cache = PriceCache(str(prices_path))
     assert cache.bars("AAA")

@@ -32,7 +32,8 @@ from ops.scheduler.market_calendar import MarketCalendar
 
 Fetcher = Callable[[str, date, date], Iterable[PriceBarLike]]
 
-_PREROLL_DAYS = 10
+# Sealed manifests inherit whatever the cache holds before asof; 400d ≈ 13 months of context.
+PRE_ASOF_PAD = timedelta(days=400)
 
 
 @dataclass(frozen=True)
@@ -112,14 +113,14 @@ def backfill_prices(
 
     for symbol in sorted(extents):
         min_asof, max_asof = extents[symbol]
-        w0 = min_asof - timedelta(days=_PREROLL_DAYS)
+        w0 = min_asof - PRE_ASOF_PAD
         w1 = min(today, _horizon_end(max_asof, max_horizon, calendar))
         _fetch(symbol, w0, w1)
 
     # Benchmark once over the global union window.
     global_min = min(lo for lo, _ in extents.values())
     global_max = max(hi for _, hi in extents.values())
-    bench_w0 = global_min - timedelta(days=_PREROLL_DAYS)
+    bench_w0 = global_min - PRE_ASOF_PAD
     bench_w1 = min(today, _horizon_end(global_max, max_horizon, calendar))
     _fetch(config.backtest_benchmark.strip().upper(), bench_w0, bench_w1)
 
