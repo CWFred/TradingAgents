@@ -91,6 +91,42 @@ class _FakeReconstructionFetcher:
         )
 
 
+class _FakeMixedFetcher:
+    """Emits both passers and near-miss controls per sampled asof."""
+
+    def __init__(self, passers, controls):
+        self._passers = passers
+        self._controls = controls
+        self.calls = []
+
+    def __call__(self, asof):
+        self.calls.append(asof)
+        out = [
+            CaseCandidate(
+                symbol=symbol,
+                asof=asof,
+                score=Decimal(str(score)),
+                trigger={"kind": "historical_screener_replay", "asof": asof.isoformat()},
+                screen_payload={"passed": True},
+                source_ref=f"reconstruction:{asof.isoformat()}:{symbol}",
+            )
+            for symbol, score in self._passers
+        ]
+        out.extend(
+            CaseCandidate(
+                symbol=symbol,
+                asof=asof,
+                score=Decimal(str(score)),
+                trigger={"kind": "near_miss_control", "asof": asof.isoformat(),
+                         "failed": "trigger"},
+                screen_payload={"passed": False},
+                source_ref=f"nearmiss:{asof.isoformat()}:{symbol}",
+            )
+            for symbol, score in self._controls
+        )
+        return tuple(out)
+
+
 def test_reconstruction_prepare_inserts_matured_cases(tmp_path, monkeypatch):
     import ops.backtest.service as service
     from ops.backtest.service import _reconstruction_prepare_cases
@@ -122,6 +158,7 @@ def test_reconstruction_prepare_inserts_matured_cases(tmp_path, monkeypatch):
             store=store, config=config, sleeve="research",
             start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=4,
             spacing_sessions=10, universe=["AAA", "BBB"], fetcher=fetcher,
+            price_backfiller=lambda *_args, **_kwargs: None,
         )
         assert len(cases) == 4
         assert {c.source for c in cases} == {CaseSource.CURRENT_UNIVERSE_RECONSTRUCTION}
@@ -170,7 +207,154 @@ def test_reconstruction_prepare_reaches_case_count_on_floor_edge(tmp_path, monke
             store=store, config=config, sleeve="research",
             start=sessions[0], end=sessions[-1], case_count=5,
             spacing_sessions=10, universe=["AAA", "BBB"], fetcher=fetcher,
+            price_backfiller=lambda *_args, **_kwargs: None,
         )
         # ceil path reaches 5; floor path would have stopped at 3.
         assert len(cases) == 5
         assert len(fetcher.calls) == 3
+
+
+def test_reconstruction_prepare_tops_up_and_never_duplicates(tmp_path, monkeypatch):
+    """--append top-up: a candidate whose (symbol, asof) is already in the
+    store must be skipped so the same case is never inserted twice."""
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    # AAA is already present (dup, must be skipped); CCC is new.
+    fetcher = _FakeReconstructionFetcher([("AAA", 2), ("CCC", 1)])
+    with BacktestStore(path) as store:
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=1,
+            spacing_sessions=10, universe=["AAA", "CCC"], fetcher=fetcher,
+            existing=(("AAA", date(2025, 6, 16)),),
+            price_backfiller=lambda *_args, **_kwargs: None,
+        )
+        assert [c.symbol for c in cases] == ["CCC"]
+
+
+def test_reconstruction_prepare_selects_controls_separately(tmp_path, monkeypatch):
+    """controls_count selects near-miss controls via a separate
+    select_candidates call, so they never crowd out passer selection."""
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    fetcher = _FakeMixedFetcher(
+        passers=[("AAA", 3), ("BBB", 2), ("CCC", 1)],
+        controls=[("NM1", 1), ("NM2", 1), ("NM3", 1)],
+    )
+    with BacktestStore(path) as store:
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=2,
+            spacing_sessions=10, universe=["AAA", "BBB", "CCC", "NM1", "NM2", "NM3"],
+            fetcher=fetcher, controls_count=2,
+            price_backfiller=lambda *_args, **_kwargs: None,
+        )
+        kinds = [c.trigger["kind"] for c in cases]
+        assert kinds.count("historical_screener_replay") == 2
+        assert kinds.count("near_miss_control") == 2
+        assert len(cases) == 4
+
+
+def test_reconstruction_prepare_backfills_prices_before_sealing(tmp_path, monkeypatch):
+    """Finding 1 (2026-07-28 review): prepare must backfill prices for the
+    selected candidates itself, before sealing, so a fresh symbol that has
+    never been stored as a case can still be sealed. ``backfill_prices``
+    alone cannot do this -- it derives its symbols from already-stored
+    cases, so a brand-new symbol would deadlock: prepare needs prices to
+    seal, but prices need a stored case to know what to fetch."""
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    calls: list = []
+
+    def fake_sealed_context_builder(cfg):
+        def build(case, _candidate):
+            # By the time sealing runs, the backfiller must already have
+            # been invoked for this case's symbol.
+            assert calls, "price backfill must run before sealing starts"
+            return ContextManifest.create(case_id=case.case_id, asof=case.asof)
+
+        return build
+
+    monkeypatch.setattr(service, "_sealed_context_builder", fake_sealed_context_builder)
+
+    def fake_backfiller(cfg, pairs, **kwargs):
+        calls.append((cfg, tuple(pairs)))
+
+    fetcher = _FakeReconstructionFetcher([("AAA", 2), ("BBB", 1)])
+    with BacktestStore(path) as store:
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=2,
+            spacing_sessions=10, universe=["AAA", "BBB"], fetcher=fetcher,
+            price_backfiller=fake_backfiller,
+        )
+
+    assert len(calls) == 1
+    seen_config, seen_pairs = calls[0]
+    assert seen_config is config
+    selected_pairs = {(c.symbol, c.asof) for c in cases}
+    assert selected_pairs.issubset(set(seen_pairs))
+    assert (config.backtest_benchmark, date(2025, 6, 16)) in seen_pairs
+
+
+def test_sealed_context_builder_fails_closed_without_price_bars(tmp_path, monkeypatch):
+    """An empty price cache must abort manifest sealing, not silently omit
+    price history (2026-07-27 incident: 40 memos guardrail-rejected because
+    manifests were sealed minutes before the price backfill ran)."""
+    from ops.backtest.models import BacktestCase
+    from ops.backtest.service import MissingBacktestArtifacts, _sealed_context_builder
+    from tradingagents.dataflows import edgar
+
+    monkeypatch.setattr(edgar, "get_user_agent", lambda: "test-agent")
+    monkeypatch.setattr(edgar, "list_filings", lambda ticker, **kwargs: [])
+    config = OpsConfig(backtest_store_path=str(tmp_path / "backtest.sqlite"))
+    case = BacktestCase.create(sleeve="research", symbol="AAA", asof=date(2025, 6, 16))
+    with pytest.raises(MissingBacktestArtifacts, match="price"):
+        _sealed_context_builder(config)(case, None)

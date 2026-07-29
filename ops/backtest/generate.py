@@ -148,6 +148,11 @@ class GenerationRequest:
         }
         memo_key = f"memo-{stable_hash(identity)}"
         payload = dict(hit_payload or case.trigger.get("screen_payload", case.trigger))
+        # The research brain's screen summary requires symbol/asof in the hit
+        # payload; reconstruction payloads may omit them, so inject them from
+        # the authoritative case fields (never overriding provided values).
+        payload.setdefault("symbol", case.symbol)
+        payload.setdefault("asof", case.asof.isoformat())
         return cls(
             generation_key=memo_key,
             memo_key=memo_key,

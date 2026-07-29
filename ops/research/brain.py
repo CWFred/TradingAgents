@@ -26,8 +26,8 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from datetime import date
-from uuid import NAMESPACE_URL, uuid5
 from typing import Literal
+from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import BaseModel, Field
 
@@ -188,9 +188,15 @@ def memo_id_for_hit(hit: dict, *, thesis_side: str) -> str:
 
 
 def _screen_summary(payload: dict) -> str:
-    lines = [f"{payload['symbol']} screened {payload['asof']}: "
-             f"cheap={payload['cheap']} quality={payload['quality']} "
-             f"market_cap={payload['market_cap']} ev_ebit={payload['ev_ebit']}"]
+    # Backtest reconstruction payloads omit market_cap/ev_ebit; render what
+    # exists rather than KeyError-ing, keeping the full format when present.
+    head = (f"{payload.get('symbol', '?')} screened {payload.get('asof', '?')}: "
+            f"cheap={payload.get('cheap')} quality={payload.get('quality')}")
+    extras = " ".join(
+        f"{key}={payload[key]}" for key in ("market_cap", "ev_ebit")
+        if key in payload
+    )
+    lines = [f"{head} {extras}" if extras else head]
     for bar in (*payload.get("valuation_bars", []), *payload.get("quality_bars", [])):
         mark = "PASS" if bar["passed"] else "fail"
         lines.append(f"  [{mark}] {bar['name']}: {bar['detail']}")

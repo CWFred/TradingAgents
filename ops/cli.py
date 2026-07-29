@@ -188,7 +188,7 @@ def _backtest_error(exc: Exception) -> click.ClickException:
               type=click.Path(exists=True, dir_okay=False),
               help="TOML replay-setting overrides; never triggers generation.")
 @click.option("--cases", "case_count", default=None, type=int,
-              help="Target cases, 30..50 (default: configured count).")
+              help="Target cases, 30..100 (default: configured count).")
 def backtest_run(
     sleeve: str, start: str, end: str, settings_path: str | None,
     case_count: int | None,
@@ -216,7 +216,7 @@ def backtest_run(
 @click.option("--end", default="today", show_default=True,
               help="Last case date (YYYY-MM-DD or today).")
 @click.option("--cases", "case_count", default=None, type=int,
-              help="Target cases, 30..50 (default: configured count).")
+              help="Target cases, 30..100 (default: configured count).")
 @click.option("--execute", is_flag=True,
               help="Actually run missing local-model jobs; default only prints the plan.")
 @click.option("--enqueue", is_flag=True,
@@ -226,9 +226,18 @@ def backtest_run(
 @click.option("--source", type=click.Choice(["recorded", "reconstruction"]),
               default="recorded", show_default=True,
               help="recorded live hits (default) or historical reconstruction screen.")
+@click.option("--spacing", "spacing", type=int, default=10, show_default=True,
+              help="Sessions between sampled reconstruction dates.")
+@click.option("--append", is_flag=True,
+              help="Top up an existing window with new cases instead of skipping "
+                   "prepare; reconstruction sources only.")
+@click.option("--controls", "controls_count", type=int, default=0, show_default=True,
+              help="Near-miss control cases to add alongside passers; "
+                   "reconstruction sources only.")
 def backtest_generate(
     sleeve: str, start: str, end: str, case_count: int | None,
     execute: bool, enqueue: bool, max_jobs: int | None, source: str,
+    spacing: int, append: bool, controls_count: int,
 ) -> None:
     """Plan or explicitly execute resumable frozen-memo generation."""
     from ops.backtest.service import generate_cases
@@ -240,6 +249,7 @@ def backtest_generate(
             config=config, sleeve=sleeve, start=start_date, end=end_date,
             case_count=case_count or config.backtest_case_count, today=today,
             execute=execute, enqueue=enqueue, max_jobs=max_jobs, source=source,
+            spacing_sessions=spacing, append=append, controls_count=controls_count,
         )
     except Exception as exc:
         raise _backtest_error(exc) from exc
@@ -257,6 +267,35 @@ def backtest_generate(
         click.echo("queued for automatic live-first background processing")
     elif result.pending:
         click.echo("plan only; pass --execute to run local-model generation")
+
+
+@backtest.command("prices")
+@click.option("--sleeve", default="research", show_default=True,
+              type=click.Choice(["research"]))
+@click.option("--start", required=True, help="First case date (YYYY-MM-DD).")
+@click.option("--end", default="today", show_default=True,
+              help="Last case date (YYYY-MM-DD or today).")
+def backtest_prices(sleeve: str, start: str, end: str) -> None:
+    """Backfill the price cache for a sleeve's cases plus the benchmark."""
+    from ops.backtest.price_backfill import backfill_prices
+    from ops.backtest.store import BacktestStore
+
+    config = load_config()
+    try:
+        start_date, end_date, _today = _backtest_window(start, end)
+        with BacktestStore(
+            config.backtest_store_path, cutoff=config.backtest_cutoff,
+        ) as store:
+            summary = backfill_prices(
+                config, store, sleeve=sleeve, start=start_date, end=end_date,
+            )
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    click.echo(f"prices: {summary.symbols} symbol(s), {summary.bars} bar(s)")
+    if summary.failures:
+        click.echo(f"failures: {len(summary.failures)}")
+        for symbol, reason in summary.failures:
+            click.echo(f"  {symbol}: {reason}")
 
 
 @backtest.command("report")

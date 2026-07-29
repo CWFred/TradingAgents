@@ -425,6 +425,202 @@ def test_generate_cli_defaults_source_to_recorded(tmp_path, monkeypatch):
     assert captured["source"] == "recorded"
 
 
+def test_generate_cli_passes_spacing_to_service(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--source", "reconstruction",
+        "--start", "2025-06-02", "--end", "2025-10-01", "--spacing", "5",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["spacing_sessions"] == 5
+
+
+def test_generate_cli_defaults_spacing_to_ten(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["spacing_sessions"] == 10
+
+
+def test_generate_explicit_preparer_receives_spacing_sessions(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    seen: dict = {}
+
+    def preparer(**kwargs):
+        seen.update(kwargs)
+        raise SystemExit
+
+    with pytest.raises(SystemExit):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 2),
+            end=date(2026, 3, 31), case_count=40, today=date(2026, 7, 28),
+            source="reconstruction", preparer=preparer, spacing_sessions=5,
+        )
+
+    assert seen["spacing_sessions"] == 5
+
+
+def test_generate_append_with_recorded_source_is_rejected(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    with pytest.raises(InvalidBacktestRequest, match="append is reconstruction-only"):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 1),
+            end=date(2025, 6, 30), case_count=40, today=date(2025, 7, 1),
+            source="recorded", append=True,
+        )
+
+
+def test_generate_cli_threads_append_into_service(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--source", "reconstruction",
+        "--start", "2025-06-02", "--end", "2025-10-01", "--append",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["append"] is True
+
+
+def test_generate_cli_defaults_append_to_false(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["append"] is False
+
+
+def test_generate_cli_passes_controls_to_service(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--source", "reconstruction",
+        "--start", "2025-06-02", "--end", "2025-10-01", "--controls", "5",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["controls_count"] == 5
+
+
+def test_generate_cli_defaults_controls_to_zero(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["controls_count"] == 0
+
+
+def test_generate_explicit_preparer_receives_controls_count(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    seen: dict = {}
+
+    def preparer(**kwargs):
+        seen.update(kwargs)
+        raise SystemExit
+
+    with pytest.raises(SystemExit):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 2),
+            end=date(2026, 3, 31), case_count=40, today=date(2026, 7, 28),
+            source="reconstruction", preparer=preparer, controls_count=3,
+        )
+
+    assert seen["controls_count"] == 3
+
+
+def test_prices_cli_backfills_window_and_prints_summary(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    BacktestStore(path).close()
+    from ops.backtest.price_backfill import BackfillSummary
+
+    captured: dict = {}
+
+    def fake_backfill_prices(config, store, **kwargs):
+        captured.update(kwargs)
+        captured["store"] = store
+        return BackfillSummary(
+            symbols=3, bars=120, failures=(("ZZZ", "no data"),),
+        )
+
+    monkeypatch.setattr(
+        "ops.backtest.price_backfill.backfill_prices", fake_backfill_prices,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "prices", "--start", "2025-06-02", "--end", "2025-07-15",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["sleeve"] == "research"
+    assert captured["start"] == date(2025, 6, 2)
+    assert captured["end"] == date(2025, 7, 15)
+    assert isinstance(captured["store"], BacktestStore)
+    assert "3" in result.output and "120" in result.output
+    assert "ZZZ" in result.output and "no data" in result.output
+
+
 def test_contaminated_probe_cutoff_blocks_run_and_generation_selection(tmp_path):
     path = tmp_path / "backtest.sqlite"
     _seed_case(path)
@@ -491,7 +687,7 @@ def test_invalid_dates_case_count_and_settings_fail_cleanly(tmp_path):
         "backtest", "run", "--start", "2025-06-01", "--cases", "29",
     ])
     assert bad_count.exit_code != 0
-    assert "approved range 30..50" in bad_count.output
+    assert "approved range 30..100" in bad_count.output
 
     settings = tmp_path / "settings.toml"
     settings.write_text("unknown = true\n")
@@ -584,3 +780,80 @@ def test_postmortem_cli_loads_adapter_persists_assessment_and_updates_quadrant(
         assert conn.execute(
             "SELECT quadrant FROM case_results WHERE run_id = ?", (run_id,),
         ).fetchone()[0] == "wrong-thesis-lucky"
+
+
+def test_selected_cases_includes_all_controls_beyond_case_count_budget(tmp_path):
+    """Finding 2 (2026-07-28 review): case_count budgets passers only.
+    Near-miss control cases are additive -- they must never be truncated or
+    displace a passer from the top-up, since the whole point of a control is
+    that it failed the screen and is still there to falsify it."""
+    from ops.backtest.service import _selected_cases
+
+    path = tmp_path / "backtest.sqlite"
+    with BacktestStore(path) as store:
+        for offset, symbol in enumerate(["AAA", "BBB", "CCC"]):
+            store.insert_case(BacktestCase.create(
+                sleeve="research", symbol=symbol, asof=date(2025, 6, 1 + offset),
+                trigger={"kind": "historical_screener_replay"},
+            ))
+        for offset, symbol in enumerate(["NM1", "NM2"]):
+            store.insert_case(BacktestCase.create(
+                sleeve="research", symbol=symbol, asof=date(2025, 6, 10 + offset),
+                trigger={"kind": "near_miss_control"},
+            ))
+
+        cases = _selected_cases(
+            store, sleeve="research", start=date(2025, 6, 1), end=date(2025, 6, 30),
+            case_count=2,
+        )
+
+    passers = [c.symbol for c in cases if c.trigger.get("kind") != "near_miss_control"]
+    controls = [c.symbol for c in cases if c.trigger.get("kind") == "near_miss_control"]
+    assert passers == ["AAA", "BBB"]
+    assert controls == ["NM1", "NM2"]
+    assert len(cases) == 4
+
+
+def test_generate_append_top_up_ignores_controls_in_passer_budget(tmp_path):
+    """Finding 2 (2026-07-28 review): the append top-up must compute how many
+    more passers to fetch from the stored PASSER count, not the stored total.
+    Otherwise stored controls silently shrink (or zero out) the top-up."""
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    with BacktestStore(path) as store:
+        store.insert_case(BacktestCase.create(
+            sleeve="research", symbol="AAA", asof=date(2025, 6, 15),
+            trigger={"kind": "historical_screener_replay"},
+        ))
+        store.insert_case(BacktestCase.create(
+            sleeve="research", symbol="NM1", asof=date(2025, 6, 16),
+            trigger={"kind": "near_miss_control"},
+        ))
+        store.insert_case(BacktestCase.create(
+            sleeve="research", symbol="NM2", asof=date(2025, 6, 17),
+            trigger={"kind": "near_miss_control"},
+        ))
+
+    seen: dict = {}
+
+    def preparer(**kwargs):
+        seen.update(kwargs)
+        raise SystemExit
+
+    with pytest.raises(SystemExit):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 1),
+            end=date(2025, 6, 30), case_count=30, today=date(2025, 7, 1),
+            source="reconstruction", preparer=preparer, append=True,
+        )
+
+    # 1 stored passer + 2 controls; case_count=30 must top up by 29 (30-1),
+    # never 27 (30-3) -- controls must not eat into the passer budget.
+    assert seen["case_count"] == 29
+    # Dedupe must still see ALL stored cases so a control is never
+    # re-inserted as a duplicate.
+    assert set(seen["existing"]) == {
+        ("AAA", date(2025, 6, 15)),
+        ("NM1", date(2025, 6, 16)),
+        ("NM2", date(2025, 6, 17)),
+    }

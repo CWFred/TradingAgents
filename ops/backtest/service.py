@@ -12,7 +12,7 @@ import importlib
 import json
 import sqlite3
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -216,8 +216,12 @@ def _validate_window(
         raise InvalidBacktestRequest(f"end {end} is before start {start}")
     if end > today:
         raise InvalidBacktestRequest(f"end {end} is after resolved today {today}")
-    if not 30 <= case_count <= 50:
-        raise InvalidBacktestRequest("cases must be in the approved range 30..50")
+    if not 30 <= case_count <= 100:
+        raise InvalidBacktestRequest("cases must be in the approved range 30..100")
+
+
+def _is_control_case(case) -> bool:
+    return case.trigger.get("kind") == "near_miss_control"
 
 
 def _selected_cases(
@@ -228,10 +232,20 @@ def _selected_cases(
     end: date,
     case_count: int,
 ):
-    cases = [
+    """Select cases for replay: passers are budgeted, controls are additive.
+
+    ``case_count`` truncates only non-control cases, in (asof, symbol) order.
+    Near-miss control cases in the window are always included in full -- they
+    exist to falsify the screen and must never be displaced by passer top-up,
+    nor count against the passer budget.
+    """
+    windowed = [
         case for case in store.list_cases(sleeve=sleeve)
         if start <= case.asof <= end
-    ][:case_count]
+    ]
+    passers = [case for case in windowed if not _is_control_case(case)][:case_count]
+    controls = [case for case in windowed if _is_control_case(case)]
+    cases = passers + controls
     if not cases:
         raise MissingBacktestArtifacts(
             f"no {sleeve!r} cases in {start}..{end}; preload/select cases first"
@@ -714,15 +728,19 @@ def _sealed_context_builder(
             ))
         prices = PriceCache(config.backtest_store_path)
         bars = prices.bars(case.symbol, end=case.asof, adjusted_to=case.asof)
-        if bars:
-            artifacts.append(ContextArtifact(
-                kind="price_history", source_ref=f"price-cache:{case.symbol}:{case.asof}",
-                available_at=case.asof,
-                content=canonical_json({
-                    "closes": {bar.session: bar.adjusted_close for bar in bars},
-                }),
-                metadata={"symbol": case.symbol},
-            ))
+        if not bars:
+            raise MissingBacktestArtifacts(
+                f"price cache has no bars for {case.symbol} on/before {case.asof}; "
+                "backfill prices for the case window before sealing manifests"
+            )
+        artifacts.append(ContextArtifact(
+            kind="price_history", source_ref=f"price-cache:{case.symbol}:{case.asof}",
+            available_at=case.asof,
+            content=canonical_json({
+                "closes": {bar.session: bar.adjusted_close for bar in bars},
+            }),
+            metadata={"symbol": case.symbol},
+        ))
         return build_context_manifest(
             case_id=case.case_id, asof=case.asof, artifacts=artifacts,
         )
@@ -752,6 +770,9 @@ def _reconstruction_prepare_cases(
     spacing_sessions: int = 10,
     universe: Any = None,
     fetcher: Callable[[date], Sequence[CaseCandidate]] | None = None,
+    existing: Collection[tuple[str, date]] = (),
+    controls_count: int = 0,
+    price_backfiller: Callable[..., Any] | None = None,
 ) -> tuple[BacktestCase, ...]:
     """Reconstruct cases by replaying the screener at sampled historical dates.
 
@@ -759,6 +780,17 @@ def _reconstruction_prepare_cases(
     wrapped in :class:`CurrentUniverseReconstructionSource`: these cases are
     survivorship-biased over today's universe membership and must never be
     rendered as a clean point-in-time historical screen.
+
+    ``controls_count`` near-miss control cases (names failing exactly one
+    screen condition) are selected via a *separate* ``select_candidates``
+    call so they never crowd out passer selection.
+
+    Before sealing, prices are backfilled for exactly the selected
+    candidates: ``_sealed_context_builder`` fails closed when the price
+    cache has no bars for a symbol, and the only other cache writer
+    (``backfill_prices``) derives its symbols from *already-stored* cases --
+    a fresh symbol could otherwise never be prepared (2026-07-28 review,
+    finding 1: prepare/prices sequencing deadlock).
     """
     from ops.backtest.cases import (
         CurrentUniverseReconstructionSource,
@@ -781,6 +813,7 @@ def _reconstruction_prepare_cases(
             universe=universe, facts_fetcher=get_company_facts,
             price_context_fetcher=fetch_price_context,
             triggers_finder=find_triggers,
+            include_near_misses=controls_count > 0,
         )
 
     sessions = MarketCalendar().sessions_between(start, end)
@@ -789,10 +822,37 @@ def _reconstruction_prepare_cases(
     )
     source = CurrentUniverseReconstructionSource(fetch=fetcher)
     candidates = collect_candidates(source, sampled)
-    selected = select_candidates(
-        candidates, target_count=case_count,
+    existing_keys = set(existing)
+    candidates = [
+        candidate for candidate in candidates
+        if (candidate.normalized_symbol(), candidate.asof) not in existing_keys
+    ]
+    passer_candidates = [
+        candidate for candidate in candidates
+        if candidate.trigger.get("kind") != "near_miss_control"
+    ]
+    control_candidates = [
+        candidate for candidate in candidates
+        if candidate.trigger.get("kind") == "near_miss_control"
+    ]
+    selected = list(select_candidates(
+        passer_candidates, target_count=case_count,
         per_date_cap=max(1, -(-case_count // max(1, len(sampled)))),
-    )
+    ))
+    if controls_count > 0:
+        selected.extend(select_candidates(
+            control_candidates, target_count=controls_count,
+            per_date_cap=max(1, -(-controls_count // max(1, len(sampled)))),
+        ))
+    if selected:
+        if price_backfiller is None:
+            from ops.backtest.price_backfill import backfill_symbol_windows
+
+            price_backfiller = backfill_symbol_windows
+        pairs = [(candidate.normalized_symbol(), candidate.asof) for candidate in selected]
+        pairs.append((config.backtest_benchmark, min(candidate.asof for candidate in selected)))
+        price_backfiller(config, pairs)
+
     prepared: list[BacktestCase] = []
     context_builder = _sealed_context_builder(config)
     for candidate in selected:
@@ -831,9 +891,14 @@ def generate_cases(
     source: str = "recorded",
     executor: Callable[..., GenerationSummary] | None = None,
     preparer: Callable[..., Sequence[BacktestCase]] | None = None,
+    spacing_sessions: int = 10,
+    append: bool = False,
+    controls_count: int = 0,
 ) -> GenerationResult:
     if execute and enqueue:
         raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
+    if append and source == "recorded":
+        raise InvalidBacktestRequest("append is reconstruction-only")
     _validate_window(
         start=start, end=end, today=today, cutoff=config.backtest_cutoff,
         case_count=case_count,
@@ -850,7 +915,13 @@ def generate_cases(
             case for case in store.list_cases(sleeve=sleeve)
             if start <= case.asof <= end
         ]
-        if not available:
+        # case_count budgets passers only; controls are additive and must
+        # never shrink the passer top-up (see finding 2, 2026-07-28 review).
+        available_passers = [case for case in available if not _is_control_case(case)]
+        need_prepare = (
+            not available_passers
+        ) or (append and len(available_passers) < case_count)
+        if need_prepare:
             if preparer is not None:
                 prepare = preparer
             elif source == "reconstruction":
@@ -859,9 +930,22 @@ def generate_cases(
                 prepare = _default_prepare_cases
             else:
                 raise InvalidBacktestRequest(f"unknown case source {source!r}")
+            prepare_kwargs = (
+                {
+                    "spacing_sessions": spacing_sessions,
+                    # Dedupe against ALL stored cases (including controls) so
+                    # a control is never re-inserted as a duplicate.
+                    "existing": tuple((c.symbol, c.asof) for c in available),
+                    "controls_count": controls_count,
+                }
+                if preparer is not None or source == "reconstruction"
+                else {}
+            )
             prepare(
                 store=store, config=config, sleeve=sleeve,
-                start=start, end=end, case_count=case_count,
+                start=start, end=end,
+                case_count=case_count - len(available_passers),
+                **prepare_kwargs,
             )
         cases = _selected_cases(
             store, sleeve=sleeve, start=start, end=end, case_count=case_count,

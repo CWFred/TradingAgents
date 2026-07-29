@@ -6,7 +6,7 @@ facts/price fetchers once per universe symbol -- that is what makes the caching
 assertion meaningful: the fetcher wraps them in per-symbol caches, so a two-date
 sweep fetches each symbol's data once, not once per date.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
@@ -79,7 +79,14 @@ def test_fetcher_returns_passing_candidates_and_caches_per_symbol(monkeypatch):
     assert a[0].trigger["asof"] == "2025-06-16"
     assert a[0].asof == date(2025, 6, 16)
     assert a[0].score == Decimal(1)
-    assert a[0].screen_payload == {"passed": True, "cheap": True, "quality": True}
+    # Full live-shaped payload: the entire ScreenResult dump plus the
+    # symbol/asof keys the brain's screen summary requires (2026-07-27
+    # incident: the old 3-key payload KeyError'd every regenerated memo).
+    assert a[0].screen_payload["passed"] is True
+    assert a[0].screen_payload["cheap"] is True
+    assert a[0].screen_payload["quality"] is True
+    assert a[0].screen_payload["symbol"] == "AAA"
+    assert a[0].screen_payload["asof"] == "2025-06-16"
     assert a[0].source_ref == "reconstruction:2025-06-16:AAA"
     # per-symbol data fetched once total, reused across both asofs:
     assert calls["facts"] == 2 and calls["price"] == 2  # AAA + BBB, not x2 dates
@@ -122,3 +129,28 @@ def test_skips_failing_names(monkeypatch):
     out = fetcher(date(2025, 6, 16))
     assert [c.symbol for c in out] == ["BBB"]
     assert out[0].screen_payload["cheap"] is False
+
+
+def test_near_miss_controls_emitted_and_flagged():
+    def fake_screen(universe, *, asof, facts_fetcher, triggers_finder,
+                    price_context_fetcher):
+        return (
+            (_FakeInputs("PASS1", triggers=("t",)), _FakeResult(passed=True)),
+            # cheap+quality but zero triggers -> near miss (failed=trigger)
+            (_FakeInputs("NM1"), _FakeResult(passed=False)),
+            # fails two conditions -> NOT a near miss
+            (_FakeInputs("FAR"), _FakeResult(passed=False, cheap=False, quality=False)),
+        )
+    fetcher = ReconstructionScreenerFetcher(
+        universe=("PASS1", "NM1", "FAR"),
+        facts_fetcher=lambda s: {}, price_context_fetcher=lambda s: {},
+        triggers_finder=lambda s, *, asof: [], screen=fake_screen,
+        include_near_misses=True,
+    )
+    out = fetcher(date(2025, 6, 16))
+    kinds = {c.symbol: c.trigger["kind"] for c in out}
+    assert kinds == {"PASS1": "historical_screener_replay",
+                     "NM1": "near_miss_control"}
+    nm = next(c for c in out if c.symbol == "NM1")
+    assert nm.trigger["failed"] == "trigger"
+    assert nm.source_ref == "nearmiss:2025-06-16:NM1"
