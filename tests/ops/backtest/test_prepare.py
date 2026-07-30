@@ -358,3 +358,44 @@ def test_sealed_context_builder_fails_closed_without_price_bars(tmp_path, monkey
     case = BacktestCase.create(sleeve="research", symbol="AAA", asof=date(2025, 6, 16))
     with pytest.raises(MissingBacktestArtifacts, match="price"):
         _sealed_context_builder(config)(case, None)
+
+
+def test_reconstruction_prepare_skips_unsealable_candidates(tmp_path, monkeypatch):
+    """One symbol whose manifest cannot seal (e.g. no price bars after a
+    failed backfill) must be skipped with the sweep continuing — a 26-hour
+    sweep must never die on one name (2026-07-30 incident: symbol IT aborted
+    the insert loop, dropping the remaining passers and every control)."""
+    import ops.backtest.service as service
+    from ops.backtest.service import MissingBacktestArtifacts, _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+
+    def builder(cfg):
+        def build(case, _candidate):
+            if case.symbol == "BAD":
+                raise MissingBacktestArtifacts(
+                    f"price cache has no bars for {case.symbol} on/before {case.asof}"
+                )
+            return ContextManifest.create(case_id=case.case_id, asof=case.asof)
+        return build
+
+    monkeypatch.setattr(service, "_sealed_context_builder", builder)
+
+    fetcher = _FakeReconstructionFetcher([("BAD", 3), ("GOOD", 2), ("ALSO", 1)])
+    with BacktestStore(path) as store:
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=3,
+            spacing_sessions=10, universe=["BAD", "GOOD", "ALSO"],
+            fetcher=fetcher, price_backfiller=lambda cfg, pairs: None,
+        )
+        assert sorted(c.symbol for c in cases) == ["ALSO", "GOOD"]
+        stored = {c.symbol for c in store.list_cases(sleeve="research")}
+        assert "BAD" not in stored
