@@ -860,7 +860,14 @@ def _reconstruction_prepare_cases(
             candidate, sleeve=sleeve, cutoff=store.effective_cutoff,
             source=CaseSource.CURRENT_UNIVERSE_RECONSTRUCTION,
         )
-        manifest = context_builder(case, candidate)
+        try:
+            manifest = context_builder(case, candidate)
+        except MissingBacktestArtifacts as exc:
+            # One unsealable symbol (e.g. its price backfill failed) must not
+            # abort a multi-hour sweep; the fail-closed guard still keeps the
+            # bad case out because we skip before any store write.
+            print(f"[prepare] skipped {case.symbol} {case.asof}: {exc}")
+            continue
         if manifest.case_id != case.case_id or manifest.asof != case.asof:
             raise InvalidBacktestRequest(
                 f"context builder returned a manifest for another case: {case.symbol}"
