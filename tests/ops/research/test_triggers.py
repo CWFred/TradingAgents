@@ -263,3 +263,67 @@ def test_find_triggers_equals_compose_from_sources_with_fakes():
 
     assert composed == direct
     assert [t.kind for t in composed] == ["activist_stake", "insider_cluster"]
+
+
+def _form4_filing(i: int, *, cik: int = 1) -> Filing:
+    return Filing(
+        ticker="WIDG", cik=cik, accession_number=f"acc-form4-{i}", form="4",
+        filing_date=date(2026, 6, 1), report_date=None,
+        primary_document=f"form4-{i}.xml",
+    )
+
+
+def _list_filings_capped_at(filings):
+    def _list_filings(ticker, *, forms=None, since=None, limit=100):
+        if forms is None:
+            return filings[:limit]
+        return [f for f in filings if f.form in forms][:limit]
+    return _list_filings
+
+
+def test_fetch_trigger_sources_flags_truncation_at_form4_cap(monkeypatch):
+    import ops.research.triggers as triggers_mod
+
+    monkeypatch.setattr(triggers_mod, "_SOURCES_MAX_FORM4_FILINGS", 2)
+    fetch_raw = lambda url: _form4_xml("DOE JANE", date(2026, 6, 1))  # noqa: E731
+
+    at_cap = fetch_trigger_sources(
+        "WIDG",
+        list_filings=_list_filings_capped_at([_form4_filing(0), _form4_filing(1)]),
+        fetch_raw=fetch_raw,
+    )
+    assert at_cap["insider_transactions_truncated"] is True
+
+    under_cap = fetch_trigger_sources(
+        "WIDG",
+        list_filings=_list_filings_capped_at([_form4_filing(0)]),
+        fetch_raw=fetch_raw,
+    )
+    assert under_cap["insider_transactions_truncated"] is False
+
+
+def test_triggers_from_sources_warns_only_when_truncated(monkeypatch, caplog):
+    import ops.research.triggers as triggers_mod
+
+    monkeypatch.setattr(triggers_mod, "_SOURCES_MAX_FORM4_FILINGS", 2)
+    fetch_raw = lambda url: _form4_xml("DOE JANE", date(2026, 6, 1))  # noqa: E731
+
+    at_cap = fetch_trigger_sources(
+        "WIDG",
+        list_filings=_list_filings_capped_at([_form4_filing(0), _form4_filing(1)]),
+        fetch_raw=fetch_raw,
+    )
+    under_cap = fetch_trigger_sources(
+        "WIDG",
+        list_filings=_list_filings_capped_at([_form4_filing(0)]),
+        fetch_raw=fetch_raw,
+    )
+
+    with caplog.at_level("WARNING", logger="ops.research.triggers"):
+        triggers_from_sources(at_cap, asof=date(2026, 7, 1))
+    assert any("truncated" in rec.message for rec in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="ops.research.triggers"):
+        triggers_from_sources(under_cap, asof=date(2026, 7, 1))
+    assert caplog.records == []

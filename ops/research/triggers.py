@@ -18,6 +18,7 @@ Two sources:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -26,6 +27,8 @@ from typing import Any
 
 from tradingagents.dataflows import edgar
 from tradingagents.dataflows.form4 import InsiderTransaction
+
+logger = logging.getLogger(__name__)
 
 TRIGGER_LOOKBACK_DAYS = 90
 SELLOFF_LOOKBACK_DAYS = 60
@@ -231,23 +234,39 @@ def fetch_trigger_sources(
     transaction. This is exactly what a persistent fetch cache should store;
     ``triggers_from_sources`` derives date-appropriate triggers from it with
     no further network access.
+
+    ``insider_transactions_truncated`` is set when the Form 4 filings listing
+    hit ``_SOURCES_MAX_FORM4_FILINGS`` — i.e. the cap was reached, so older
+    insider activity MAY be missing for asofs near the front of a long sweep.
+    (Exactly-cap-many available filings is indistinguishable from more
+    existing beyond the cap, so this is deliberately conservative.)
     """
     from tradingagents.dataflows.form4 import get_insider_transactions
 
     _list_filings = list_filings or edgar.list_filings
     trigger_forms = set(edgar.CHANGE_TRIGGER_FORMS) - {"4"}
     filings = _list_filings(symbol, forms=trigger_forms)
+
+    form4_filings = _list_filings(
+        symbol, forms={"4"}, since=date.min, limit=_SOURCES_MAX_FORM4_FILINGS,
+    )
+    truncated = len(form4_filings) >= _SOURCES_MAX_FORM4_FILINGS
+
+    def _prefetched_form4_filings(_ticker: str, **_kw: Any) -> list[edgar.Filing]:
+        return form4_filings
+
     txns = get_insider_transactions(
         symbol,
         since=date.min,
         max_filings=_SOURCES_MAX_FORM4_FILINGS,
-        list_filings=list_filings,
+        list_filings=_prefetched_form4_filings,
         fetch_raw=fetch_raw,
     )
     return {
         "symbol": symbol,
         "edgar_filings": [_serialize_filing(f) for f in filings],
         "insider_transactions": [_serialize_txn(t) for t in txns],
+        "insider_transactions_truncated": truncated,
     }
 
 
@@ -264,6 +283,12 @@ def triggers_from_sources(
     ``price_context`` (an object with ``recent_closes(asof=..., days=...)``,
     e.g. ``ops.research.prices.PriceContext``) is supplied.
     """
+    if sources.get("insider_transactions_truncated"):
+        logger.warning(
+            "%s: insider transactions source truncated at %d Form 4 filings "
+            "— older insider activity may be missing for asof=%s",
+            sources.get("symbol", "?"), _SOURCES_MAX_FORM4_FILINGS, asof,
+        )
     since = asof - timedelta(days=lookback_days)
     out: list[Trigger] = []
     for f in (_revive_filing(d) for d in sources.get("edgar_filings", ())):
@@ -337,6 +362,9 @@ def _legacy_sources_for_find_triggers(
         "symbol": ticker,
         "edgar_filings": [_serialize_filing(f) for f in filings],
         "insider_transactions": [_serialize_txn(t) for t in txns],
+        # find_triggers' original per-asof fetch never hit the sweep-sized
+        # cap that fetch_trigger_sources applies; nothing to flag.
+        "insider_transactions_truncated": False,
     }
 
 
