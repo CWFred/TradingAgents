@@ -5,7 +5,7 @@ import pytest
 
 from ops.backtest.cases import CaseCandidate, HistoricalCaseSource
 from ops.backtest.context import ContextArtifact
-from ops.backtest.models import CaseSource, ContextManifest
+from ops.backtest.models import BacktestCase, CaseSource, ContextManifest
 from ops.backtest.prepare import PreparedContext, prepare_cases
 from ops.backtest.store import BacktestStore
 from ops.config import OpsConfig
@@ -482,6 +482,56 @@ def test_reconstruction_prepare_fresh_sweep_clears_checkpoints(tmp_path, monkeyp
             fresh_sweep=True,
         )
         assert fetcher.calls == [date(2025, 6, 16), date(2025, 6, 16)]
+
+
+def test_reconstruction_prepare_skips_insert_conflicts_too(tmp_path, monkeypatch):
+    """Per-candidate isolation must also cover CaseConflictError from the
+    insert itself, not just context-builder failures: a resurfaced orphan
+    (or any candidate) whose re-prepared content drifts from a pre-existing
+    conflicting row must be skipped, not abort the whole sweep (review
+    finding, 2026-07-31)."""
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    fetcher = _FakeReconstructionFetcher([("BAD", 3), ("GOOD", 2), ("ALSO", 1)])
+    with BacktestStore(path) as store:
+        # Pre-existing row for BAD with different frozen content: same
+        # (sleeve, symbol, asof) identity -> same case_id -> a conflict when
+        # the sweep tries to insert its freshly reconstructed BAD case.
+        conflicting = BacktestCase.create(
+            sleeve="research", symbol="BAD", asof=date(2025, 6, 16),
+            trigger={"kind": "pre-existing-different"},
+        )
+        store.insert_case(conflicting)
+
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=3,
+            spacing_sessions=10, universe=["BAD", "GOOD", "ALSO"],
+            fetcher=fetcher, price_backfiller=lambda cfg, pairs: None,
+        )
+        assert sorted(c.symbol for c in cases) == ["ALSO", "GOOD"]
+        # BAD's pre-existing row is untouched -- no manifest was inserted
+        # for it, and the sweep continued past it.
+        assert store.get_context_manifest(conflicting.case_id) is None
 
 
 def test_sealed_context_builder_fails_closed_without_price_bars(tmp_path, monkeypatch):

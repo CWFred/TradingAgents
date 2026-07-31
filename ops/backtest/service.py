@@ -58,7 +58,7 @@ from ops.backtest.report import (
     render_report,
 )
 from ops.backtest.sleeves import make_research_exit_policy, size_research_case
-from ops.backtest.store import BacktestStore
+from ops.backtest.store import BacktestStore, CaseConflictError
 from ops.backtest.verdicts import evaluate_replay
 from ops.config import OpsConfig
 
@@ -926,17 +926,19 @@ def _reconstruction_prepare_cases(
         )
         try:
             manifest = context_builder(case, candidate)
-        except MissingBacktestArtifacts as exc:
-            # One unsealable symbol (e.g. its price backfill failed) must not
-            # abort a multi-hour sweep; the fail-closed guard still keeps the
-            # bad case out because we skip before any store write.
+            if manifest.case_id != case.case_id or manifest.asof != case.asof:
+                raise InvalidBacktestRequest(
+                    f"context builder returned a manifest for another case: {case.symbol}"
+                )
+            store.insert_case_with_manifest(case, manifest)
+        except (MissingBacktestArtifacts, CaseConflictError) as exc:
+            # One unsealable or conflicting symbol (e.g. its price backfill
+            # failed, or a resurfaced orphan's re-prepared content drifted
+            # from a pre-existing conflicting row) must not abort a
+            # multi-hour sweep; the fail-closed guard still keeps the bad
+            # case out because we skip before any further store write.
             print(f"[prepare] skipped {case.symbol} {case.asof}: {exc}")
             continue
-        if manifest.case_id != case.case_id or manifest.asof != case.asof:
-            raise InvalidBacktestRequest(
-                f"context builder returned a manifest for another case: {case.symbol}"
-            )
-        store.insert_case_with_manifest(case, manifest)
         prepared.append(case)
     if not prepared:
         raise MissingBacktestArtifacts(
