@@ -16,6 +16,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from ops.backtest.cases import CaseCandidate
 from ops.backtest.models import (
     MIN_BACKTEST_CUTOFF,
     BacktestCase,
@@ -32,7 +33,7 @@ from ops.backtest.models import (
     stable_hash,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BUSY_TIMEOUT_MS = 5_000
 
 
@@ -273,6 +274,16 @@ CREATE TABLE IF NOT EXISTS experiment_cases (
 );
 """
 
+_SCHEMA_V4 = """
+CREATE TABLE IF NOT EXISTS sweep_candidates (
+    sweep_key TEXT NOT NULL,
+    asof TEXT NOT NULL,
+    candidates_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (sweep_key, asof)
+);
+"""
+
 _SCHEMA_V2 = """
 CREATE TABLE IF NOT EXISTS distillation_runs (
     distillation_key TEXT PRIMARY KEY,
@@ -432,6 +443,16 @@ class BacktestStore:
                 except BaseException:
                     self._conn.execute("ROLLBACK")
                     raise
+                current = 3
+            if current == 3:
+                self._conn.executescript(
+                    "BEGIN IMMEDIATE;\n"
+                    + _SCHEMA_V4
+                    + "\nINSERT OR REPLACE INTO schema_metadata (key, value) "
+                    + "VALUES ('schema_version', '4');\n"
+                    + "PRAGMA user_version = 4;\nCOMMIT;"
+                )
+                current = 4
             columns = {
                 row[1]
                 for row in self._conn.execute(
@@ -531,6 +552,89 @@ class BacktestStore:
             score=Decimal(row["score"]) if row["score"] is not None else None,
             created_at=_parse_utc(row["created_at"]),
         )
+
+    # --- Per-date sweep checkpoints (resume) ------------------------------
+
+    @staticmethod
+    def _candidate_to_json(candidate: CaseCandidate) -> dict:
+        return {
+            "symbol": candidate.normalized_symbol(),
+            "asof": candidate.asof.isoformat(),
+            "score": str(candidate.decimal_score()),
+            "trigger": dict(candidate.trigger),
+            "screen_payload": dict(candidate.screen_payload),
+            "source_ref": candidate.source_ref,
+        }
+
+    @staticmethod
+    def _candidate_from_json(payload: dict) -> CaseCandidate:
+        return CaseCandidate(
+            symbol=payload["symbol"],
+            asof=date.fromisoformat(payload["asof"]),
+            score=Decimal(payload["score"]),
+            trigger=payload["trigger"],
+            screen_payload=payload["screen_payload"],
+            source_ref=payload["source_ref"],
+        )
+
+    def save_sweep_candidates(
+        self, sweep_key: str, asof: date, candidates: Sequence[CaseCandidate],
+    ) -> None:
+        """Checkpoint one sampled date's screen hits for an in-progress sweep.
+
+        An empty ``candidates`` sequence is a valid, distinct checkpoint: the
+        date was screened and nothing passed. It must never be conflated with
+        an absent (not-yet-screened) date.
+        """
+        if not sweep_key.strip():
+            raise ValueError("sweep_key must not be empty")
+        payload = canonical_json([self._candidate_to_json(c) for c in candidates])
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT candidates_json FROM sweep_candidates "
+                "WHERE sweep_key = ? AND asof = ?",
+                (sweep_key, asof.isoformat()),
+            ).fetchone()
+            if row is not None:
+                if row["candidates_json"] != payload:
+                    raise CaseConflictError(
+                        f"sweep {sweep_key!r} asof {asof} already checkpointed "
+                        "with different candidates"
+                    )
+                return
+            conn.execute(
+                "INSERT INTO sweep_candidates "
+                "(sweep_key, asof, candidates_json, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    sweep_key, asof.isoformat(), payload,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def load_sweep_candidates(
+        self, sweep_key: str,
+    ) -> dict[date, tuple[CaseCandidate, ...]]:
+        """Return every checkpointed date for a sweep, keyed by asof."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT asof, candidates_json FROM sweep_candidates WHERE sweep_key = ?",
+                (sweep_key,),
+            ).fetchall()
+        result: dict[date, tuple[CaseCandidate, ...]] = {}
+        for row in rows:
+            payload = json.loads(row["candidates_json"])
+            result[date.fromisoformat(row["asof"])] = tuple(
+                self._candidate_from_json(item) for item in payload
+            )
+        return result
+
+    def clear_sweep_candidates(self, sweep_key: str) -> int:
+        """Drop every checkpoint for a sweep key (``--fresh-sweep``)."""
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM sweep_candidates WHERE sweep_key = ?", (sweep_key,),
+            )
+            return cursor.rowcount
 
     def get_case(self, case_id: str) -> BacktestCase | None:
         with self._lock:

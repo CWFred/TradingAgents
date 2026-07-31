@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from ops.backtest.cases import CaseCandidate
 from ops.backtest.generate import FrozenMemoRecord, GenerationRequest
 from ops.backtest.lessons import DistilledLesson
 from ops.backtest.models import (
@@ -419,6 +420,91 @@ def test_lesson_and_experiment_caches_are_durable_and_idempotent(tmp_path):
         assert reopened.get_distilled_lessons("missing") is None
         assert reopened.get_distilled_lessons("distillation-1") == (distilled,)
         assert reopened.get_experiment(experiment.experiment_id) == experiment
+
+
+def test_sweep_candidates_round_trip_decimal_score_and_date(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    asof = date(2025, 6, 16)
+    candidates = (
+        CaseCandidate(
+            symbol="aaa", asof=asof, score=Decimal("2.5"),
+            trigger={"kind": "historical_screener_replay"},
+            screen_payload={"passed": True},
+            source_ref="reconstruction:2025-06-16:AAA",
+        ),
+        CaseCandidate(
+            symbol="BBB", asof=asof, score=Decimal("1"),
+            trigger={"kind": "near_miss_control", "failed": "trigger"},
+            screen_payload={"passed": False},
+            source_ref=None,
+        ),
+    )
+    with BacktestStore(path) as store:
+        store.save_sweep_candidates("sweep-abc123", asof, candidates)
+        loaded = store.load_sweep_candidates("sweep-abc123")
+        assert set(loaded) == {asof}
+        restored = loaded[asof]
+        assert len(restored) == 2
+        assert restored[0].symbol == "AAA"
+        assert restored[0].decimal_score() == Decimal("2.5")
+        assert isinstance(restored[0].asof, date)
+        assert restored[1].source_ref is None
+
+    with BacktestStore(path) as reopened:
+        assert reopened.load_sweep_candidates("sweep-abc123")[asof] == restored
+
+
+def test_sweep_candidates_empty_list_is_a_distinct_checkpoint(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    asof = date(2025, 6, 16)
+    with BacktestStore(path) as store:
+        assert store.load_sweep_candidates("sweep-x") == {}
+        store.save_sweep_candidates("sweep-x", asof, ())
+        loaded = store.load_sweep_candidates("sweep-x")
+        assert asof in loaded
+        assert loaded[asof] == ()
+
+
+def test_sweep_candidates_conflicting_resave_raises(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    asof = date(2025, 6, 16)
+    one = CaseCandidate(symbol="AAA", asof=asof, score=Decimal("1"), trigger={})
+    two = CaseCandidate(symbol="BBB", asof=asof, score=Decimal("2"), trigger={})
+    with BacktestStore(path) as store:
+        store.save_sweep_candidates("sweep-y", asof, (one,))
+        store.save_sweep_candidates("sweep-y", asof, (one,))  # idempotent
+        with pytest.raises(CaseConflictError):
+            store.save_sweep_candidates("sweep-y", asof, (two,))
+
+
+def test_clear_sweep_candidates_removes_only_that_key(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    asof = date(2025, 6, 16)
+    candidate = CaseCandidate(symbol="AAA", asof=asof, score=Decimal("1"), trigger={})
+    with BacktestStore(path) as store:
+        store.save_sweep_candidates("sweep-clear", asof, (candidate,))
+        store.save_sweep_candidates("sweep-keep", asof, (candidate,))
+        removed = store.clear_sweep_candidates("sweep-clear")
+        assert removed == 1
+        assert store.load_sweep_candidates("sweep-clear") == {}
+        assert asof in store.load_sweep_candidates("sweep-keep")
+
+
+def test_schema_three_store_migrates_to_v4_preserving_rows(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    case = _case()
+    with BacktestStore(path) as store:
+        store.insert_case(case)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE IF EXISTS sweep_candidates")
+        conn.execute("PRAGMA user_version = 3")
+        conn.execute(
+            "UPDATE schema_metadata SET value = '3' WHERE key = 'schema_version'"
+        )
+    with BacktestStore(path) as migrated:
+        assert migrated.schema_version == SCHEMA_VERSION
+        assert "sweep_candidates" in migrated.table_names()
+        assert migrated.list_cases() == [case]
 
 
 def test_schema_one_store_migrates_learning_cache_tables(tmp_path):

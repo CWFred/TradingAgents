@@ -572,6 +572,56 @@ def test_generate_cli_defaults_controls_to_zero(tmp_path, monkeypatch):
     assert captured["controls_count"] == 0
 
 
+def test_generate_cli_passes_fresh_sweep_to_service(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--source", "reconstruction",
+        "--start", "2025-06-02", "--end", "2025-10-01", "--fresh-sweep",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["fresh_sweep"] is True
+
+
+def test_generate_cli_defaults_fresh_sweep_to_false(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["fresh_sweep"] is False
+
+
+def test_generate_fresh_sweep_rejected_for_recorded_source(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    with pytest.raises(InvalidBacktestRequest, match="fresh-sweep"):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 2),
+            end=date(2026, 3, 31), case_count=40, today=date(2026, 7, 28),
+            source="recorded", fresh_sweep=True,
+        )
+
+
 def test_generate_explicit_preparer_receives_controls_count(tmp_path):
     path = tmp_path / "backtest.sqlite"
     cfg = OpsConfig(backtest_store_path=str(path))

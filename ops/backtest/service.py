@@ -773,6 +773,7 @@ def _reconstruction_prepare_cases(
     existing: Collection[tuple[str, date]] = (),
     controls_count: int = 0,
     price_backfiller: Callable[..., Any] | None = None,
+    fresh_sweep: bool = False,
 ) -> tuple[BacktestCase, ...]:
     """Reconstruct cases by replaying the screener at sampled historical dates.
 
@@ -792,11 +793,7 @@ def _reconstruction_prepare_cases(
     a fresh symbol could otherwise never be prepared (2026-07-28 review,
     finding 1: prepare/prices sequencing deadlock).
     """
-    from ops.backtest.cases import (
-        CurrentUniverseReconstructionSource,
-        collect_candidates,
-        sample_sessions,
-    )
+    from ops.backtest.cases import CurrentUniverseReconstructionSource, sample_sessions
     from ops.scheduler.market_calendar import MarketCalendar
 
     if fetcher is None:
@@ -824,7 +821,36 @@ def _reconstruction_prepare_cases(
         sessions, start=start, end=end, spacing_sessions=spacing_sessions,
     )
     source = CurrentUniverseReconstructionSource(fetch=fetcher)
-    candidates = collect_candidates(source, sampled)
+
+    # Per-date sweep checkpoints (schema v4): a killed multi-hour sweep
+    # resumes at the first unfinished date instead of losing everything held
+    # only in memory. sweep_key intentionally excludes case_count (the
+    # passer budget doesn't change what a date's screen found) and universe
+    # (opaque, not hashable identity) -- it identifies the *screen replay*,
+    # not the downstream selection.
+    sweep_key = stable_hash({
+        "sleeve": sleeve, "start": start, "end": end,
+        "spacing": spacing_sessions, "controls": controls_count,
+        "cutoff": store.effective_cutoff,
+    })[:16]
+    if fresh_sweep:
+        store.clear_sweep_candidates(sweep_key)
+    checkpointed = store.load_sweep_candidates(sweep_key)
+    candidates: list[CaseCandidate] = []
+    for asof in sampled:
+        if asof in checkpointed:
+            candidates.extend(checkpointed[asof])
+            continue
+        hits = tuple(source.candidates(asof=asof))
+        for candidate in hits:
+            if candidate.asof != asof:
+                raise ValueError(
+                    f"case source returned {candidate.symbol} asof {candidate.asof} "
+                    f"for requested date {asof}"
+                )
+        store.save_sweep_candidates(sweep_key, asof, hits)
+        candidates.extend(hits)
+
     existing_keys = set(existing)
     candidates = [
         candidate for candidate in candidates
@@ -904,11 +930,14 @@ def generate_cases(
     spacing_sessions: int = 10,
     append: bool = False,
     controls_count: int = 0,
+    fresh_sweep: bool = False,
 ) -> GenerationResult:
     if execute and enqueue:
         raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
     if append and source == "recorded":
         raise InvalidBacktestRequest("append is reconstruction-only")
+    if fresh_sweep and source == "recorded":
+        raise InvalidBacktestRequest("fresh-sweep is reconstruction-only")
     _validate_window(
         start=start, end=end, today=today, cutoff=config.backtest_cutoff,
         case_count=case_count,
@@ -947,6 +976,7 @@ def generate_cases(
                     # a control is never re-inserted as a duplicate.
                     "existing": tuple((c.symbol, c.asof) for c in available),
                     "controls_count": controls_count,
+                    "fresh_sweep": fresh_sweep,
                 }
                 if preparer is not None or source == "reconstruction"
                 else {}
