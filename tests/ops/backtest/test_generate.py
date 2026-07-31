@@ -19,6 +19,14 @@ from ops.backtest.generate import (
     validate_local_model_spec,
 )
 from ops.backtest.models import BacktestCase, ContextItem, ContextManifest
+from ops.backtest.service import (
+    DEFAULT_BRAIN_VERSION,
+    DEFAULT_PROMPT_VERSION,
+    _generation_requests,
+    generate_cases,
+)
+from ops.backtest.store import BacktestStore
+from ops.config import OpsConfig
 
 LOCAL_MODEL = "openai_compatible:ds4@http://127.0.0.1:8000/v1"
 
@@ -420,3 +428,87 @@ def test_window_allows_up_to_100_cases():
         _validate_window(start=date(2025, 6, 2), end=date(2026, 3, 31),
                          today=date(2026, 7, 28), cutoff=date(2025, 6, 1),
                          case_count=101)
+
+
+def test_generation_requests_skip_mode_omits_orphans_and_warns(tmp_path, capsys):
+    """Task 5 (2026-07-31 plan): a case row inserted without a paired
+    manifest (orphan -- e.g. a kill between the old two-transaction
+    insert_case/save_context_manifest calls) must not abort the whole
+    batch when ``on_missing_manifest="skip"``; it is dropped with a
+    printed warning instead."""
+    cfg = OpsConfig(backtest_store_path=str(tmp_path / "backtest.sqlite"))
+    sealed = _case("AAA", date(2025, 6, 15))
+    orphan = _case("ORP", date(2025, 6, 16))
+    sealed_manifest = ContextManifest.create(case_id=sealed.case_id, asof=sealed.asof)
+
+    with BacktestStore(cfg.backtest_store_path) as store:
+        store.insert_case_with_manifest(sealed, sealed_manifest)
+        store.insert_case(orphan)  # no manifest: orphan
+
+        requests = _generation_requests(
+            store, [sealed, orphan], config=cfg,
+            brain_version=DEFAULT_BRAIN_VERSION, prompt_version=DEFAULT_PROMPT_VERSION,
+            on_missing_manifest="skip",
+        )
+
+    assert [request.case.case_id for request in requests] == [sealed.case_id]
+    warning = capsys.readouterr().out
+    assert orphan.case_id in warning
+    assert sealed.case_id not in warning
+
+
+def test_generation_requests_default_raise_mode_still_aborts_on_orphan(tmp_path):
+    """The default mode (used by run/replay) must be unchanged: any orphan
+    case still fails the whole batch rather than silently replaying with
+    missing PIT context."""
+    from ops.backtest.service import MissingBacktestArtifacts
+
+    cfg = OpsConfig(backtest_store_path=str(tmp_path / "backtest.sqlite"))
+    orphan = _case("ORP", date(2025, 6, 16))
+    with BacktestStore(cfg.backtest_store_path) as store:
+        store.insert_case(orphan)
+        with pytest.raises(MissingBacktestArtifacts, match="lack PIT context manifests"):
+            _generation_requests(
+                store, [orphan], config=cfg,
+                brain_version=DEFAULT_BRAIN_VERSION, prompt_version=DEFAULT_PROMPT_VERSION,
+            )
+
+
+def test_generate_cases_excludes_orphan_from_available_and_dedupe(tmp_path, capsys):
+    """A store seeded with one sealed case and one orphan (case row, no
+    manifest) in the same window: generate_cases must not count the orphan
+    toward `available`, must exclude it from the preparer's dedupe
+    `existing` set (or prepare would skip it forever and it could never
+    resurface), and must warn about it (Task 5, 2026-07-31 plan)."""
+    cfg = OpsConfig(backtest_store_path=str(tmp_path / "backtest.sqlite"))
+    sealed = _case("AAA", date(2025, 6, 15))
+    orphan = _case("ORP", date(2025, 6, 16))
+    sealed_manifest = ContextManifest.create(case_id=sealed.case_id, asof=sealed.asof)
+
+    with BacktestStore(cfg.backtest_store_path) as store:
+        store.insert_case_with_manifest(sealed, sealed_manifest)
+        store.insert_case(orphan)
+
+    seen: dict = {}
+
+    def preparer(**kwargs):
+        seen.update(kwargs)
+        raise SystemExit
+
+    with pytest.raises(SystemExit):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 1),
+            end=date(2025, 6, 30), case_count=30, today=date(2025, 7, 1),
+            source="reconstruction", preparer=preparer, append=True,
+        )
+
+    # The orphan's (symbol, asof) must be absent from `existing`: present
+    # there would make the preparer's dedupe skip it forever, so it could
+    # never be re-selected and re-sealed.
+    assert (orphan.symbol, orphan.asof) not in seen["existing"]
+    assert (sealed.symbol, sealed.asof) in seen["existing"]
+    # Budget only counted the sealed passer as available: 30 - 1 == 29, so
+    # the orphan's slot resurfaces through the top-up.
+    assert seen["case_count"] == 29
+    warning = capsys.readouterr().out
+    assert orphan.case_id in warning

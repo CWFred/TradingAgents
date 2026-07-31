@@ -871,18 +871,25 @@ def test_generate_append_top_up_ignores_controls_in_passer_budget(tmp_path):
     path = tmp_path / "backtest.sqlite"
     cfg = OpsConfig(backtest_store_path=str(path))
     with BacktestStore(path) as store:
-        store.insert_case(BacktestCase.create(
-            sleeve="research", symbol="AAA", asof=date(2025, 6, 15),
-            trigger={"kind": "historical_screener_replay"},
-        ))
-        store.insert_case(BacktestCase.create(
-            sleeve="research", symbol="NM1", asof=date(2025, 6, 16),
-            trigger={"kind": "near_miss_control"},
-        ))
-        store.insert_case(BacktestCase.create(
-            sleeve="research", symbol="NM2", asof=date(2025, 6, 17),
-            trigger={"kind": "near_miss_control"},
-        ))
+        for case in (
+            BacktestCase.create(
+                sleeve="research", symbol="AAA", asof=date(2025, 6, 15),
+                trigger={"kind": "historical_screener_replay"},
+            ),
+            BacktestCase.create(
+                sleeve="research", symbol="NM1", asof=date(2025, 6, 16),
+                trigger={"kind": "near_miss_control"},
+            ),
+            BacktestCase.create(
+                sleeve="research", symbol="NM2", asof=date(2025, 6, 17),
+                trigger={"kind": "near_miss_control"},
+            ),
+        ):
+            # Sealed (not orphan): Task 5 excludes manifest-less cases from
+            # `available`/`existing` so orphans resurface for re-prepare.
+            store.insert_case_with_manifest(
+                case, ContextManifest.create(case_id=case.case_id, asof=case.asof),
+            )
 
     seen: dict = {}
 

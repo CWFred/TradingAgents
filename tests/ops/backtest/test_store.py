@@ -151,6 +151,97 @@ def test_manifest_persistence_is_canonical_and_point_in_time(tmp_path):
         assert store.get_context_manifest(case.case_id) == manifest
 
 
+def test_insert_case_with_manifest_is_one_atomic_transaction(tmp_path):
+    """A kill between the case insert and the manifest insert must never
+    happen: both halves share one transaction so a failure after the case
+    row is written rolls the case back too (2026-07-31 plan, Task 5)."""
+    case = _case()
+    item = ContextItem.create(
+        kind="filing", source_ref="0001:mdna", available_at=case.asof,
+        content="Known by the close.", metadata={"form": "10-Q"},
+    )
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof, included=[item])
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        real_save_manifest_tx = store._save_manifest_tx
+
+        def killed(conn, manifest):
+            real_save_manifest_tx(conn, manifest)
+            raise RuntimeError("simulated kill after manifest insert")
+
+        store._save_manifest_tx = killed
+        with pytest.raises(RuntimeError, match="simulated kill"):
+            store.insert_case_with_manifest(case, manifest)
+
+        assert store.get_case(case.case_id) is None
+        assert store.get_context_manifest(case.case_id) is None
+
+
+def test_insert_case_with_manifest_round_trips_and_is_idempotent(tmp_path):
+    case = _case()
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof)
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        stored_case, stored_manifest = store.insert_case_with_manifest(case, manifest)
+        assert stored_case == case
+        assert stored_manifest == manifest
+
+        # Re-inserting the identical pair is idempotent (same conflict
+        # semantics as the standalone insert_case/save_context_manifest).
+        again_case, again_manifest = store.insert_case_with_manifest(case, manifest)
+        assert again_case == case
+        assert again_manifest == manifest
+
+        assert store.get_case(case.case_id) == case
+        assert store.get_context_manifest(case.case_id) == manifest
+
+
+def test_insert_case_with_manifest_preserves_case_conflict_semantics(tmp_path):
+    original = _case()
+    original_manifest = ContextManifest.create(
+        case_id=original.case_id, asof=original.asof,
+    )
+    changed = _case(trigger={"kind": "different"})
+    assert changed.case_id == original.case_id
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        store.insert_case_with_manifest(original, original_manifest)
+        with pytest.raises(CaseConflictError, match="different content"):
+            store.insert_case_with_manifest(changed, original_manifest)
+
+
+def test_insert_case_with_manifest_preserves_manifest_conflict_semantics(tmp_path):
+    case = _case()
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof)
+    other_item = ContextItem.create(
+        kind="filing", source_ref="different", available_at=case.asof,
+        content="different content", metadata={},
+    )
+    conflicting_manifest = ContextManifest.create(
+        case_id=case.case_id, asof=case.asof, included=[other_item],
+    )
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        store.insert_case_with_manifest(case, manifest)
+        with pytest.raises(CaseConflictError, match="different frozen manifest"):
+            store.insert_case_with_manifest(case, conflicting_manifest)
+
+
+def test_case_ids_with_manifests_reports_only_sealed_cases(tmp_path):
+    sealed = _case(symbol="acme")
+    orphan = _case(symbol="orph", asof=date(2025, 6, 2))
+    manifest = ContextManifest.create(case_id=sealed.case_id, asof=sealed.asof)
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        store.insert_case_with_manifest(sealed, manifest)
+        store.insert_case(orphan)
+
+        assert store.case_ids_with_manifests(
+            [sealed.case_id, orphan.case_id],
+        ) == {sealed.case_id}
+        assert store.case_ids_with_manifests([]) == set()
+
+
 def test_live_memo_store_is_never_opened_or_modified(tmp_path):
     live = tmp_path / "memos.sqlite"
     sentinel = b"live-memo-store-sentinel"

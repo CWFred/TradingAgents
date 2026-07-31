@@ -509,13 +509,27 @@ def _generation_requests(
     config: OpsConfig,
     brain_version: str,
     prompt_version: str,
+    on_missing_manifest: str = "raise",
 ) -> tuple[GenerationRequest, ...]:
+    """Build requests for cases with a sealed manifest.
+
+    ``on_missing_manifest="raise"`` (default, used by replay/run) fails the
+    whole batch on any orphan case -- a manual-SQL dead end is preferable to
+    silently replaying an unsealed case. ``"skip"`` (used by
+    :func:`generate_cases`) instead drops orphan cases and prints a warning
+    listing them, so a batch with one orphan can still make progress while
+    the orphan resurfaces for re-prepare (Task 5, 2026-07-31 plan).
+    """
+    if on_missing_manifest not in ("raise", "skip"):
+        raise ValueError(f"unknown on_missing_manifest mode: {on_missing_manifest!r}")
     requests = []
     missing_manifests = []
+    skipped_case_ids = []
     for case in cases:
         manifest = store.get_context_manifest(case.case_id)
         if manifest is None:
             missing_manifests.append(case.symbol)
+            skipped_case_ids.append(case.case_id)
             continue
         requests.append(GenerationRequest.create(
             case=case, manifest=manifest,
@@ -524,10 +538,17 @@ def _generation_requests(
             thesis_model_id=config.research_thesis_model,
         ))
     if missing_manifests:
-        raise MissingBacktestArtifacts(
-            f"{len(missing_manifests)} case(s) lack PIT context manifests: "
-            + ", ".join(missing_manifests[:5])
-        )
+        if on_missing_manifest == "skip":
+            print(
+                f"[generate] skipped {len(skipped_case_ids)} case(s) without a "
+                "sealed context manifest (orphan, will resurface for "
+                "re-prepare): " + ", ".join(skipped_case_ids)
+            )
+        else:
+            raise MissingBacktestArtifacts(
+                f"{len(missing_manifests)} case(s) lack PIT context manifests: "
+                + ", ".join(missing_manifests[:5])
+            )
     return tuple(requests)
 
 
@@ -649,8 +670,7 @@ def prepare_cases(
             raise InvalidBacktestRequest(
                 f"context builder returned a manifest for another case: {case.symbol}"
             )
-        store.insert_case(case)
-        store.save_context_manifest(manifest)
+        store.insert_case_with_manifest(case, manifest)
         prepared.append(case)
     if not prepared:
         raise MissingBacktestArtifacts(
@@ -916,8 +936,7 @@ def _reconstruction_prepare_cases(
             raise InvalidBacktestRequest(
                 f"context builder returned a manifest for another case: {case.symbol}"
             )
-        store.insert_case(case)
-        store.save_context_manifest(manifest)
+        store.insert_case_with_manifest(case, manifest)
         prepared.append(case)
     if not prepared:
         raise MissingBacktestArtifacts(
@@ -965,10 +984,24 @@ def generate_cases(
             start=start, end=end, today=today, cutoff=effective_cutoff,
             case_count=case_count,
         )
-        available = [
+        windowed = [
             case for case in store.list_cases(sleeve=sleeve)
             if start <= case.asof <= end
         ]
+        # Orphan cases (case row inserted but the paired manifest never was,
+        # e.g. a kill before Task 5's atomic insert_case_with_manifest
+        # existed) must not count as available -- they need_prepare/top-up
+        # resurfaces and re-seals, and must never dedupe-block their own
+        # resurfacing via `existing` either (Task 5, 2026-07-31 plan).
+        sealed_ids = store.case_ids_with_manifests([case.case_id for case in windowed])
+        orphans = [case for case in windowed if case.case_id not in sealed_ids]
+        if orphans:
+            print(
+                f"[generate] {len(orphans)} orphan case(s) (case row without a "
+                "sealed manifest) excluded from availability and will resurface "
+                "for re-prepare: " + ", ".join(case.case_id for case in orphans)
+            )
+        available = [case for case in windowed if case.case_id in sealed_ids]
         # case_count budgets passers only; controls are additive and must
         # never shrink the passer top-up (see finding 2, 2026-07-28 review).
         available_passers = [case for case in available if not _is_control_case(case)]
@@ -1008,6 +1041,7 @@ def generate_cases(
         requests = _generation_requests(
             store, cases, config=config,
             brain_version=brain_version, prompt_version=prompt_version,
+            on_missing_manifest="skip",
         )
         plan = plan_generation(requests, store=store)
         if enqueue:

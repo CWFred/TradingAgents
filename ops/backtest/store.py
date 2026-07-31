@@ -494,38 +494,46 @@ class BacktestStore:
     def insert_case(self, case: BacktestCase) -> BacktestCase:
         """Insert a case idempotently after enforcing the effective cutoff."""
         case.validate_cutoff(self.effective_cutoff)
-        values = (
-            case.case_id,
-            case.sleeve,
-            case.symbol,
-            case.asof.isoformat(),
-            canonical_json(case.trigger),
-            case.source.value,
-            str(case.score) if case.score is not None else None,
-            case.created_at.isoformat(),
-        )
         with self.transaction() as conn:
-            existing = conn.execute(
-                "SELECT * FROM cases WHERE case_id = ? OR "
-                "(sleeve = ? AND symbol = ? AND asof = ?)",
-                (case.case_id, case.sleeve, case.symbol, case.asof.isoformat()),
-            ).fetchone()
-            if existing is not None:
-                stored = self._case_from_row(existing)
-                if self._case_content(stored) != self._case_content(case):
-                    raise CaseConflictError(
-                        f"case identity {case.sleeve}/{case.symbol}/{case.asof} "
-                        "already exists with different content"
-                    )
-                return stored
-            conn.execute(
-                """
-                INSERT INTO cases (
-                    case_id, sleeve, symbol, asof, trigger_json, source, score, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                values,
-            )
+            return self._insert_case_tx(conn, case)
+
+    def _insert_case_tx(self, conn: sqlite3.Connection, case: BacktestCase) -> BacktestCase:
+        """Same conflict semantics as :meth:`insert_case`, given an open conn.
+
+        Shared by :meth:`insert_case` and :meth:`insert_case_with_manifest` so
+        both go through identical idempotent/conflict logic inside one
+        transaction (Task 5, 2026-07-31 plan).
+        """
+        existing = conn.execute(
+            "SELECT * FROM cases WHERE case_id = ? OR "
+            "(sleeve = ? AND symbol = ? AND asof = ?)",
+            (case.case_id, case.sleeve, case.symbol, case.asof.isoformat()),
+        ).fetchone()
+        if existing is not None:
+            stored = self._case_from_row(existing)
+            if self._case_content(stored) != self._case_content(case):
+                raise CaseConflictError(
+                    f"case identity {case.sleeve}/{case.symbol}/{case.asof} "
+                    "already exists with different content"
+                )
+            return stored
+        conn.execute(
+            """
+            INSERT INTO cases (
+                case_id, sleeve, symbol, asof, trigger_json, source, score, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                case.case_id,
+                case.sleeve,
+                case.symbol,
+                case.asof.isoformat(),
+                canonical_json(case.trigger),
+                case.source.value,
+                str(case.score) if case.score is not None else None,
+                case.created_at.isoformat(),
+            ),
+        )
         return case
 
     @staticmethod
@@ -677,30 +685,82 @@ class BacktestStore:
             raise ValueError(
                 f"manifest asof {manifest.asof} does not match case asof {case.asof}"
             )
-        payload = canonical_json(manifest)
         with self.transaction() as conn:
-            row = conn.execute(
-                "SELECT * FROM context_manifests WHERE case_id = ?",
-                (manifest.case_id,),
-            ).fetchone()
-            if row is not None:
-                if row["manifest_hash"] != manifest.manifest_hash:
-                    raise CaseConflictError(
-                        f"case {manifest.case_id} already has a different frozen manifest"
-                    )
-                return self._manifest_from_json(row["manifest_json"])
-            conn.execute(
-                """
-                INSERT INTO context_manifests (
-                    manifest_id, case_id, asof, manifest_hash, manifest_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    manifest.manifest_id, manifest.case_id, manifest.asof.isoformat(),
-                    manifest.manifest_hash, payload, manifest.created_at.isoformat(),
-                ),
-            )
+            return self._save_manifest_tx(conn, manifest)
+
+    def _save_manifest_tx(
+        self, conn: sqlite3.Connection, manifest: ContextManifest,
+    ) -> ContextManifest:
+        """Same conflict semantics as :meth:`save_context_manifest`, given an
+        open conn. Shared with :meth:`insert_case_with_manifest`."""
+        row = conn.execute(
+            "SELECT * FROM context_manifests WHERE case_id = ?",
+            (manifest.case_id,),
+        ).fetchone()
+        if row is not None:
+            if row["manifest_hash"] != manifest.manifest_hash:
+                raise CaseConflictError(
+                    f"case {manifest.case_id} already has a different frozen manifest"
+                )
+            return self._manifest_from_json(row["manifest_json"])
+        conn.execute(
+            """
+            INSERT INTO context_manifests (
+                manifest_id, case_id, asof, manifest_hash, manifest_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                manifest.manifest_id, manifest.case_id, manifest.asof.isoformat(),
+                manifest.manifest_hash, canonical_json(manifest),
+                manifest.created_at.isoformat(),
+            ),
+        )
         return manifest
+
+    def insert_case_with_manifest(
+        self, case: BacktestCase, manifest: ContextManifest,
+    ) -> tuple[BacktestCase, ContextManifest]:
+        """Insert a case and seal its context manifest in one transaction.
+
+        A kill between the two separate calls this replaces used to leave an
+        orphan case: counted toward ``available`` (suppressing re-prepare)
+        while making replay/generation raise for the whole batch. Both
+        halves now share one transaction with identical conflict/idempotent
+        semantics to the standalone ``insert_case``/``save_context_manifest``
+        calls (Task 5, 2026-07-31 plan).
+        """
+        case.validate_cutoff(self.effective_cutoff)
+        manifest.validate_point_in_time()
+        if manifest.case_id != case.case_id:
+            raise ValueError(
+                f"manifest case_id {manifest.case_id!r} does not match "
+                f"case case_id {case.case_id!r}"
+            )
+        if manifest.asof != case.asof:
+            raise ValueError(
+                f"manifest asof {manifest.asof} does not match case asof {case.asof}"
+            )
+        with self.transaction() as conn:
+            stored_case = self._insert_case_tx(conn, case)
+            stored_manifest = self._save_manifest_tx(conn, manifest)
+        return stored_case, stored_manifest
+
+    def case_ids_with_manifests(self, case_ids: Sequence[str]) -> set[str]:
+        """Cheap, single-query manifest-existence check for many cases.
+
+        Used to exclude manifest-less (orphan) cases from ``available`` in
+        one query instead of one ``get_context_manifest`` per case.
+        """
+        ids = list(case_ids)
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT case_id FROM context_manifests WHERE case_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {row["case_id"] for row in rows}
 
     @staticmethod
     def _manifest_from_json(raw: str) -> ContextManifest:
