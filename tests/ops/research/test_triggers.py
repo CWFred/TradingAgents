@@ -1,15 +1,18 @@
 """Unit tests for change-trigger detection (EDGAR mocked, no yfinance)."""
 
+import json
 from datetime import date
 from decimal import Decimal
 
 import pytest
 
 from ops.research.triggers import (
+    fetch_trigger_sources,
     find_edgar_triggers,
     find_insider_cluster_trigger,
     find_selloff_trigger,
     find_triggers,
+    triggers_from_sources,
 )
 from tradingagents.dataflows.edgar import Filing
 from tradingagents.dataflows.form4 import InsiderTransaction
@@ -133,3 +136,130 @@ def test_find_triggers_combines_edgar_and_cluster():
         transactions_fetcher=lambda t, *, since, **kw: txns,
     )
     assert [t.kind for t in out] == ["insider_cluster"]
+
+
+# --- Task 2: per-symbol fetch + pure per-asof filter split -----------------
+
+
+def _form4_xml(name: str, txn_date: date, *, code: str = "P") -> str:
+    return f"""<?xml version="1.0"?>
+<ownershipDocument>
+    <aff10b5One>0</aff10b5One>
+    <reportingOwner>
+        <reportingOwnerId><rptOwnerName>{name}</rptOwnerName></reportingOwnerId>
+        <reportingOwnerRelationship><isDirector>1</isDirector></reportingOwnerRelationship>
+    </reportingOwner>
+    <nonDerivativeTable>
+        <nonDerivativeTransaction>
+            <transactionDate><value>{txn_date.isoformat()}</value></transactionDate>
+            <transactionCoding><transactionCode>{code}</transactionCode></transactionCoding>
+            <transactionAmounts>
+                <transactionShares><value>1000</value></transactionShares>
+                <transactionPricePerShare><value>5</value></transactionPricePerShare>
+                <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode>
+            </transactionAmounts>
+        </nonDerivativeTransaction>
+    </nonDerivativeTable>
+</ownershipDocument>"""
+
+
+def test_fetch_trigger_sources_returns_json_serializable_dict():
+    filings = [
+        _filing("SC 13D", date(2026, 6, 20), accn="a1"),
+        Filing(
+            ticker="WIDG", cik=1, accession_number="acc-jane",
+            form="4", filing_date=date(2026, 6, 18), report_date=None,
+            primary_document="jane.xml",
+        ),
+    ]
+
+    def fake_list_filings(ticker, *, forms=None, since=None, limit=100):
+        if forms is None:
+            return filings
+        return [f for f in filings if f.form in forms]
+
+    def fake_fetch_raw(url):
+        assert url.endswith("jane.xml")
+        return _form4_xml("DOE JANE", date(2026, 6, 18))
+
+    sources = fetch_trigger_sources(
+        "WIDG", list_filings=fake_list_filings, fetch_raw=fake_fetch_raw,
+    )
+
+    json.dumps(sources)  # must not raise — this is what FetchCache stores
+    assert sources["symbol"] == "WIDG"
+    assert [f["accession_number"] for f in sources["edgar_filings"]] == ["a1"]
+    assert [t["accession"] for t in sources["insider_transactions"]] == ["acc-jane"]
+
+
+def test_triggers_from_sources_windows_by_asof_from_one_fetch():
+    filings = [
+        _filing("SC 13D", date(2026, 3, 1), accn="a1"),
+        _filing("8-K", date(2026, 6, 20), items=("5.02",), accn="a2"),
+    ]
+    call_count = {"n": 0}
+
+    def fake_list_filings(ticker, *, forms=None, since=None, limit=100):
+        call_count["n"] += 1
+        if forms is None:
+            return filings
+        return [f for f in filings if f.form in forms]
+
+    sources = fetch_trigger_sources(
+        "WIDG", list_filings=fake_list_filings, fetch_raw=lambda url: "<not-xml",
+    )
+    fetch_calls_after_one_sweep = call_count["n"]
+
+    early = triggers_from_sources(sources, asof=date(2026, 3, 15))
+    late = triggers_from_sources(sources, asof=date(2026, 7, 1))
+
+    # No additional fetches happened deriving triggers for either asof.
+    assert call_count["n"] == fetch_calls_after_one_sweep
+    assert [t.source for t in early] == ["a1"]
+    assert [t.source for t in late] == ["a2"]
+
+
+def test_find_triggers_equals_compose_from_sources_with_fakes():
+    asof = date(2026, 7, 1)
+    edgar_filing = _filing("SC 13D", date(2026, 6, 20), accn="a1")
+    jane_filing = Filing(
+        ticker="WIDG", cik=1, accession_number="acc-DOE JANE-2026-06-20",
+        form="4", filing_date=date(2026, 6, 20), report_date=None,
+        primary_document="jane.xml",
+    )
+    roe_filing = Filing(
+        ticker="WIDG", cik=1, accession_number="acc-ROE RICHARD-2026-06-25",
+        form="4", filing_date=date(2026, 6, 25), report_date=None,
+        primary_document="roe.xml",
+    )
+    all_filings = [edgar_filing, jane_filing, roe_filing]
+
+    def fake_list_filings(ticker, *, forms=None, since=None, limit=100):
+        if forms is None:
+            return all_filings
+        return [f for f in all_filings if f.form in forms]
+
+    xml_by_doc = {
+        "jane.xml": _form4_xml("DOE JANE", date(2026, 6, 20)),
+        "roe.xml": _form4_xml("ROE RICHARD", date(2026, 6, 25)),
+    }
+
+    def fake_fetch_raw(url):
+        for doc, xml_text in xml_by_doc.items():
+            if url.endswith(doc):
+                return xml_text
+        raise AssertionError(url)
+
+    sources = fetch_trigger_sources(
+        "WIDG", list_filings=fake_list_filings, fetch_raw=fake_fetch_raw,
+    )
+    composed = triggers_from_sources(sources, asof=asof)
+
+    legacy_txns = [_buy("DOE JANE", date(2026, 6, 20)), _buy("ROE RICHARD", date(2026, 6, 25))]
+    direct = find_triggers(
+        "WIDG", asof=asof, list_filings=fake_list_filings,
+        transactions_fetcher=lambda t, *, since, **kw: legacy_txns,
+    )
+
+    assert composed == direct
+    assert [t.kind for t in composed] == ["activist_stake", "insider_cluster"]
