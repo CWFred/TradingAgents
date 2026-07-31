@@ -236,7 +236,11 @@ def backtest_run(
                    "reconstruction sources only.")
 @click.option("--fresh-sweep", "fresh_sweep", is_flag=True,
               help="Clear this sweep's per-date checkpoints before collecting, "
-                   "forcing a full re-screen; reconstruction sources only.")
+                   "forcing a full re-screen; reconstruction sources only. "
+                   "Also required after any change to screener/trigger-source "
+                   "logic -- checkpoints are content-addressed by sweep params "
+                   "only and do not detect code changes, so stale results "
+                   "would otherwise be served silently.")
 def backtest_generate(
     sleeve: str, start: str, end: str, case_count: int | None,
     execute: bool, enqueue: bool, max_jobs: int | None, source: str,

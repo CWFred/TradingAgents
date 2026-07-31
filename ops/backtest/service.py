@@ -786,6 +786,15 @@ def _reconstruction_prepare_cases(
     screen condition) are selected via a *separate* ``select_candidates``
     call so they never crowd out passer selection.
 
+    Per-date results are checkpointed under a ``sweep_key`` (schema v4:
+    ``store.save_sweep_candidates``/``load_sweep_candidates``) so a killed
+    sweep resumes at the first unfinished date. ``sweep_key`` is a content
+    hash of the sweep *parameters* (sleeve/start/end/spacing/controls/
+    cutoff) only -- it is NOT sensitive to screener or trigger-source code
+    changes. After editing screener/trigger-source logic, pass
+    ``fresh_sweep=True`` (CLI: ``--fresh-sweep``) or old checkpoints will be
+    silently reused, serving stale results with no error.
+
     Before sealing, prices are backfilled for exactly the selected
     candidates: ``_sealed_context_builder`` fails closed when the price
     cache has no bars for a symbol, and the only other cache writer
@@ -828,6 +837,12 @@ def _reconstruction_prepare_cases(
     # passer budget doesn't change what a date's screen found) and universe
     # (opaque, not hashable identity) -- it identifies the *screen replay*,
     # not the downstream selection.
+    #
+    # CAVEAT: sweep_key is NOT sensitive to screener/trigger-source code
+    # changes -- it is a content hash of the sweep *parameters* only. After
+    # editing screener or trigger-source logic, an old sweep_key's
+    # checkpoints would be silently reused (stale results, no error). Pass
+    # ``--fresh-sweep`` explicitly whenever such logic changes.
     sweep_key = stable_hash({
         "sleeve": sleeve, "start": start, "end": end,
         "spacing": spacing_sessions, "controls": controls_count,
