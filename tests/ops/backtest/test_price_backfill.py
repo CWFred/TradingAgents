@@ -3,6 +3,7 @@
 Everything here is network-free: a fabricated ``fetcher`` returns known bars
 (and can raise for a chosen symbol) and a fixed ``today`` pins the window.
 """
+import time
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -10,7 +11,7 @@ import pytest
 
 from ops.backtest.models import BacktestCase
 from ops.backtest.price_backfill import BackfillSummary, backfill_prices
-from ops.backtest.price_fetch import YfBar
+from ops.backtest.price_fetch import YfBar, _with_deadline
 from ops.backtest.prices import PriceCache
 from ops.backtest.store import BacktestStore
 from ops.config import OpsConfig
@@ -115,6 +116,39 @@ def test_one_failing_symbol_is_isolated(tmp_path):
     assert cache.bars("AAA")
     assert cache.bars("SPY")
     assert cache.bars("BBB") == []
+
+
+def test_deadline_timeout_is_isolated_as_symbol_failure(tmp_path):
+    """A hung history call must surface as a per-symbol failure, not a hang.
+
+    ``_with_deadline`` is the composable seam (Task 7); this confirms it
+    plugs straight into the existing per-symbol isolation with no special
+    casing needed in the driver.
+    """
+    prices_path = tmp_path / "prices.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(prices_path))
+
+    def hung_fetcher(symbol, start, end):
+        return _with_deadline(
+            lambda: (time.sleep(0.5), (_bar(symbol, start),))[1],
+            seconds=0.02,
+        )
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        _seed_cases(store, [("AAA", date(2025, 6, 10))])
+        summary = backfill_prices(
+            cfg, store, sleeve=_SLEEVE,
+            start=date(2025, 6, 1), end=date(2025, 6, 30),
+            fetcher=hung_fetcher, today=date(2026, 1, 15),
+        )
+
+    # Both the case symbol and the benchmark hang; both are isolated as
+    # failures rather than propagating and aborting the run.
+    assert summary.symbols == 2
+    assert len(summary.failures) == 2
+    failed_symbols = {symbol for symbol, _message in summary.failures}
+    assert failed_symbols == {"AAA", "SPY"}
+    assert summary.bars == 0
 
 
 def test_end_clamped_to_today(tmp_path):

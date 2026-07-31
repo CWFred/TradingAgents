@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import threading
 import time
 from dataclasses import dataclass, field
@@ -123,23 +124,49 @@ def get_user_agent() -> str:
 _throttle_lock = threading.Lock()
 _last_request_at = 0.0
 
+# Bounded backoff on 429 (rate limited) and 5xx (transient vendor trouble):
+# one EDGAR hiccup must not silently drop a name from a sweep. Any other 4xx
+# (404, etc.) is a real client error and never retries. Jittered so many
+# concurrent workers hitting a 429 wave don't all retry in lockstep.
+_RETRY_DELAYS = (2.0, 8.0, 30.0)
+_RETRY_JITTER_SECONDS = 1.0
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code == 429 or 500 <= status_code < 600
+
 
 def _throttled_get(url: str, params: dict | None = None) -> requests.Response:
-    """GET with the SEC-required User-Agent and a global rate-limit throttle."""
+    """GET with the SEC-required User-Agent, rate-limit throttle, and backoff.
+
+    Retries up to ``len(_RETRY_DELAYS)`` times on 429/5xx responses only;
+    any other error status (e.g. 404) raises immediately with no retry.
+    """
     global _last_request_at
-    with _throttle_lock:
-        wait = _MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request_at)
-        if wait > 0:
-            time.sleep(wait)
-        _last_request_at = time.monotonic()
-    resp = requests.get(
-        url,
-        params=params,
-        headers={"User-Agent": get_user_agent(), "Accept-Encoding": "gzip, deflate"},
-        timeout=REQUEST_TIMEOUT,
-    )
-    resp.raise_for_status()
-    return resp
+    attempts = len(_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        with _throttle_lock:
+            wait = _MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request_at)
+            if wait > 0:
+                time.sleep(wait)
+            _last_request_at = time.monotonic()
+        resp = requests.get(
+            url,
+            params=params,
+            headers={"User-Agent": get_user_agent(), "Accept-Encoding": "gzip, deflate"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        is_last_attempt = attempt == attempts - 1
+        if not _is_retryable_status(resp.status_code) or is_last_attempt:
+            resp.raise_for_status()
+            return resp
+        delay = _RETRY_DELAYS[attempt] + random.uniform(0, _RETRY_JITTER_SECONDS)
+        logger.warning(
+            "EDGAR %s from %s, retrying in %.1fs (attempt %d/%d)",
+            resp.status_code, url, delay, attempt + 1, attempts - 1,
+        )
+        time.sleep(delay)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 # Ticker -> CIK mapping is ~1MB and changes rarely; cache per process.

@@ -1,9 +1,11 @@
+import time
 from datetime import date
 from decimal import Decimal
 
 import pandas as pd
+import pytest
 
-from ops.backtest.price_fetch import yfinance_bar_fetcher
+from ops.backtest.price_fetch import _with_deadline, yfinance_bar_fetcher
 
 
 def _frame():
@@ -99,3 +101,23 @@ def test_bars_feed_price_cache_upsert(tmp_path):
     )
     cache = PriceCache(tmp_path / "px.db")
     assert cache.upsert_bars(bars) == 2
+
+
+class TestWithDeadline:
+    def test_returns_result_when_fast_enough(self):
+        assert _with_deadline(lambda: 42, seconds=1.0) == 42
+
+    def test_raises_timeout_error_when_fn_exceeds_deadline(self):
+        def slow():
+            time.sleep(0.5)
+            return "too late"
+
+        with pytest.raises(TimeoutError):
+            _with_deadline(slow, seconds=0.05)
+
+    def test_propagates_exception_raised_by_fn(self):
+        def boom():
+            raise ValueError("kaboom")
+
+        with pytest.raises(ValueError, match="kaboom"):
+            _with_deadline(boom, seconds=1.0)

@@ -15,6 +15,7 @@ from decimal import Decimal
 
 import yfinance as yf
 
+from ops.backtest.price_fetch import HISTORY_DEADLINE_SECONDS, _with_deadline
 from ops.universe.earnings import _safe_decimal
 from ops.universe.yf_pacing import call_paced
 
@@ -68,7 +69,12 @@ def fetch_price_context(symbol: str) -> PriceContext | None:
     """6 years of daily closes; None (with a stderr diagnostic) on any fetch failure."""
     try:
         hist = call_paced(
-            lambda: yf.Ticker(symbol).history(period="6y", auto_adjust=False, actions=True),
+            lambda: _with_deadline(
+                lambda: yf.Ticker(symbol).history(
+                    period="6y", auto_adjust=False, actions=True
+                ),
+                HISTORY_DEADLINE_SECONDS,
+            ),
             label="prices",
         )
     except Exception as exc:

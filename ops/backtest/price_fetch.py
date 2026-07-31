@@ -8,16 +8,51 @@ the default that actually calls yfinance.  Money is carried as ``Decimal`` from
 """
 from __future__ import annotations
 
+import concurrent.futures
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import TypeVar
 
 import pandas as pd
 
 HistoryFn = Callable[[str, date, date], "pd.DataFrame"]
 
 _PROVIDER = "yfinance"
+
+# Hard wall-clock deadline on a single yfinance history call. One hung TCP
+# connection must not stall an entire sweep forever; per-symbol isolation
+# (backfill_symbol_windows, PriceCache.update) is powerless against a call
+# that never raises and never returns.
+HISTORY_DEADLINE_SECONDS = 60.0
+
+_T = TypeVar("_T")
+
+
+def _with_deadline(fn: Callable[[], _T], seconds: float) -> _T:
+    """Run ``fn()`` with a hard wall-clock deadline; raise ``TimeoutError`` past it.
+
+    Uses a single-worker ``ThreadPoolExecutor`` rather than ``signal.alarm``,
+    which only fires in the main thread and would silently no-op (or raise)
+    when called from a worker thread. Any exception ``fn`` raises propagates
+    unchanged; on a timeout, ``future.result()`` raises
+    ``concurrent.futures.TimeoutError`` (a ``TimeoutError`` subclass).
+
+    Caution: on timeout the worker thread computing ``fn()`` is NOT
+    cancelled — the executor is shut down with ``wait=False`` so this
+    function returns immediately, but the underlying call keeps running to
+    completion (or hanging) in the background. This is a deliberate,
+    accepted leak: yfinance/requests offer no cooperative cancellation, and
+    the alternative (blocking here until the leaked call finishes) would
+    defeat the whole point of a deadline.
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn)
+    try:
+        return future.result(timeout=seconds)
+    finally:
+        executor.shutdown(wait=False)
 
 
 @dataclass(frozen=True)
@@ -58,13 +93,16 @@ def _default_history_fn(symbol: str, start: date, end: date) -> pd.DataFrame:
     # session is actually included.  ``auto_adjust=False`` keeps raw OHLC +
     # Adj Close; ``actions=True`` yields Dividends and Stock Splits columns.
     end_inclusive = end + timedelta(days=1)
-    frame = yf_retry(
-        lambda: ticker.history(
-            start=start.isoformat(),
-            end=end_inclusive.isoformat(),
-            auto_adjust=False,
-            actions=True,
-        )
+    frame = _with_deadline(
+        lambda: yf_retry(
+            lambda: ticker.history(
+                start=start.isoformat(),
+                end=end_inclusive.isoformat(),
+                auto_adjust=False,
+                actions=True,
+            )
+        ),
+        HISTORY_DEADLINE_SECONDS,
     )
     if getattr(frame.index, "tz", None) is not None:
         frame.index = frame.index.tz_localize(None)

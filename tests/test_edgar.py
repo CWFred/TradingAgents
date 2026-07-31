@@ -3,6 +3,7 @@
 from datetime import date
 
 import pytest
+import requests
 
 from tradingagents.dataflows import edgar
 from tradingagents.dataflows.errors import VendorNotConfiguredError
@@ -11,14 +12,17 @@ pytestmark = pytest.mark.unit
 
 
 class FakeResponse:
-    def __init__(self, *, json_data=None, text=""):
+    def __init__(self, *, json_data=None, text="", status_code=200):
         self._json = json_data
         self.text = text
+        self.status_code = status_code
 
     def json(self):
         return self._json
 
     def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} error", response=self)
         return None
 
 
@@ -28,6 +32,8 @@ def edgar_env(monkeypatch):
     monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "Test Suite test@example.com")
     monkeypatch.setattr(edgar, "_MIN_REQUEST_INTERVAL", 0.0)
     monkeypatch.setattr(edgar, "_ticker_map_cache", None)
+    # Deterministic backoff: no jitter, no real sleeping, in retry tests.
+    monkeypatch.setattr(edgar.random, "uniform", lambda a, b: 0.0)
 
 
 def _install_routes(monkeypatch, routes):
@@ -152,6 +158,78 @@ class TestFetchFilingText:
         assert "x()" not in text and "p{}" not in text
         truncated = edgar.fetch_filing_text(filing, max_chars=10)
         assert truncated.startswith("Item 1A.") and "[truncated at 10 characters]" in truncated
+
+
+class TestThrottledGetBackoff:
+    """429/5xx get bounded backoff (3 retries: 2s/8s/30s + jitter); other
+    4xx never retries."""
+
+    def _install_sequence(self, monkeypatch, responses):
+        calls = []
+        sleeps = []
+        responses = list(responses)
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            calls.append(url)
+            return responses.pop(0)
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        monkeypatch.setattr(edgar.requests, "get", fake_get)
+        monkeypatch.setattr(edgar.time, "sleep", fake_sleep)
+        return calls, sleeps
+
+    def test_retries_429_then_succeeds(self, monkeypatch):
+        calls, sleeps = self._install_sequence(
+            monkeypatch,
+            [
+                FakeResponse(status_code=429),
+                FakeResponse(status_code=429),
+                FakeResponse(json_data={"ok": True}, status_code=200),
+            ],
+        )
+        resp = edgar._throttled_get("https://data.sec.gov/x")
+        assert resp.json() == {"ok": True}
+        assert len(calls) == 3
+        assert sleeps == [2.0, 8.0]
+
+    def test_retries_5xx_then_succeeds(self, monkeypatch):
+        calls, sleeps = self._install_sequence(
+            monkeypatch,
+            [
+                FakeResponse(status_code=503),
+                FakeResponse(json_data={"ok": True}, status_code=200),
+            ],
+        )
+        resp = edgar._throttled_get("https://data.sec.gov/x")
+        assert resp.json() == {"ok": True}
+        assert len(calls) == 2
+        assert sleeps == [2.0]
+
+    def test_exhausts_retries_and_raises(self, monkeypatch):
+        calls, sleeps = self._install_sequence(
+            monkeypatch,
+            [
+                FakeResponse(status_code=429),
+                FakeResponse(status_code=429),
+                FakeResponse(status_code=429),
+                FakeResponse(status_code=429),
+            ],
+        )
+        with pytest.raises(requests.HTTPError):
+            edgar._throttled_get("https://data.sec.gov/x")
+        assert len(calls) == 4
+        assert sleeps == [2.0, 8.0, 30.0]
+
+    def test_404_does_not_retry(self, monkeypatch):
+        calls, sleeps = self._install_sequence(
+            monkeypatch, [FakeResponse(status_code=404)],
+        )
+        with pytest.raises(requests.HTTPError):
+            edgar._throttled_get("https://data.sec.gov/x")
+        assert len(calls) == 1
+        assert sleeps == []
 
 
 class TestFullTextSearch:
