@@ -58,7 +58,7 @@ from ops.backtest.report import (
     render_report,
 )
 from ops.backtest.sleeves import make_research_exit_policy, size_research_case
-from ops.backtest.store import BacktestStore
+from ops.backtest.store import BacktestStore, CaseConflictError
 from ops.backtest.verdicts import evaluate_replay
 from ops.config import OpsConfig
 
@@ -347,6 +347,7 @@ def run_cached_backtest(
         raise InvalidBacktestRequest("run timestamp must be timezone-aware")
 
     with BacktestStore(config.backtest_store_path, cutoff=config.backtest_cutoff) as store:
+        store.fail_stale_runs(older_than=when - timedelta(hours=24))
         effective_cutoff = store.effective_cutoff
         _validate_window(
             start=start, end=end, today=today, cutoff=effective_cutoff,
@@ -421,6 +422,7 @@ def run_cached_backtest(
             case_ids=[case.case_id for case in cases], created_at=when,
         )
         prices = PriceCache(config.backtest_store_path)
+        run_succeeded = False
         try:
             for case in cases:
                 record = records[case.case_id]
@@ -491,10 +493,13 @@ def run_cached_backtest(
                     ),
                 )
                 store.save_replay_evaluation(replay, outcomes, result)
-        except Exception:
-            store.finish_run(run_id, status="failed")
-            raise
-        store.finish_run(run_id)
+            run_succeeded = True
+        finally:
+            # Any escape -- including KeyboardInterrupt/SystemExit from a
+            # killed replay, not just Exception -- must not leave the run
+            # stuck at 'running' forever; a stale row is a lie about the
+            # backtest's outcome and blocks future replays from noticing it.
+            store.finish_run(run_id, status="complete" if run_succeeded else "failed")
 
     return BacktestRunResult(
         run_id=run_id, case_count=len(cases),
@@ -509,13 +514,27 @@ def _generation_requests(
     config: OpsConfig,
     brain_version: str,
     prompt_version: str,
+    on_missing_manifest: str = "raise",
 ) -> tuple[GenerationRequest, ...]:
+    """Build requests for cases with a sealed manifest.
+
+    ``on_missing_manifest="raise"`` (default, used by replay/run) fails the
+    whole batch on any orphan case -- a manual-SQL dead end is preferable to
+    silently replaying an unsealed case. ``"skip"`` (used by
+    :func:`generate_cases`) instead drops orphan cases and prints a warning
+    listing them, so a batch with one orphan can still make progress while
+    the orphan resurfaces for re-prepare (Task 5, 2026-07-31 plan).
+    """
+    if on_missing_manifest not in ("raise", "skip"):
+        raise ValueError(f"unknown on_missing_manifest mode: {on_missing_manifest!r}")
     requests = []
     missing_manifests = []
+    skipped_case_ids = []
     for case in cases:
         manifest = store.get_context_manifest(case.case_id)
         if manifest is None:
             missing_manifests.append(case.symbol)
+            skipped_case_ids.append(case.case_id)
             continue
         requests.append(GenerationRequest.create(
             case=case, manifest=manifest,
@@ -524,10 +543,17 @@ def _generation_requests(
             thesis_model_id=config.research_thesis_model,
         ))
     if missing_manifests:
-        raise MissingBacktestArtifacts(
-            f"{len(missing_manifests)} case(s) lack PIT context manifests: "
-            + ", ".join(missing_manifests[:5])
-        )
+        if on_missing_manifest == "skip":
+            print(
+                f"[generate] skipped {len(skipped_case_ids)} case(s) without a "
+                "sealed context manifest (orphan, will resurface for "
+                "re-prepare): " + ", ".join(skipped_case_ids)
+            )
+        else:
+            raise MissingBacktestArtifacts(
+                f"{len(missing_manifests)} case(s) lack PIT context manifests: "
+                + ", ".join(missing_manifests[:5])
+            )
     return tuple(requests)
 
 
@@ -649,8 +675,7 @@ def prepare_cases(
             raise InvalidBacktestRequest(
                 f"context builder returned a manifest for another case: {case.symbol}"
             )
-        store.insert_case(case)
-        store.save_context_manifest(manifest)
+        store.insert_case_with_manifest(case, manifest)
         prepared.append(case)
     if not prepared:
         raise MissingBacktestArtifacts(
@@ -773,6 +798,7 @@ def _reconstruction_prepare_cases(
     existing: Collection[tuple[str, date]] = (),
     controls_count: int = 0,
     price_backfiller: Callable[..., Any] | None = None,
+    fresh_sweep: bool = False,
 ) -> tuple[BacktestCase, ...]:
     """Reconstruct cases by replaying the screener at sampled historical dates.
 
@@ -785,6 +811,15 @@ def _reconstruction_prepare_cases(
     screen condition) are selected via a *separate* ``select_candidates``
     call so they never crowd out passer selection.
 
+    Per-date results are checkpointed under a ``sweep_key`` (schema v4:
+    ``store.save_sweep_candidates``/``load_sweep_candidates``) so a killed
+    sweep resumes at the first unfinished date. ``sweep_key`` is a content
+    hash of the sweep *parameters* (sleeve/start/end/spacing/controls/
+    cutoff) only -- it is NOT sensitive to screener or trigger-source code
+    changes. After editing screener/trigger-source logic, pass
+    ``fresh_sweep=True`` (CLI: ``--fresh-sweep``) or old checkpoints will be
+    silently reused, serving stale results with no error.
+
     Before sealing, prices are backfilled for exactly the selected
     candidates: ``_sealed_context_builder`` fails closed when the price
     cache has no bars for a symbol, and the only other cache writer
@@ -792,27 +827,26 @@ def _reconstruction_prepare_cases(
     a fresh symbol could otherwise never be prepared (2026-07-28 review,
     finding 1: prepare/prices sequencing deadlock).
     """
-    from ops.backtest.cases import (
-        CurrentUniverseReconstructionSource,
-        collect_candidates,
-        sample_sessions,
-    )
+    from ops.backtest.cases import CurrentUniverseReconstructionSource, sample_sessions
     from ops.scheduler.market_calendar import MarketCalendar
 
     if fetcher is None:
+        from ops.backtest.fetch_cache import FetchCache, default_fetch_cache_path
         from ops.backtest.historical_source import ReconstructionScreenerFetcher
         from ops.research.run import fetch_price_context
-        from ops.research.triggers import find_triggers
         from ops.universe.smallcap import build_smallcap_universe
         from tradingagents.dataflows import edgar
         from tradingagents.dataflows.edgar_facts import get_company_facts
 
         edgar.get_user_agent()  # fail fast, same as run_screen
         universe = universe if universe is not None else build_smallcap_universe()
+        # No explicit triggers_finder: this takes the disk-backed cached path
+        # (trigger sources/facts/price context all through FetchCache) --
+        # see ReconstructionScreenerFetcher's docstring.
         fetcher = ReconstructionScreenerFetcher(
             universe=universe, facts_fetcher=get_company_facts,
             price_context_fetcher=fetch_price_context,
-            triggers_finder=find_triggers,
+            fetch_cache=FetchCache(default_fetch_cache_path()),
             include_near_misses=controls_count > 0,
         )
 
@@ -821,7 +855,42 @@ def _reconstruction_prepare_cases(
         sessions, start=start, end=end, spacing_sessions=spacing_sessions,
     )
     source = CurrentUniverseReconstructionSource(fetch=fetcher)
-    candidates = collect_candidates(source, sampled)
+
+    # Per-date sweep checkpoints (schema v4): a killed multi-hour sweep
+    # resumes at the first unfinished date instead of losing everything held
+    # only in memory. sweep_key intentionally excludes case_count (the
+    # passer budget doesn't change what a date's screen found) and universe
+    # (opaque, not hashable identity) -- it identifies the *screen replay*,
+    # not the downstream selection.
+    #
+    # CAVEAT: sweep_key is NOT sensitive to screener/trigger-source code
+    # changes -- it is a content hash of the sweep *parameters* only. After
+    # editing screener or trigger-source logic, an old sweep_key's
+    # checkpoints would be silently reused (stale results, no error). Pass
+    # ``--fresh-sweep`` explicitly whenever such logic changes.
+    sweep_key = stable_hash({
+        "sleeve": sleeve, "start": start, "end": end,
+        "spacing": spacing_sessions, "controls": controls_count,
+        "cutoff": store.effective_cutoff,
+    })[:16]
+    if fresh_sweep:
+        store.clear_sweep_candidates(sweep_key)
+    checkpointed = store.load_sweep_candidates(sweep_key)
+    candidates: list[CaseCandidate] = []
+    for asof in sampled:
+        if asof in checkpointed:
+            candidates.extend(checkpointed[asof])
+            continue
+        hits = tuple(source.candidates(asof=asof))
+        for candidate in hits:
+            if candidate.asof != asof:
+                raise ValueError(
+                    f"case source returned {candidate.symbol} asof {candidate.asof} "
+                    f"for requested date {asof}"
+                )
+        store.save_sweep_candidates(sweep_key, asof, hits)
+        candidates.extend(hits)
+
     existing_keys = set(existing)
     candidates = [
         candidate for candidate in candidates
@@ -862,18 +931,19 @@ def _reconstruction_prepare_cases(
         )
         try:
             manifest = context_builder(case, candidate)
-        except MissingBacktestArtifacts as exc:
-            # One unsealable symbol (e.g. its price backfill failed) must not
-            # abort a multi-hour sweep; the fail-closed guard still keeps the
-            # bad case out because we skip before any store write.
+            if manifest.case_id != case.case_id or manifest.asof != case.asof:
+                raise InvalidBacktestRequest(
+                    f"context builder returned a manifest for another case: {case.symbol}"
+                )
+            store.insert_case_with_manifest(case, manifest)
+        except (MissingBacktestArtifacts, CaseConflictError) as exc:
+            # One unsealable or conflicting symbol (e.g. its price backfill
+            # failed, or a resurfaced orphan's re-prepared content drifted
+            # from a pre-existing conflicting row) must not abort a
+            # multi-hour sweep; the fail-closed guard still keeps the bad
+            # case out because we skip before any further store write.
             print(f"[prepare] skipped {case.symbol} {case.asof}: {exc}")
             continue
-        if manifest.case_id != case.case_id or manifest.asof != case.asof:
-            raise InvalidBacktestRequest(
-                f"context builder returned a manifest for another case: {case.symbol}"
-            )
-        store.insert_case(case)
-        store.save_context_manifest(manifest)
         prepared.append(case)
     if not prepared:
         raise MissingBacktestArtifacts(
@@ -901,11 +971,14 @@ def generate_cases(
     spacing_sessions: int = 10,
     append: bool = False,
     controls_count: int = 0,
+    fresh_sweep: bool = False,
 ) -> GenerationResult:
     if execute and enqueue:
         raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
     if append and source == "recorded":
         raise InvalidBacktestRequest("append is reconstruction-only")
+    if fresh_sweep and source == "recorded":
+        raise InvalidBacktestRequest("fresh-sweep is reconstruction-only")
     _validate_window(
         start=start, end=end, today=today, cutoff=config.backtest_cutoff,
         case_count=case_count,
@@ -918,10 +991,24 @@ def generate_cases(
             start=start, end=end, today=today, cutoff=effective_cutoff,
             case_count=case_count,
         )
-        available = [
+        windowed = [
             case for case in store.list_cases(sleeve=sleeve)
             if start <= case.asof <= end
         ]
+        # Orphan cases (case row inserted but the paired manifest never was,
+        # e.g. a kill before Task 5's atomic insert_case_with_manifest
+        # existed) must not count as available -- they need_prepare/top-up
+        # resurfaces and re-seals, and must never dedupe-block their own
+        # resurfacing via `existing` either (Task 5, 2026-07-31 plan).
+        sealed_ids = store.case_ids_with_manifests([case.case_id for case in windowed])
+        orphans = [case for case in windowed if case.case_id not in sealed_ids]
+        if orphans:
+            print(
+                f"[generate] {len(orphans)} orphan case(s) (case row without a "
+                "sealed manifest) excluded from availability and will resurface "
+                "for re-prepare: " + ", ".join(case.case_id for case in orphans)
+            )
+        available = [case for case in windowed if case.case_id in sealed_ids]
         # case_count budgets passers only; controls are additive and must
         # never shrink the passer top-up (see finding 2, 2026-07-28 review).
         available_passers = [case for case in available if not _is_control_case(case)]
@@ -944,6 +1031,7 @@ def generate_cases(
                     # a control is never re-inserted as a duplicate.
                     "existing": tuple((c.symbol, c.asof) for c in available),
                     "controls_count": controls_count,
+                    "fresh_sweep": fresh_sweep,
                 }
                 if preparer is not None or source == "reconstruction"
                 else {}
@@ -960,6 +1048,7 @@ def generate_cases(
         requests = _generation_requests(
             store, cases, config=config,
             brain_version=brain_version, prompt_version=prompt_version,
+            on_missing_manifest="skip",
         )
         plan = plan_generation(requests, store=store)
         if enqueue:

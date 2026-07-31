@@ -16,6 +16,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from ops.backtest.cases import CaseCandidate
 from ops.backtest.models import (
     MIN_BACKTEST_CUTOFF,
     BacktestCase,
@@ -32,7 +33,7 @@ from ops.backtest.models import (
     stable_hash,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BUSY_TIMEOUT_MS = 5_000
 
 
@@ -273,6 +274,16 @@ CREATE TABLE IF NOT EXISTS experiment_cases (
 );
 """
 
+_SCHEMA_V4 = """
+CREATE TABLE IF NOT EXISTS sweep_candidates (
+    sweep_key TEXT NOT NULL,
+    asof TEXT NOT NULL,
+    candidates_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (sweep_key, asof)
+);
+"""
+
 _SCHEMA_V2 = """
 CREATE TABLE IF NOT EXISTS distillation_runs (
     distillation_key TEXT PRIMARY KEY,
@@ -432,6 +443,16 @@ class BacktestStore:
                 except BaseException:
                     self._conn.execute("ROLLBACK")
                     raise
+                current = 3
+            if current == 3:
+                self._conn.executescript(
+                    "BEGIN IMMEDIATE;\n"
+                    + _SCHEMA_V4
+                    + "\nINSERT OR REPLACE INTO schema_metadata (key, value) "
+                    + "VALUES ('schema_version', '4');\n"
+                    + "PRAGMA user_version = 4;\nCOMMIT;"
+                )
+                current = 4
             columns = {
                 row[1]
                 for row in self._conn.execute(
@@ -473,38 +494,46 @@ class BacktestStore:
     def insert_case(self, case: BacktestCase) -> BacktestCase:
         """Insert a case idempotently after enforcing the effective cutoff."""
         case.validate_cutoff(self.effective_cutoff)
-        values = (
-            case.case_id,
-            case.sleeve,
-            case.symbol,
-            case.asof.isoformat(),
-            canonical_json(case.trigger),
-            case.source.value,
-            str(case.score) if case.score is not None else None,
-            case.created_at.isoformat(),
-        )
         with self.transaction() as conn:
-            existing = conn.execute(
-                "SELECT * FROM cases WHERE case_id = ? OR "
-                "(sleeve = ? AND symbol = ? AND asof = ?)",
-                (case.case_id, case.sleeve, case.symbol, case.asof.isoformat()),
-            ).fetchone()
-            if existing is not None:
-                stored = self._case_from_row(existing)
-                if self._case_content(stored) != self._case_content(case):
-                    raise CaseConflictError(
-                        f"case identity {case.sleeve}/{case.symbol}/{case.asof} "
-                        "already exists with different content"
-                    )
-                return stored
-            conn.execute(
-                """
-                INSERT INTO cases (
-                    case_id, sleeve, symbol, asof, trigger_json, source, score, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                values,
-            )
+            return self._insert_case_tx(conn, case)
+
+    def _insert_case_tx(self, conn: sqlite3.Connection, case: BacktestCase) -> BacktestCase:
+        """Same conflict semantics as :meth:`insert_case`, given an open conn.
+
+        Shared by :meth:`insert_case` and :meth:`insert_case_with_manifest` so
+        both go through identical idempotent/conflict logic inside one
+        transaction (Task 5, 2026-07-31 plan).
+        """
+        existing = conn.execute(
+            "SELECT * FROM cases WHERE case_id = ? OR "
+            "(sleeve = ? AND symbol = ? AND asof = ?)",
+            (case.case_id, case.sleeve, case.symbol, case.asof.isoformat()),
+        ).fetchone()
+        if existing is not None:
+            stored = self._case_from_row(existing)
+            if self._case_content(stored) != self._case_content(case):
+                raise CaseConflictError(
+                    f"case identity {case.sleeve}/{case.symbol}/{case.asof} "
+                    "already exists with different content"
+                )
+            return stored
+        conn.execute(
+            """
+            INSERT INTO cases (
+                case_id, sleeve, symbol, asof, trigger_json, source, score, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                case.case_id,
+                case.sleeve,
+                case.symbol,
+                case.asof.isoformat(),
+                canonical_json(case.trigger),
+                case.source.value,
+                str(case.score) if case.score is not None else None,
+                case.created_at.isoformat(),
+            ),
+        )
         return case
 
     @staticmethod
@@ -531,6 +560,89 @@ class BacktestStore:
             score=Decimal(row["score"]) if row["score"] is not None else None,
             created_at=_parse_utc(row["created_at"]),
         )
+
+    # --- Per-date sweep checkpoints (resume) ------------------------------
+
+    @staticmethod
+    def _candidate_to_json(candidate: CaseCandidate) -> dict:
+        return {
+            "symbol": candidate.normalized_symbol(),
+            "asof": candidate.asof.isoformat(),
+            "score": str(candidate.decimal_score()),
+            "trigger": dict(candidate.trigger),
+            "screen_payload": dict(candidate.screen_payload),
+            "source_ref": candidate.source_ref,
+        }
+
+    @staticmethod
+    def _candidate_from_json(payload: dict) -> CaseCandidate:
+        return CaseCandidate(
+            symbol=payload["symbol"],
+            asof=date.fromisoformat(payload["asof"]),
+            score=Decimal(payload["score"]),
+            trigger=payload["trigger"],
+            screen_payload=payload["screen_payload"],
+            source_ref=payload["source_ref"],
+        )
+
+    def save_sweep_candidates(
+        self, sweep_key: str, asof: date, candidates: Sequence[CaseCandidate],
+    ) -> None:
+        """Checkpoint one sampled date's screen hits for an in-progress sweep.
+
+        An empty ``candidates`` sequence is a valid, distinct checkpoint: the
+        date was screened and nothing passed. It must never be conflated with
+        an absent (not-yet-screened) date.
+        """
+        if not sweep_key.strip():
+            raise ValueError("sweep_key must not be empty")
+        payload = canonical_json([self._candidate_to_json(c) for c in candidates])
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT candidates_json FROM sweep_candidates "
+                "WHERE sweep_key = ? AND asof = ?",
+                (sweep_key, asof.isoformat()),
+            ).fetchone()
+            if row is not None:
+                if row["candidates_json"] != payload:
+                    raise CaseConflictError(
+                        f"sweep {sweep_key!r} asof {asof} already checkpointed "
+                        "with different candidates"
+                    )
+                return
+            conn.execute(
+                "INSERT INTO sweep_candidates "
+                "(sweep_key, asof, candidates_json, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    sweep_key, asof.isoformat(), payload,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+    def load_sweep_candidates(
+        self, sweep_key: str,
+    ) -> dict[date, tuple[CaseCandidate, ...]]:
+        """Return every checkpointed date for a sweep, keyed by asof."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT asof, candidates_json FROM sweep_candidates WHERE sweep_key = ?",
+                (sweep_key,),
+            ).fetchall()
+        result: dict[date, tuple[CaseCandidate, ...]] = {}
+        for row in rows:
+            payload = json.loads(row["candidates_json"])
+            result[date.fromisoformat(row["asof"])] = tuple(
+                self._candidate_from_json(item) for item in payload
+            )
+        return result
+
+    def clear_sweep_candidates(self, sweep_key: str) -> int:
+        """Drop every checkpoint for a sweep key (``--fresh-sweep``)."""
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM sweep_candidates WHERE sweep_key = ?", (sweep_key,),
+            )
+            return cursor.rowcount
 
     def get_case(self, case_id: str) -> BacktestCase | None:
         with self._lock:
@@ -573,30 +685,82 @@ class BacktestStore:
             raise ValueError(
                 f"manifest asof {manifest.asof} does not match case asof {case.asof}"
             )
-        payload = canonical_json(manifest)
         with self.transaction() as conn:
-            row = conn.execute(
-                "SELECT * FROM context_manifests WHERE case_id = ?",
-                (manifest.case_id,),
-            ).fetchone()
-            if row is not None:
-                if row["manifest_hash"] != manifest.manifest_hash:
-                    raise CaseConflictError(
-                        f"case {manifest.case_id} already has a different frozen manifest"
-                    )
-                return self._manifest_from_json(row["manifest_json"])
-            conn.execute(
-                """
-                INSERT INTO context_manifests (
-                    manifest_id, case_id, asof, manifest_hash, manifest_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    manifest.manifest_id, manifest.case_id, manifest.asof.isoformat(),
-                    manifest.manifest_hash, payload, manifest.created_at.isoformat(),
-                ),
-            )
+            return self._save_manifest_tx(conn, manifest)
+
+    def _save_manifest_tx(
+        self, conn: sqlite3.Connection, manifest: ContextManifest,
+    ) -> ContextManifest:
+        """Same conflict semantics as :meth:`save_context_manifest`, given an
+        open conn. Shared with :meth:`insert_case_with_manifest`."""
+        row = conn.execute(
+            "SELECT * FROM context_manifests WHERE case_id = ?",
+            (manifest.case_id,),
+        ).fetchone()
+        if row is not None:
+            if row["manifest_hash"] != manifest.manifest_hash:
+                raise CaseConflictError(
+                    f"case {manifest.case_id} already has a different frozen manifest"
+                )
+            return self._manifest_from_json(row["manifest_json"])
+        conn.execute(
+            """
+            INSERT INTO context_manifests (
+                manifest_id, case_id, asof, manifest_hash, manifest_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                manifest.manifest_id, manifest.case_id, manifest.asof.isoformat(),
+                manifest.manifest_hash, canonical_json(manifest),
+                manifest.created_at.isoformat(),
+            ),
+        )
         return manifest
+
+    def insert_case_with_manifest(
+        self, case: BacktestCase, manifest: ContextManifest,
+    ) -> tuple[BacktestCase, ContextManifest]:
+        """Insert a case and seal its context manifest in one transaction.
+
+        A kill between the two separate calls this replaces used to leave an
+        orphan case: counted toward ``available`` (suppressing re-prepare)
+        while making replay/generation raise for the whole batch. Both
+        halves now share one transaction with identical conflict/idempotent
+        semantics to the standalone ``insert_case``/``save_context_manifest``
+        calls (Task 5, 2026-07-31 plan).
+        """
+        case.validate_cutoff(self.effective_cutoff)
+        manifest.validate_point_in_time()
+        if manifest.case_id != case.case_id:
+            raise ValueError(
+                f"manifest case_id {manifest.case_id!r} does not match "
+                f"case case_id {case.case_id!r}"
+            )
+        if manifest.asof != case.asof:
+            raise ValueError(
+                f"manifest asof {manifest.asof} does not match case asof {case.asof}"
+            )
+        with self.transaction() as conn:
+            stored_case = self._insert_case_tx(conn, case)
+            stored_manifest = self._save_manifest_tx(conn, manifest)
+        return stored_case, stored_manifest
+
+    def case_ids_with_manifests(self, case_ids: Sequence[str]) -> set[str]:
+        """Cheap, single-query manifest-existence check for many cases.
+
+        Used to exclude manifest-less (orphan) cases from ``available`` in
+        one query instead of one ``get_context_manifest`` per case.
+        """
+        ids = list(case_ids)
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT case_id FROM context_manifests WHERE case_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {row["case_id"] for row in rows}
 
     @staticmethod
     def _manifest_from_json(raw: str) -> ContextManifest:
@@ -728,6 +892,45 @@ class BacktestStore:
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+
+    def supersede_generation_job(self, generation_key: str) -> None:
+        """Discard a stale (never-started or failed) job so it can be re-enqueued.
+
+        A job that is ``running`` or ``complete`` reflects real in-flight or
+        finished work; deleting it out from under that work would be a data
+        loss bug, so those statuses raise instead.
+        """
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM generation_jobs WHERE generation_key = ?",
+                (generation_key,),
+            ).fetchone()
+            if row is None:
+                return
+            if row["status"] not in ("pending", "failed"):
+                raise CaseConflictError(
+                    f"generation key {generation_key} is {row['status']} "
+                    "and cannot be superseded"
+                )
+            conn.execute(
+                "DELETE FROM generation_jobs WHERE generation_key = ?",
+                (generation_key,),
+            )
+
+    def fail_stale_runs(self, older_than: datetime) -> int:
+        """Sweep ``running`` runs abandoned by a killed process; return count flipped."""
+        if older_than.tzinfo is None or older_than.utcoffset() is None:
+            raise ValueError("older_than must be timezone-aware")
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE runs SET status = 'failed', completed_at = ? "
+                "WHERE status = 'running' AND created_at < ?",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    older_than.astimezone(timezone.utc).isoformat(),
+                ),
+            )
+            return cursor.rowcount
 
     def enqueue_generation_jobs(self, generation_keys: Sequence[str]) -> int:
         """Opt pending jobs into automatic background processing."""

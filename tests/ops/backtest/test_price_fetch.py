@@ -1,9 +1,19 @@
+import concurrent.futures
+import time
 from datetime import date
 from decimal import Decimal
 
 import pandas as pd
+import pytest
 
-from ops.backtest.price_fetch import yfinance_bar_fetcher
+from ops.backtest import price_fetch
+from ops.backtest.price_fetch import (
+    HISTORY_DEADLINE_SECONDS,
+    _with_deadline,
+    batch_history_fn,
+    history_deadline_seconds,
+    yfinance_bar_fetcher,
+)
 
 
 def _frame():
@@ -99,3 +109,193 @@ def test_bars_feed_price_cache_upsert(tmp_path):
     )
     cache = PriceCache(tmp_path / "px.db")
     assert cache.upsert_bars(bars) == 2
+
+
+class TestWithDeadline:
+    def test_returns_result_when_fast_enough(self):
+        assert _with_deadline(lambda: 42, seconds=1.0) == 42
+
+    def test_raises_timeout_error_when_fn_exceeds_deadline(self):
+        def slow():
+            time.sleep(0.5)
+            return "too late"
+
+        with pytest.raises(TimeoutError):
+            _with_deadline(slow, seconds=0.05)
+
+    def test_propagates_exception_raised_by_fn(self):
+        def boom():
+            raise ValueError("kaboom")
+
+        with pytest.raises(ValueError, match="kaboom"):
+            _with_deadline(boom, seconds=1.0)
+
+    def test_wraps_the_entire_retry_chain_not_one_budget_per_attempt(self):
+        """A regression guard for the composition-inversion bug: a caller
+        that retries internally (e.g. ``call_paced``) must be timed as ONE
+        chain, not get a fresh clock on every attempt."""
+        attempts = 0
+
+        def flaky_retry_chain():
+            nonlocal attempts
+            for _ in range(50):
+                attempts += 1
+                time.sleep(0.02)
+                # never succeeds within the budget; simulates a paced
+                # retry loop that keeps trying past the deadline.
+            return "unreachable"
+
+        with pytest.raises(TimeoutError):
+            _with_deadline(flaky_retry_chain, seconds=0.1)
+        # Several attempts fired inside the single deadline window (proves
+        # the deadline wraps the WHOLE chain, not a per-attempt window —
+        # per-attempt would never time out since each sleep is well under
+        # any per-call budget).
+        assert attempts > 1
+
+    def test_shared_executor_is_a_module_level_singleton(self, monkeypatch):
+        """Bounds stranded-thread risk: _with_deadline must never construct
+        a fresh ThreadPoolExecutor per call (the fd-leak mechanism from the
+        prior incident) — it reuses one shared, bounded pool."""
+        created = []
+        real_cls = concurrent.futures.ThreadPoolExecutor
+
+        class SpyExecutor(real_cls):
+            def __init__(self, *args, **kwargs):
+                created.append((args, kwargs))
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", SpyExecutor)
+
+        executor_before = price_fetch._DEADLINE_EXECUTOR
+        _with_deadline(lambda: 1, seconds=1.0)
+        with pytest.raises(TimeoutError):
+            _with_deadline(lambda: time.sleep(0.2), seconds=0.01)
+        _with_deadline(lambda: 2, seconds=1.0)
+
+        assert created == []  # no new executor constructed by any of the 3 calls
+        assert price_fetch._DEADLINE_EXECUTOR is executor_before
+
+
+class TestBatchHistoryFn:
+    def test_maps_multiindex_frame_to_per_symbol_frames(self):
+        idx = pd.to_datetime(["2025-06-02", "2025-06-03"])
+        data = {}
+        for i, sym in enumerate(["AAA", "BBB"]):
+            base = 10.0 * (i + 1)
+            data[(sym, "Open")] = [base, base + 1]
+            data[(sym, "High")] = [base + 1, base + 2]
+            data[(sym, "Low")] = [base - 1, base]
+            data[(sym, "Close")] = [base, base + 1]
+            data[(sym, "Adj Close")] = [base, base + 1]
+            data[(sym, "Volume")] = [100, 200]
+            data[(sym, "Dividends")] = [0.0, 0.0]
+            data[(sym, "Stock Splits")] = [0.0, 0.0]
+        frame = pd.DataFrame(data, index=idx)
+        frame.columns = pd.MultiIndex.from_tuples(frame.columns)
+
+        def fake_download(symbols, start, end):
+            return frame
+
+        result = batch_history_fn(
+            ["AAA", "BBB"], date(2025, 6, 2), date(2025, 6, 3),
+            download_fn=fake_download,
+        )
+
+        assert set(result) == {"AAA", "BBB"}
+        bars_aaa = yfinance_bar_fetcher(
+            "AAA", date(2025, 6, 2), date(2025, 6, 3),
+            history_fn=lambda *_: result["AAA"],
+        )
+        assert bars_aaa[0].close == Decimal("10")
+        bars_bbb = yfinance_bar_fetcher(
+            "BBB", date(2025, 6, 2), date(2025, 6, 3),
+            history_fn=lambda *_: result["BBB"],
+        )
+        assert bars_bbb[0].close == Decimal("20")
+
+    def test_single_ticker_non_multiindex_shape(self):
+        frame = _frame()
+
+        def fake_download(symbols, start, end):
+            return frame
+
+        result = batch_history_fn(
+            ["ACMR"], date(2025, 6, 2), date(2025, 6, 3),
+            download_fn=fake_download,
+        )
+
+        assert set(result) == {"ACMR"}
+        bars = yfinance_bar_fetcher(
+            "ACMR", date(2025, 6, 2), date(2025, 6, 3),
+            history_fn=lambda *_: result["ACMR"],
+        )
+        assert bars[0].close == Decimal("10")
+
+    def test_symbol_missing_from_download_result_is_simply_absent(self):
+        idx = pd.to_datetime(["2025-06-02"])
+        columns = pd.MultiIndex.from_tuples([
+            ("AAA", "Open"), ("AAA", "High"), ("AAA", "Low"), ("AAA", "Close"),
+            ("AAA", "Adj Close"), ("AAA", "Volume"),
+        ])
+        frame = pd.DataFrame(
+            [[10.0, 11.0, 9.0, 10.0, 10.0, 100]], index=idx, columns=columns,
+        )
+
+        def fake_download(symbols, start, end):
+            return frame
+
+        result = batch_history_fn(
+            ["AAA", "ZZZ"], date(2025, 6, 2), date(2025, 6, 2),
+            download_fn=fake_download,
+        )
+
+        assert set(result) == {"AAA"}
+
+
+class TestBatchDownloadDeadlineScaling:
+    def test_fifty_symbol_batch_gets_five_times_the_deadline(self, monkeypatch):
+        captured = []
+
+        def fake_with_deadline(fn, seconds):
+            captured.append(seconds)
+            return pd.DataFrame()
+
+        monkeypatch.setattr(price_fetch, "_with_deadline", fake_with_deadline)
+        symbols = [f"SYM{i}" for i in range(50)]
+        price_fetch._default_batch_download_fn(symbols, date(2025, 6, 2), date(2025, 6, 3))
+        assert captured == [300.0]
+
+    def test_five_symbol_batch_gets_base_deadline(self, monkeypatch):
+        captured = []
+
+        def fake_with_deadline(fn, seconds):
+            captured.append(seconds)
+            return pd.DataFrame()
+
+        monkeypatch.setattr(price_fetch, "_with_deadline", fake_with_deadline)
+        symbols = [f"SYM{i}" for i in range(5)]
+        price_fetch._default_batch_download_fn(symbols, date(2025, 6, 2), date(2025, 6, 3))
+        assert captured == [60.0]
+
+    def test_eleven_symbol_batch_rounds_up_to_two_units(self, monkeypatch):
+        captured = []
+
+        def fake_with_deadline(fn, seconds):
+            captured.append(seconds)
+            return pd.DataFrame()
+
+        monkeypatch.setattr(price_fetch, "_with_deadline", fake_with_deadline)
+        symbols = [f"SYM{i}" for i in range(11)]
+        price_fetch._default_batch_download_fn(symbols, date(2025, 6, 2), date(2025, 6, 3))
+        assert captured == [120.0]
+
+
+class TestHistoryDeadlineSeconds:
+    def test_default_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("OPS_YF_DEADLINE_S", raising=False)
+        assert history_deadline_seconds() == HISTORY_DEADLINE_SECONDS
+
+    def test_env_override_respected(self, monkeypatch):
+        monkeypatch.setenv("OPS_YF_DEADLINE_S", "12.5")
+        assert history_deadline_seconds() == 12.5

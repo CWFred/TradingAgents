@@ -5,7 +5,7 @@ import pytest
 
 from ops.backtest.cases import CaseCandidate, HistoricalCaseSource
 from ops.backtest.context import ContextArtifact
-from ops.backtest.models import CaseSource, ContextManifest
+from ops.backtest.models import BacktestCase, CaseSource, ContextManifest
 from ops.backtest.prepare import PreparedContext, prepare_cases
 from ops.backtest.store import BacktestStore
 from ops.config import OpsConfig
@@ -342,6 +342,196 @@ def test_reconstruction_prepare_backfills_prices_before_sealing(tmp_path, monkey
     selected_pairs = {(c.symbol, c.asof) for c in cases}
     assert selected_pairs.issubset(set(seen_pairs))
     assert (config.backtest_benchmark, date(2025, 6, 16)) in seen_pairs
+
+
+def test_reconstruction_prepare_resumes_after_kill_fetching_only_unfinished_dates(
+    tmp_path, monkeypatch,
+):
+    """A sweep killed partway through must resume by fetching ONLY the dates
+    that were never checkpointed -- the whole point of schema v4 checkpoints
+    (2026-07-31 plan, Task 4)."""
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    # Three sampled dates: indices 0, 10, 20 with spacing_sessions=10.
+    sessions = [date(2025, 6, 1) + timedelta(days=d) for d in range(21)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    class _KillOnThirdFetcher:
+        def __init__(self, symbols):
+            self._symbols = symbols
+            self.calls: list[date] = []
+
+        def __call__(self, asof):
+            self.calls.append(asof)
+            if len(self.calls) == 3:
+                raise RuntimeError("simulated kill on date 3")
+            return tuple(
+                CaseCandidate(
+                    symbol=symbol, asof=asof, score=Decimal(str(score)),
+                    trigger={"kind": "historical_screener_replay"},
+                    screen_payload={"passed": True},
+                    source_ref=f"reconstruction:{asof.isoformat()}:{symbol}",
+                )
+                for symbol, score in self._symbols
+            )
+
+    killer = _KillOnThirdFetcher([("AAA", 2), ("BBB", 1)])
+    with BacktestStore(path) as store:
+        with pytest.raises(RuntimeError, match="simulated kill"):
+            _reconstruction_prepare_cases(
+                store=store, config=config, sleeve="research",
+                start=sessions[0], end=sessions[-1], case_count=4,
+                spacing_sessions=10, universe=["AAA", "BBB"], fetcher=killer,
+                price_backfiller=lambda *_args, **_kwargs: None,
+            )
+        assert len(killer.calls) == 3
+        # Dates 1-2 checkpointed before the kill; nothing else stored.
+        assert store.list_cases(sleeve="research") == []
+
+        healed_calls: list[date] = []
+
+        def healed_fetch(asof):
+            healed_calls.append(asof)
+            return tuple(
+                CaseCandidate(
+                    symbol=symbol, asof=asof, score=Decimal(str(score)),
+                    trigger={"kind": "historical_screener_replay"},
+                    screen_payload={"passed": True},
+                    source_ref=f"reconstruction:{asof.isoformat()}:{symbol}",
+                )
+                for symbol, score in [("AAA", 2), ("BBB", 1)]
+            )
+
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=sessions[0], end=sessions[-1], case_count=4,
+            spacing_sessions=10, universe=["AAA", "BBB"], fetcher=healed_fetch,
+            price_backfiller=lambda *_args, **_kwargs: None,
+        )
+        # Only the third (previously unfinished) date was fetched by the
+        # healed fetcher; the first two were served from checkpoints.
+        assert healed_calls == [sessions[20]]
+        assert len(cases) == 4
+
+
+def test_reconstruction_prepare_fresh_sweep_clears_checkpoints(tmp_path, monkeypatch):
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    fetcher = _FakeReconstructionFetcher([("AAA", 2)])
+    with BacktestStore(path) as store:
+        _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=1,
+            spacing_sessions=10, universe=["AAA"], fetcher=fetcher,
+            price_backfiller=lambda *_args, **_kwargs: None,
+        )
+        assert fetcher.calls == [date(2025, 6, 16)]
+
+        # Same params, no --fresh-sweep: the checkpoint is reused and the
+        # fetcher is not called again for that date (re-insertion of the
+        # identical case is idempotent).
+        _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=1,
+            spacing_sessions=10, universe=["AAA"], fetcher=fetcher,
+            price_backfiller=lambda *_args, **_kwargs: None,
+        )
+        assert fetcher.calls == [date(2025, 6, 16)]
+
+        # --fresh-sweep clears the checkpoint, forcing a re-fetch.
+        _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=1,
+            spacing_sessions=10, universe=["AAA"], fetcher=fetcher,
+            price_backfiller=lambda *_args, **_kwargs: None,
+            fresh_sweep=True,
+        )
+        assert fetcher.calls == [date(2025, 6, 16), date(2025, 6, 16)]
+
+
+def test_reconstruction_prepare_skips_insert_conflicts_too(tmp_path, monkeypatch):
+    """Per-candidate isolation must also cover CaseConflictError from the
+    insert itself, not just context-builder failures: a resurfaced orphan
+    (or any candidate) whose re-prepared content drifts from a pre-existing
+    conflicting row must be skipped, not abort the whole sweep (review
+    finding, 2026-07-31)."""
+    import ops.backtest.service as service
+    from ops.backtest.service import _reconstruction_prepare_cases
+
+    path = tmp_path / "backtest.sqlite"
+    config = OpsConfig(backtest_store_path=str(path))
+
+    sessions = [date(2025, 6, 16)]
+    monkeypatch.setattr(
+        "ops.scheduler.market_calendar.MarketCalendar.sessions_between",
+        lambda self, start, end: sessions,
+    )
+    monkeypatch.setattr(
+        service,
+        "_sealed_context_builder",
+        lambda cfg: (
+            lambda case, _candidate: ContextManifest.create(
+                case_id=case.case_id, asof=case.asof,
+            )
+        ),
+    )
+
+    fetcher = _FakeReconstructionFetcher([("BAD", 3), ("GOOD", 2), ("ALSO", 1)])
+    with BacktestStore(path) as store:
+        # Pre-existing row for BAD with different frozen content: same
+        # (sleeve, symbol, asof) identity -> same case_id -> a conflict when
+        # the sweep tries to insert its freshly reconstructed BAD case.
+        conflicting = BacktestCase.create(
+            sleeve="research", symbol="BAD", asof=date(2025, 6, 16),
+            trigger={"kind": "pre-existing-different"},
+        )
+        store.insert_case(conflicting)
+
+        cases = _reconstruction_prepare_cases(
+            store=store, config=config, sleeve="research",
+            start=date(2025, 6, 2), end=date(2025, 7, 1), case_count=3,
+            spacing_sessions=10, universe=["BAD", "GOOD", "ALSO"],
+            fetcher=fetcher, price_backfiller=lambda cfg, pairs: None,
+        )
+        assert sorted(c.symbol for c in cases) == ["ALSO", "GOOD"]
+        # BAD's pre-existing row is untouched -- no manifest was inserted
+        # for it, and the sweep continued past it.
+        assert store.get_context_manifest(conflicting.case_id) is None
 
 
 def test_sealed_context_builder_fails_closed_without_price_bars(tmp_path, monkeypatch):

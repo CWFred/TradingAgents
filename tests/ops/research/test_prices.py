@@ -3,9 +3,15 @@
 from datetime import date, timedelta
 from decimal import Decimal
 
+import pandas as pd
 import pytest
 
-from ops.research.prices import PriceContext
+from ops.research import prices as prices_module
+from ops.research.prices import (
+    PRICE_CONTEXT_DEADLINE_SECONDS,
+    PriceContext,
+    price_context_deadline_seconds,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -100,3 +106,53 @@ def test_era_end_anchors_split_factor_to_that_era():
     # An era ending after the split has nothing to undo.
     assert ctx.unadjusted_close_on_or_before(
         date(2026, 7, 3), era_end=date(2026, 4, 1)) == Decimal("50")
+
+
+class TestFetchPriceContextDeadlineComposition:
+    """The deadline must wrap the ENTIRE paced-retry chain, not one budget
+    per attempt (a call_paced retry would otherwise get a fresh clock every
+    attempt — the composition-inversion bug)."""
+
+    def test_deadline_wraps_outside_the_paced_retry_chain(self, monkeypatch):
+        order = []
+
+        def fake_with_deadline(fn, seconds):
+            order.append(("deadline_start", seconds))
+            result = fn()
+            order.append("deadline_end")
+            return result
+
+        def fake_call_paced(fn, *, label, **kwargs):
+            order.append(("paced_start", label))
+            result = fn()
+            order.append("paced_end")
+            return result
+
+        class _FakeTicker:
+            def history(self, **kwargs):
+                order.append("history_called")
+                return pd.DataFrame()
+
+        monkeypatch.setattr(prices_module, "_with_deadline", fake_with_deadline)
+        monkeypatch.setattr(prices_module, "call_paced", fake_call_paced)
+        monkeypatch.setattr(prices_module.yf, "Ticker", lambda symbol: _FakeTicker())
+
+        prices_module.fetch_price_context("ACME")
+
+        assert order == [
+            ("deadline_start", PRICE_CONTEXT_DEADLINE_SECONDS),
+            ("paced_start", "prices"),
+            "history_called",
+            "paced_end",
+            "deadline_end",
+        ]
+
+
+class TestPriceContextDeadlineSeconds:
+    def test_default_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("OPS_YF_CONTEXT_DEADLINE_S", raising=False)
+        assert price_context_deadline_seconds() == PRICE_CONTEXT_DEADLINE_SECONDS
+
+    def test_env_override_respected(self, monkeypatch):
+        monkeypatch.setenv("OPS_YF_CONTEXT_DEADLINE_S", "45")
+        assert price_context_deadline_seconds() == 45.0

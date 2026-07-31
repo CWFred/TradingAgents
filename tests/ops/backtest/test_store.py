@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from ops.backtest.cases import CaseCandidate
 from ops.backtest.generate import FrozenMemoRecord, GenerationRequest
 from ops.backtest.lessons import DistilledLesson
 from ops.backtest.models import (
@@ -148,6 +149,97 @@ def test_manifest_persistence_is_canonical_and_point_in_time(tmp_path):
         store.save_context_manifest(manifest)
         assert store.save_context_manifest(manifest) == manifest
         assert store.get_context_manifest(case.case_id) == manifest
+
+
+def test_insert_case_with_manifest_is_one_atomic_transaction(tmp_path):
+    """A kill between the case insert and the manifest insert must never
+    happen: both halves share one transaction so a failure after the case
+    row is written rolls the case back too (2026-07-31 plan, Task 5)."""
+    case = _case()
+    item = ContextItem.create(
+        kind="filing", source_ref="0001:mdna", available_at=case.asof,
+        content="Known by the close.", metadata={"form": "10-Q"},
+    )
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof, included=[item])
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        real_save_manifest_tx = store._save_manifest_tx
+
+        def killed(conn, manifest):
+            real_save_manifest_tx(conn, manifest)
+            raise RuntimeError("simulated kill after manifest insert")
+
+        store._save_manifest_tx = killed
+        with pytest.raises(RuntimeError, match="simulated kill"):
+            store.insert_case_with_manifest(case, manifest)
+
+        assert store.get_case(case.case_id) is None
+        assert store.get_context_manifest(case.case_id) is None
+
+
+def test_insert_case_with_manifest_round_trips_and_is_idempotent(tmp_path):
+    case = _case()
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof)
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        stored_case, stored_manifest = store.insert_case_with_manifest(case, manifest)
+        assert stored_case == case
+        assert stored_manifest == manifest
+
+        # Re-inserting the identical pair is idempotent (same conflict
+        # semantics as the standalone insert_case/save_context_manifest).
+        again_case, again_manifest = store.insert_case_with_manifest(case, manifest)
+        assert again_case == case
+        assert again_manifest == manifest
+
+        assert store.get_case(case.case_id) == case
+        assert store.get_context_manifest(case.case_id) == manifest
+
+
+def test_insert_case_with_manifest_preserves_case_conflict_semantics(tmp_path):
+    original = _case()
+    original_manifest = ContextManifest.create(
+        case_id=original.case_id, asof=original.asof,
+    )
+    changed = _case(trigger={"kind": "different"})
+    assert changed.case_id == original.case_id
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        store.insert_case_with_manifest(original, original_manifest)
+        with pytest.raises(CaseConflictError, match="different content"):
+            store.insert_case_with_manifest(changed, original_manifest)
+
+
+def test_insert_case_with_manifest_preserves_manifest_conflict_semantics(tmp_path):
+    case = _case()
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof)
+    other_item = ContextItem.create(
+        kind="filing", source_ref="different", available_at=case.asof,
+        content="different content", metadata={},
+    )
+    conflicting_manifest = ContextManifest.create(
+        case_id=case.case_id, asof=case.asof, included=[other_item],
+    )
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        store.insert_case_with_manifest(case, manifest)
+        with pytest.raises(CaseConflictError, match="different frozen manifest"):
+            store.insert_case_with_manifest(case, conflicting_manifest)
+
+
+def test_case_ids_with_manifests_reports_only_sealed_cases(tmp_path):
+    sealed = _case(symbol="acme")
+    orphan = _case(symbol="orph", asof=date(2025, 6, 2))
+    manifest = ContextManifest.create(case_id=sealed.case_id, asof=sealed.asof)
+
+    with BacktestStore(tmp_path / "backtest.sqlite") as store:
+        store.insert_case_with_manifest(sealed, manifest)
+        store.insert_case(orphan)
+
+        assert store.case_ids_with_manifests(
+            [sealed.case_id, orphan.case_id],
+        ) == {sealed.case_id}
+        assert store.case_ids_with_manifests([]) == set()
 
 
 def test_live_memo_store_is_never_opened_or_modified(tmp_path):
@@ -419,6 +511,160 @@ def test_lesson_and_experiment_caches_are_durable_and_idempotent(tmp_path):
         assert reopened.get_distilled_lessons("missing") is None
         assert reopened.get_distilled_lessons("distillation-1") == (distilled,)
         assert reopened.get_experiment(experiment.experiment_id) == experiment
+
+
+def test_sweep_candidates_round_trip_decimal_score_and_date(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    asof = date(2025, 6, 16)
+    candidates = (
+        CaseCandidate(
+            symbol="aaa", asof=asof, score=Decimal("2.5"),
+            trigger={"kind": "historical_screener_replay"},
+            screen_payload={"passed": True},
+            source_ref="reconstruction:2025-06-16:AAA",
+        ),
+        CaseCandidate(
+            symbol="BBB", asof=asof, score=Decimal("1"),
+            trigger={"kind": "near_miss_control", "failed": "trigger"},
+            screen_payload={"passed": False},
+            source_ref=None,
+        ),
+    )
+    with BacktestStore(path) as store:
+        store.save_sweep_candidates("sweep-abc123", asof, candidates)
+        loaded = store.load_sweep_candidates("sweep-abc123")
+        assert set(loaded) == {asof}
+        restored = loaded[asof]
+        assert len(restored) == 2
+        assert restored[0].symbol == "AAA"
+        assert restored[0].decimal_score() == Decimal("2.5")
+        assert isinstance(restored[0].asof, date)
+        assert restored[1].source_ref is None
+
+    with BacktestStore(path) as reopened:
+        assert reopened.load_sweep_candidates("sweep-abc123")[asof] == restored
+
+
+def test_sweep_candidates_empty_list_is_a_distinct_checkpoint(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    asof = date(2025, 6, 16)
+    with BacktestStore(path) as store:
+        assert store.load_sweep_candidates("sweep-x") == {}
+        store.save_sweep_candidates("sweep-x", asof, ())
+        loaded = store.load_sweep_candidates("sweep-x")
+        assert asof in loaded
+        assert loaded[asof] == ()
+
+
+def test_sweep_candidates_conflicting_resave_raises(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    asof = date(2025, 6, 16)
+    one = CaseCandidate(symbol="AAA", asof=asof, score=Decimal("1"), trigger={})
+    two = CaseCandidate(symbol="BBB", asof=asof, score=Decimal("2"), trigger={})
+    with BacktestStore(path) as store:
+        store.save_sweep_candidates("sweep-y", asof, (one,))
+        store.save_sweep_candidates("sweep-y", asof, (one,))  # idempotent
+        with pytest.raises(CaseConflictError):
+            store.save_sweep_candidates("sweep-y", asof, (two,))
+
+
+def test_clear_sweep_candidates_removes_only_that_key(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    asof = date(2025, 6, 16)
+    candidate = CaseCandidate(symbol="AAA", asof=asof, score=Decimal("1"), trigger={})
+    with BacktestStore(path) as store:
+        store.save_sweep_candidates("sweep-clear", asof, (candidate,))
+        store.save_sweep_candidates("sweep-keep", asof, (candidate,))
+        removed = store.clear_sweep_candidates("sweep-clear")
+        assert removed == 1
+        assert store.load_sweep_candidates("sweep-clear") == {}
+        assert asof in store.load_sweep_candidates("sweep-keep")
+
+
+def test_supersede_generation_job_deletes_pending_or_failed_but_not_running(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    request = _generation_request(_case())
+    with BacktestStore(path) as store:
+        store.ensure_generation_job(request)
+        store.supersede_generation_job(request.generation_key)
+        with store.transaction() as conn:
+            assert conn.execute(
+                "SELECT 1 FROM generation_jobs WHERE generation_key = ?",
+                (request.generation_key,),
+            ).fetchone() is None
+
+        # Superseding an unknown key is a harmless no-op.
+        store.supersede_generation_job(request.generation_key)
+
+        store.ensure_generation_job(request)
+        store.claim_next_generation_job()  # -> running
+        with pytest.raises(CaseConflictError):
+            store.supersede_generation_job(request.generation_key)
+
+
+def test_supersede_generation_job_rejects_completed_job(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    request = _generation_request(_case())
+    record = FrozenMemoRecord.terminal(
+        request, status="rejected", reason="fixture rejection",
+    )
+    with BacktestStore(path) as store:
+        store.ensure_generation_job(request)
+        claim = store.claim_next_generation_job()
+        store.finish_generation_job(claim, record)
+        with pytest.raises(CaseConflictError):
+            store.supersede_generation_job(request.generation_key)
+
+
+def test_fail_stale_runs_flips_only_old_running_rows(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    case = _case()
+    old_created = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    fresh_created = datetime(2025, 7, 20, tzinfo=timezone.utc)
+    with BacktestStore(path) as store:
+        store.insert_case(case)
+        store.create_run(
+            run_id="run-old", sleeve="research", start_date=case.asof,
+            end_date=case.asof, benchmark="SPY", settings={}, resolved_config={},
+            metadata={}, case_ids=[case.case_id], created_at=old_created,
+        )
+        store.create_run(
+            run_id="run-fresh", sleeve="research", start_date=case.asof,
+            end_date=case.asof, benchmark="SPY", settings={}, resolved_config={},
+            metadata={}, case_ids=[case.case_id], created_at=fresh_created,
+        )
+        store.finish_run("run-fresh")  # already terminal; must be untouched
+
+        threshold = datetime(2025, 7, 1, tzinfo=timezone.utc)
+        flipped = store.fail_stale_runs(older_than=threshold)
+        assert flipped == 1
+
+        with store.transaction() as conn:
+            rows = {
+                row["run_id"]: row["status"]
+                for row in conn.execute("SELECT run_id, status FROM runs")
+            }
+        assert rows == {"run-old": "failed", "run-fresh": "complete"}
+
+        # Idempotent: nothing left to flip on a second sweep.
+        assert store.fail_stale_runs(older_than=threshold) == 0
+
+
+def test_schema_three_store_migrates_to_v4_preserving_rows(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    case = _case()
+    with BacktestStore(path) as store:
+        store.insert_case(case)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TABLE IF EXISTS sweep_candidates")
+        conn.execute("PRAGMA user_version = 3")
+        conn.execute(
+            "UPDATE schema_metadata SET value = '3' WHERE key = 'schema_version'"
+        )
+    with BacktestStore(path) as migrated:
+        assert migrated.schema_version == SCHEMA_VERSION
+        assert "sweep_candidates" in migrated.table_names()
+        assert migrated.list_cases() == [case]
 
 
 def test_schema_one_store_migrates_learning_cache_tables(tmp_path):

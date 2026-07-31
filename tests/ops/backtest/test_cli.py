@@ -17,6 +17,7 @@ from ops.backtest.service import (
     generate_cases,
     prepare_cases,
     process_enqueued_generation,
+    run_cached_backtest,
 )
 from ops.backtest.store import BacktestStore
 from ops.cli import cli
@@ -106,6 +107,29 @@ def test_run_uses_exact_unconditioned_memo_not_newest_lesson_variant(tmp_path):
             "SELECT memo_key FROM decisions WHERE sequence = 0",
         ).fetchone()[0]
     assert chosen == baseline.memo_key
+
+
+def test_run_marks_run_failed_and_propagates_when_replay_is_interrupted(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    _seed_case(path)
+    cfg = OpsConfig(backtest_store_path=str(path))
+
+    def interrupted(**_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ops.backtest.service.replay_case", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_cached_backtest(
+            config=cfg, sleeve="research",
+            start=date(2025, 6, 1), end=date(2025, 6, 30),
+            case_count=cfg.backtest_case_count, settings={}, today=date(2025, 6, 30),
+        )
+
+    with BacktestStore(path) as store, store.transaction() as conn:
+        row = conn.execute("SELECT status FROM runs").fetchone()
+    assert row is not None
+    assert row["status"] == "failed"
 
 
 def test_run_missing_memo_fails_without_starting_a_run(tmp_path):
@@ -572,6 +596,56 @@ def test_generate_cli_defaults_controls_to_zero(tmp_path, monkeypatch):
     assert captured["controls_count"] == 0
 
 
+def test_generate_cli_passes_fresh_sweep_to_service(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--source", "reconstruction",
+        "--start", "2025-06-02", "--end", "2025-10-01", "--fresh-sweep",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["fresh_sweep"] is True
+
+
+def test_generate_cli_defaults_fresh_sweep_to_false(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    captured: dict = {}
+
+    def fake_generate_cases(**kwargs):
+        captured.update(kwargs)
+        return GenerationResult(total=0, cached=0, pending=0)
+
+    monkeypatch.setattr(
+        "ops.backtest.service.generate_cases", fake_generate_cases,
+    )
+    result = _invoke(CliRunner(), path, [
+        "backtest", "generate", "--start", "2025-06-02", "--end", "2025-10-01",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["fresh_sweep"] is False
+
+
+def test_generate_fresh_sweep_rejected_for_recorded_source(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    cfg = OpsConfig(backtest_store_path=str(path))
+    with pytest.raises(InvalidBacktestRequest, match="fresh-sweep"):
+        generate_cases(
+            config=cfg, sleeve="research", start=date(2025, 6, 2),
+            end=date(2026, 3, 31), case_count=40, today=date(2026, 7, 28),
+            source="recorded", fresh_sweep=True,
+        )
+
+
 def test_generate_explicit_preparer_receives_controls_count(tmp_path):
     path = tmp_path / "backtest.sqlite"
     cfg = OpsConfig(backtest_store_path=str(path))
@@ -821,18 +895,25 @@ def test_generate_append_top_up_ignores_controls_in_passer_budget(tmp_path):
     path = tmp_path / "backtest.sqlite"
     cfg = OpsConfig(backtest_store_path=str(path))
     with BacktestStore(path) as store:
-        store.insert_case(BacktestCase.create(
-            sleeve="research", symbol="AAA", asof=date(2025, 6, 15),
-            trigger={"kind": "historical_screener_replay"},
-        ))
-        store.insert_case(BacktestCase.create(
-            sleeve="research", symbol="NM1", asof=date(2025, 6, 16),
-            trigger={"kind": "near_miss_control"},
-        ))
-        store.insert_case(BacktestCase.create(
-            sleeve="research", symbol="NM2", asof=date(2025, 6, 17),
-            trigger={"kind": "near_miss_control"},
-        ))
+        for case in (
+            BacktestCase.create(
+                sleeve="research", symbol="AAA", asof=date(2025, 6, 15),
+                trigger={"kind": "historical_screener_replay"},
+            ),
+            BacktestCase.create(
+                sleeve="research", symbol="NM1", asof=date(2025, 6, 16),
+                trigger={"kind": "near_miss_control"},
+            ),
+            BacktestCase.create(
+                sleeve="research", symbol="NM2", asof=date(2025, 6, 17),
+                trigger={"kind": "near_miss_control"},
+            ),
+        ):
+            # Sealed (not orphan): Task 5 excludes manifest-less cases from
+            # `available`/`existing` so orphans resurface for re-prepare.
+            store.insert_case_with_manifest(
+                case, ContextManifest.create(case_id=case.case_id, asof=case.asof),
+            )
 
     seen: dict = {}
 

@@ -22,6 +22,7 @@ from ops.backtest.models import (
     canonical_json,
     stable_hash,
 )
+from ops.backtest.store import CaseConflictError
 from ops.research.models import ModelSpec, parse_model_spec
 
 GuardrailStatus = Literal["accepted", "rejected", "failed"]
@@ -251,6 +252,8 @@ class GenerationStore(Protocol):
 
     def requeue_generation_job(self, claim: GenerationClaim) -> None: ...
 
+    def supersede_generation_job(self, generation_key: str) -> None: ...
+
 
 @dataclass(frozen=True)
 class GenerationPlan:
@@ -284,7 +287,21 @@ def plan_generation(
         if store.get_frozen_memo(request.memo_key) is not None:
             cached.append(request.generation_key)
             continue
-        store.ensure_generation_job(request)
+        try:
+            store.ensure_generation_job(request)
+        except CaseConflictError as exc:
+            if "has different request data" not in str(exc):
+                raise  # a genuine identity conflict (different case) — not ours to fix
+            # The persisted job's content is stale (e.g. a richer hit payload
+            # after re-enqueue). If it never started or already failed, that's
+            # not a real conflict — supersede it and re-enqueue fresh instead
+            # of forcing an operator to reach for manual SQL.
+            store.supersede_generation_job(request.generation_key)
+            store.ensure_generation_job(request)
+            print(
+                f"backtest: superseded stale generation job {request.generation_key} "
+                "(request content changed since it was enqueued)"
+            )
         pending.append(request.generation_key)
     return GenerationPlan(ordered, tuple(cached), tuple(pending))
 

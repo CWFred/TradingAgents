@@ -8,16 +8,73 @@ the default that actually calls yfinance.  Money is carried as ``Decimal`` from
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+import concurrent.futures
+import math
+import os
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import TypeVar
 
 import pandas as pd
 
 HistoryFn = Callable[[str, date, date], "pd.DataFrame"]
+BatchDownloadFn = Callable[[Sequence[str], date, date], "pd.DataFrame"]
 
 _PROVIDER = "yfinance"
+
+# Hard wall-clock deadline on a single yfinance history call. One hung TCP
+# connection must not stall an entire sweep forever; per-symbol isolation
+# (backfill_symbol_windows, PriceCache.update) is powerless against a call
+# that never raises and never returns. Env-overridable so a live daemon can
+# be tuned without a code change.
+HISTORY_DEADLINE_SECONDS = 60.0
+_HISTORY_DEADLINE_ENV = "OPS_YF_DEADLINE_S"
+
+_T = TypeVar("_T")
+
+# Shared executor for all _with_deadline calls (module-level singleton, not
+# one-per-call). A timed-out call's worker thread is NOT cancelled — it keeps
+# running (or hanging) in the background holding whatever yfinance/requests
+# state it captured. A fresh executor per call would let that leak grow
+# unboundedly across a sweep, which is exactly the mechanism behind a prior
+# fd-leak incident (thread-stranded yfinance state) on the live daemon.
+# Routing every call through one bounded pool caps total stranded threads at
+# ``max_workers`` instead of letting them accumulate one per timeout.
+_DEADLINE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="yf-deadline"
+)
+
+
+def history_deadline_seconds() -> float:
+    """Per-call yfinance history deadline; overridable via ``OPS_YF_DEADLINE_S``."""
+    raw = os.environ.get(_HISTORY_DEADLINE_ENV)
+    return float(raw) if raw else HISTORY_DEADLINE_SECONDS
+
+
+def _with_deadline(fn: Callable[[], _T], seconds: float) -> _T:
+    """Run ``fn()`` with a hard wall-clock deadline; raise ``TimeoutError`` past it.
+
+    Submits to a shared, bounded, module-level ``ThreadPoolExecutor`` rather
+    than ``signal.alarm``, which only fires in the main thread and would
+    silently no-op (or raise) when called from a worker thread. Any
+    exception ``fn`` raises propagates unchanged; on a timeout,
+    ``future.result()`` raises ``concurrent.futures.TimeoutError`` (a
+    ``TimeoutError`` subclass).
+
+    Caution: on timeout the worker thread computing ``fn()`` is NOT
+    cancelled — it keeps running to completion (or hanging) in the
+    background, holding whatever state it captured. This is a deliberate,
+    accepted leak: yfinance/requests offer no cooperative cancellation, and
+    blocking here until the leaked call finishes would defeat the whole
+    point of a deadline. The leak is *bounded*, not unbounded, because every
+    call shares one fixed-size pool (see ``_DEADLINE_EXECUTOR``) instead of
+    spinning up a fresh executor per call — at worst ``max_workers`` threads
+    are ever stranded at once, not one per timeout across a sweep.
+    """
+    future = _DEADLINE_EXECUTOR.submit(fn)
+    return future.result(timeout=seconds)
 
 
 @dataclass(frozen=True)
@@ -58,17 +115,98 @@ def _default_history_fn(symbol: str, start: date, end: date) -> pd.DataFrame:
     # session is actually included.  ``auto_adjust=False`` keeps raw OHLC +
     # Adj Close; ``actions=True`` yields Dividends and Stock Splits columns.
     end_inclusive = end + timedelta(days=1)
-    frame = yf_retry(
-        lambda: ticker.history(
-            start=start.isoformat(),
-            end=end_inclusive.isoformat(),
-            auto_adjust=False,
-            actions=True,
-        )
+    frame = _with_deadline(
+        lambda: yf_retry(
+            lambda: ticker.history(
+                start=start.isoformat(),
+                end=end_inclusive.isoformat(),
+                auto_adjust=False,
+                actions=True,
+            )
+        ),
+        history_deadline_seconds(),
     )
     if getattr(frame.index, "tz", None) is not None:
         frame.index = frame.index.tz_localize(None)
     return frame
+
+
+def _default_batch_download_fn(
+    symbols: Sequence[str], start: date, end: date
+) -> pd.DataFrame:
+    """Real ``yf.download`` call for many tickers in one request."""
+    import yfinance as yf
+
+    from tradingagents.dataflows.symbol_utils import normalize_symbol
+
+    canonical = [normalize_symbol(symbol) for symbol in symbols]
+    end_inclusive = end + timedelta(days=1)
+    # The batch call runs sequentially under the hood (threads=False, see
+    # below), so it takes roughly N times as long as a single-ticker call.
+    # Budget one base deadline per 10 tickers (rounded up) rather than
+    # reusing the single-ticker deadline verbatim — otherwise a slow-but-
+    # healthy 50-ticker batch times out well before it can finish and falls
+    # back to fetching all 50 symbols one at a time, costing more than the
+    # batch call was meant to save.
+    batch_units = max(1, math.ceil(len(canonical) / 10))
+    deadline_seconds = history_deadline_seconds() * batch_units
+    frame = _with_deadline(
+        lambda: yf.download(
+            tickers=canonical,
+            start=start.isoformat(),
+            end=end_inclusive.isoformat(),
+            group_by="ticker",
+            auto_adjust=False,
+            actions=True,
+            threads=False,
+        ),
+        deadline_seconds,
+    )
+    if getattr(frame.index, "tz", None) is not None:
+        frame.index = frame.index.tz_localize(None)
+    return frame
+
+
+def batch_history_fn(
+    symbols: Sequence[str],
+    start: date,
+    end: date,
+    *,
+    download_fn: BatchDownloadFn | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Fetch daily bars for many symbols in one ``yf.download`` request.
+
+    Returns a ``{symbol: DataFrame}`` map, each frame shaped exactly like
+    the single-ticker frame ``yfinance_bar_fetcher`` already knows how to
+    parse (so callers feed it straight back in via
+    ``history_fn=lambda *_: frames[symbol]``). A symbol yfinance had no data
+    for (bad ticker, delisted, empty result) is simply absent from the
+    returned dict — the caller falls back to the per-symbol fetcher for it,
+    isolation-preserving by construction rather than by error handling here.
+    """
+    download = download_fn or _default_batch_download_fn
+    normalized_symbols = [symbol.strip().upper() for symbol in symbols]
+    frame = download(normalized_symbols, start, end)
+    if frame is None or frame.empty:
+        return {}
+
+    result: dict[str, pd.DataFrame] = {}
+    if isinstance(frame.columns, pd.MultiIndex):
+        from tradingagents.dataflows.symbol_utils import normalize_symbol
+
+        top_level = set(frame.columns.get_level_values(0))
+        for symbol in normalized_symbols:
+            canonical = normalize_symbol(symbol)
+            if canonical not in top_level:
+                continue
+            sub = frame[canonical].dropna(how="all")
+            if not sub.empty:
+                result[symbol] = sub
+    elif len(normalized_symbols) == 1:
+        sub = frame.dropna(how="all")
+        if not sub.empty:
+            result[normalized_symbols[0]] = sub
+    return result
 
 
 def yfinance_bar_fetcher(
