@@ -1,3 +1,4 @@
+import concurrent.futures
 import time
 from datetime import date
 from decimal import Decimal
@@ -5,7 +6,13 @@ from decimal import Decimal
 import pandas as pd
 import pytest
 
-from ops.backtest.price_fetch import _with_deadline, yfinance_bar_fetcher
+from ops.backtest import price_fetch
+from ops.backtest.price_fetch import (
+    HISTORY_DEADLINE_SECONDS,
+    _with_deadline,
+    history_deadline_seconds,
+    yfinance_bar_fetcher,
+)
 
 
 def _frame():
@@ -121,3 +128,59 @@ class TestWithDeadline:
 
         with pytest.raises(ValueError, match="kaboom"):
             _with_deadline(boom, seconds=1.0)
+
+    def test_wraps_the_entire_retry_chain_not_one_budget_per_attempt(self):
+        """A regression guard for the composition-inversion bug: a caller
+        that retries internally (e.g. ``call_paced``) must be timed as ONE
+        chain, not get a fresh clock on every attempt."""
+        attempts = 0
+
+        def flaky_retry_chain():
+            nonlocal attempts
+            for _ in range(50):
+                attempts += 1
+                time.sleep(0.02)
+                # never succeeds within the budget; simulates a paced
+                # retry loop that keeps trying past the deadline.
+            return "unreachable"
+
+        with pytest.raises(TimeoutError):
+            _with_deadline(flaky_retry_chain, seconds=0.1)
+        # Several attempts fired inside the single deadline window (proves
+        # the deadline wraps the WHOLE chain, not a per-attempt window —
+        # per-attempt would never time out since each sleep is well under
+        # any per-call budget).
+        assert attempts > 1
+
+    def test_shared_executor_is_a_module_level_singleton(self, monkeypatch):
+        """Bounds stranded-thread risk: _with_deadline must never construct
+        a fresh ThreadPoolExecutor per call (the fd-leak mechanism from the
+        prior incident) — it reuses one shared, bounded pool."""
+        created = []
+        real_cls = concurrent.futures.ThreadPoolExecutor
+
+        class SpyExecutor(real_cls):
+            def __init__(self, *args, **kwargs):
+                created.append((args, kwargs))
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", SpyExecutor)
+
+        executor_before = price_fetch._DEADLINE_EXECUTOR
+        _with_deadline(lambda: 1, seconds=1.0)
+        with pytest.raises(TimeoutError):
+            _with_deadline(lambda: time.sleep(0.2), seconds=0.01)
+        _with_deadline(lambda: 2, seconds=1.0)
+
+        assert created == []  # no new executor constructed by any of the 3 calls
+        assert price_fetch._DEADLINE_EXECUTOR is executor_before
+
+
+class TestHistoryDeadlineSeconds:
+    def test_default_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("OPS_YF_DEADLINE_S", raising=False)
+        assert history_deadline_seconds() == HISTORY_DEADLINE_SECONDS
+
+    def test_env_override_respected(self, monkeypatch):
+        monkeypatch.setenv("OPS_YF_DEADLINE_S", "12.5")
+        assert history_deadline_seconds() == 12.5

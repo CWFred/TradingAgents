@@ -8,6 +8,7 @@ calls per name.
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -15,9 +16,25 @@ from decimal import Decimal
 
 import yfinance as yf
 
-from ops.backtest.price_fetch import HISTORY_DEADLINE_SECONDS, _with_deadline
+from ops.backtest.price_fetch import _with_deadline
 from ops.universe.earnings import _safe_decimal
 from ops.universe.yf_pacing import call_paced
+
+# Deadline for the WHOLE paced-retry chain (pacing sleeps + all attempts),
+# not one budget per attempt — call_paced can retry internally, so wrapping
+# the deadline around a single attempt (as price_fetch.py does around one
+# yfinance call) would reset the clock on every retry and let the total
+# wall-clock time balloon past what the name implies. Wider than
+# HISTORY_DEADLINE_SECONDS to cover that whole chain. Env-overridable so a
+# live daemon can be tuned without a code change.
+PRICE_CONTEXT_DEADLINE_SECONDS = 120.0
+_PRICE_CONTEXT_DEADLINE_ENV = "OPS_YF_CONTEXT_DEADLINE_S"
+
+
+def price_context_deadline_seconds() -> float:
+    """Whole-chain price-context deadline; overridable via ``OPS_YF_CONTEXT_DEADLINE_S``."""
+    raw = os.environ.get(_PRICE_CONTEXT_DEADLINE_ENV)
+    return float(raw) if raw else PRICE_CONTEXT_DEADLINE_SECONDS
 
 
 @dataclass(frozen=True)
@@ -68,14 +85,14 @@ class PriceContext:
 def fetch_price_context(symbol: str) -> PriceContext | None:
     """6 years of daily closes; None (with a stderr diagnostic) on any fetch failure."""
     try:
-        hist = call_paced(
-            lambda: _with_deadline(
+        hist = _with_deadline(
+            lambda: call_paced(
                 lambda: yf.Ticker(symbol).history(
                     period="6y", auto_adjust=False, actions=True
                 ),
-                HISTORY_DEADLINE_SECONDS,
+                label="prices",
             ),
-            label="prices",
+            price_context_deadline_seconds(),
         )
     except Exception as exc:
         print(

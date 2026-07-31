@@ -9,6 +9,7 @@ the default that actually calls yfinance.  Money is carried as ``Decimal`` from
 from __future__ import annotations
 
 import concurrent.futures
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -24,35 +25,54 @@ _PROVIDER = "yfinance"
 # Hard wall-clock deadline on a single yfinance history call. One hung TCP
 # connection must not stall an entire sweep forever; per-symbol isolation
 # (backfill_symbol_windows, PriceCache.update) is powerless against a call
-# that never raises and never returns.
+# that never raises and never returns. Env-overridable so a live daemon can
+# be tuned without a code change.
 HISTORY_DEADLINE_SECONDS = 60.0
+_HISTORY_DEADLINE_ENV = "OPS_YF_DEADLINE_S"
 
 _T = TypeVar("_T")
+
+# Shared executor for all _with_deadline calls (module-level singleton, not
+# one-per-call). A timed-out call's worker thread is NOT cancelled — it keeps
+# running (or hanging) in the background holding whatever yfinance/requests
+# state it captured. A fresh executor per call would let that leak grow
+# unboundedly across a sweep, which is exactly the mechanism behind a prior
+# fd-leak incident (thread-stranded yfinance state) on the live daemon.
+# Routing every call through one bounded pool caps total stranded threads at
+# ``max_workers`` instead of letting them accumulate one per timeout.
+_DEADLINE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="yf-deadline"
+)
+
+
+def history_deadline_seconds() -> float:
+    """Per-call yfinance history deadline; overridable via ``OPS_YF_DEADLINE_S``."""
+    raw = os.environ.get(_HISTORY_DEADLINE_ENV)
+    return float(raw) if raw else HISTORY_DEADLINE_SECONDS
 
 
 def _with_deadline(fn: Callable[[], _T], seconds: float) -> _T:
     """Run ``fn()`` with a hard wall-clock deadline; raise ``TimeoutError`` past it.
 
-    Uses a single-worker ``ThreadPoolExecutor`` rather than ``signal.alarm``,
-    which only fires in the main thread and would silently no-op (or raise)
-    when called from a worker thread. Any exception ``fn`` raises propagates
-    unchanged; on a timeout, ``future.result()`` raises
-    ``concurrent.futures.TimeoutError`` (a ``TimeoutError`` subclass).
+    Submits to a shared, bounded, module-level ``ThreadPoolExecutor`` rather
+    than ``signal.alarm``, which only fires in the main thread and would
+    silently no-op (or raise) when called from a worker thread. Any
+    exception ``fn`` raises propagates unchanged; on a timeout,
+    ``future.result()`` raises ``concurrent.futures.TimeoutError`` (a
+    ``TimeoutError`` subclass).
 
     Caution: on timeout the worker thread computing ``fn()`` is NOT
-    cancelled — the executor is shut down with ``wait=False`` so this
-    function returns immediately, but the underlying call keeps running to
-    completion (or hanging) in the background. This is a deliberate,
+    cancelled — it keeps running to completion (or hanging) in the
+    background, holding whatever state it captured. This is a deliberate,
     accepted leak: yfinance/requests offer no cooperative cancellation, and
-    the alternative (blocking here until the leaked call finishes) would
-    defeat the whole point of a deadline.
+    blocking here until the leaked call finishes would defeat the whole
+    point of a deadline. The leak is *bounded*, not unbounded, because every
+    call shares one fixed-size pool (see ``_DEADLINE_EXECUTOR``) instead of
+    spinning up a fresh executor per call — at worst ``max_workers`` threads
+    are ever stranded at once, not one per timeout across a sweep.
     """
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(fn)
-    try:
-        return future.result(timeout=seconds)
-    finally:
-        executor.shutdown(wait=False)
+    future = _DEADLINE_EXECUTOR.submit(fn)
+    return future.result(timeout=seconds)
 
 
 @dataclass(frozen=True)
@@ -102,7 +122,7 @@ def _default_history_fn(symbol: str, start: date, end: date) -> pd.DataFrame:
                 actions=True,
             )
         ),
-        HISTORY_DEADLINE_SECONDS,
+        history_deadline_seconds(),
     )
     if getattr(frame.index, "tz", None) is not None:
         frame.index = frame.index.tz_localize(None)
