@@ -154,6 +154,14 @@ def find_insider_cluster_trigger(
 # amortized once per symbol instead of once per (symbol, asof).
 _SOURCES_MAX_FORM4_FILINGS = 250
 
+# Non-Form-4 trigger-form filings (13D/13G/TO/going-private/8-K/etc) hit the
+# same unbounded-sweep problem: the default ``list_filings`` limit is 100,
+# and a name with a busy filing history for these forms would silently lose
+# its oldest filings for early asofs in a long sweep with no signal that it
+# happened. Raise the cap well above any name we expect to see and flag when
+# it's hit, exactly like the Form 4 cap above.
+_SOURCES_MAX_TRIGGER_FILINGS = 500
+
 
 def _serialize_filing(f: edgar.Filing) -> dict[str, Any]:
     return {
@@ -239,13 +247,18 @@ def fetch_trigger_sources(
     hit ``_SOURCES_MAX_FORM4_FILINGS`` — i.e. the cap was reached, so older
     insider activity MAY be missing for asofs near the front of a long sweep.
     (Exactly-cap-many available filings is indistinguishable from more
-    existing beyond the cap, so this is deliberately conservative.)
+    existing beyond the cap, so this is deliberately conservative.) The same
+    reasoning, at ``_SOURCES_MAX_TRIGGER_FILINGS``, produces
+    ``edgar_filings_truncated`` for the non-Form-4 trigger-form listing.
     """
     from tradingagents.dataflows.form4 import get_insider_transactions
 
     _list_filings = list_filings or edgar.list_filings
     trigger_forms = set(edgar.CHANGE_TRIGGER_FORMS) - {"4"}
-    filings = _list_filings(symbol, forms=trigger_forms)
+    filings = _list_filings(
+        symbol, forms=trigger_forms, limit=_SOURCES_MAX_TRIGGER_FILINGS,
+    )
+    edgar_filings_truncated = len(filings) >= _SOURCES_MAX_TRIGGER_FILINGS
 
     form4_filings = _list_filings(
         symbol, forms={"4"}, since=date.min, limit=_SOURCES_MAX_FORM4_FILINGS,
@@ -265,6 +278,7 @@ def fetch_trigger_sources(
     return {
         "symbol": symbol,
         "edgar_filings": [_serialize_filing(f) for f in filings],
+        "edgar_filings_truncated": edgar_filings_truncated,
         "insider_transactions": [_serialize_txn(t) for t in txns],
         "insider_transactions_truncated": truncated,
     }
@@ -283,11 +297,21 @@ def triggers_from_sources(
     ``price_context`` (an object with ``recent_closes(asof=..., days=...)``,
     e.g. ``ops.research.prices.PriceContext``) is supplied.
     """
+    truncation_notes = []
+    if sources.get("edgar_filings_truncated"):
+        truncation_notes.append(
+            f"edgar trigger-form filings truncated at {_SOURCES_MAX_TRIGGER_FILINGS} "
+            "— older EDGAR-form triggers may be missing"
+        )
     if sources.get("insider_transactions_truncated"):
+        truncation_notes.append(
+            f"insider transactions truncated at {_SOURCES_MAX_FORM4_FILINGS} "
+            "Form 4 filings — older insider activity may be missing"
+        )
+    if truncation_notes:
         logger.warning(
-            "%s: insider transactions source truncated at %d Form 4 filings "
-            "— older insider activity may be missing for asof=%s",
-            sources.get("symbol", "?"), _SOURCES_MAX_FORM4_FILINGS, asof,
+            "%s: source(s) truncated for asof=%s: %s",
+            sources.get("symbol", "?"), asof, "; ".join(truncation_notes),
         )
     since = asof - timedelta(days=lookback_days)
     out: list[Trigger] = []
@@ -361,9 +385,11 @@ def _legacy_sources_for_find_triggers(
     return {
         "symbol": ticker,
         "edgar_filings": [_serialize_filing(f) for f in filings],
-        "insider_transactions": [_serialize_txn(t) for t in txns],
         # find_triggers' original per-asof fetch never hit the sweep-sized
-        # cap that fetch_trigger_sources applies; nothing to flag.
+        # caps that fetch_trigger_sources applies (windowed by ``since``,
+        # not by an explicit ``limit``); nothing to flag for either source.
+        "edgar_filings_truncated": False,
+        "insider_transactions": [_serialize_txn(t) for t in txns],
         "insider_transactions_truncated": False,
     }
 

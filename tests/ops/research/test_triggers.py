@@ -327,3 +327,79 @@ def test_triggers_from_sources_warns_only_when_truncated(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger="ops.research.triggers"):
         triggers_from_sources(under_cap, asof=date(2026, 7, 1))
     assert caplog.records == []
+
+
+def _trigger_form_filing(i: int) -> Filing:
+    return Filing(
+        ticker="WIDG", cik=1, accession_number=f"acc-13d-{i}", form="SC 13D",
+        filing_date=date(2026, 6, 1), report_date=None,
+        primary_document=f"13d-{i}.htm",
+    )
+
+
+def test_fetch_trigger_sources_flags_truncation_at_trigger_form_cap(monkeypatch):
+    import ops.research.triggers as triggers_mod
+
+    monkeypatch.setattr(triggers_mod, "_SOURCES_MAX_TRIGGER_FILINGS", 2)
+
+    def _list_filings(ticker, *, forms=None, since=None, limit=100):
+        filings = [_trigger_form_filing(0), _trigger_form_filing(1), _trigger_form_filing(2)]
+        return filings[:limit]
+
+    at_cap = fetch_trigger_sources("WIDG", list_filings=_list_filings)
+    assert at_cap["edgar_filings_truncated"] is True
+
+    def _list_filings_under(ticker, *, forms=None, since=None, limit=100):
+        filings = [_trigger_form_filing(0)]
+        return filings[:limit]
+
+    under_cap = fetch_trigger_sources("WIDG", list_filings=_list_filings_under)
+    assert under_cap["edgar_filings_truncated"] is False
+
+
+def test_fetch_trigger_sources_passes_explicit_trigger_filings_limit(monkeypatch):
+    import ops.research.triggers as triggers_mod
+
+    seen_limits = []
+
+    def _list_filings(ticker, *, forms=None, since=None, limit=100):
+        if forms is not None and "4" not in forms:
+            seen_limits.append(limit)
+        return []
+
+    fetch_trigger_sources("WIDG", list_filings=_list_filings)
+    assert seen_limits == [triggers_mod._SOURCES_MAX_TRIGGER_FILINGS]
+
+
+def test_triggers_from_sources_warns_when_edgar_filings_truncated(monkeypatch, caplog):
+    import ops.research.triggers as triggers_mod
+
+    monkeypatch.setattr(triggers_mod, "_SOURCES_MAX_TRIGGER_FILINGS", 2)
+
+    def _list_filings(ticker, *, forms=None, since=None, limit=100):
+        filings = [_trigger_form_filing(0), _trigger_form_filing(1), _trigger_form_filing(2)]
+        return filings[:limit]
+
+    at_cap = fetch_trigger_sources("WIDG", list_filings=_list_filings)
+
+    with caplog.at_level("WARNING", logger="ops.research.triggers"):
+        triggers_from_sources(at_cap, asof=date(2026, 7, 1))
+    assert any("edgar" in rec.message.lower() and "truncated" in rec.message for rec in caplog.records)
+
+
+def test_legacy_sources_for_find_triggers_never_flags_edgar_truncation():
+    import ops.research.triggers as triggers_mod
+
+    filings = [_trigger_form_filing(i) for i in range(3)]
+    sources = triggers_mod._legacy_sources_for_find_triggers(
+        "WIDG", asof=date(2026, 7, 1), lookback_days=90,
+        list_filings=lambda t, **kw: filings,
+        transactions_fetcher=lambda t, *, since, **kw: [],
+    )
+    assert sources["edgar_filings_truncated"] is False
+
+
+def test_fetch_trigger_sources_blob_is_json_serializable_with_truncation_flags():
+    filings = [_trigger_form_filing(0)]
+    sources = fetch_trigger_sources("WIDG", list_filings=lambda t, **kw: filings)
+    json.dumps(sources)

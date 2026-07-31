@@ -9,6 +9,7 @@ the default that actually calls yfinance.  Money is carried as ``Decimal`` from
 from __future__ import annotations
 
 import concurrent.futures
+import math
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -140,6 +141,15 @@ def _default_batch_download_fn(
 
     canonical = [normalize_symbol(symbol) for symbol in symbols]
     end_inclusive = end + timedelta(days=1)
+    # The batch call runs sequentially under the hood (threads=False, see
+    # below), so it takes roughly N times as long as a single-ticker call.
+    # Budget one base deadline per 10 tickers (rounded up) rather than
+    # reusing the single-ticker deadline verbatim — otherwise a slow-but-
+    # healthy 50-ticker batch times out well before it can finish and falls
+    # back to fetching all 50 symbols one at a time, costing more than the
+    # batch call was meant to save.
+    batch_units = max(1, math.ceil(len(canonical) / 10))
+    deadline_seconds = history_deadline_seconds() * batch_units
     frame = _with_deadline(
         lambda: yf.download(
             tickers=canonical,
@@ -150,7 +160,7 @@ def _default_batch_download_fn(
             actions=True,
             threads=False,
         ),
-        history_deadline_seconds(),
+        deadline_seconds,
     )
     if getattr(frame.index, "tz", None) is not None:
         frame.index = frame.index.tz_localize(None)

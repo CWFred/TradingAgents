@@ -253,6 +253,44 @@ class TestBatchHistoryFn:
         assert set(result) == {"AAA"}
 
 
+class TestBatchDownloadDeadlineScaling:
+    def test_fifty_symbol_batch_gets_five_times_the_deadline(self, monkeypatch):
+        captured = []
+
+        def fake_with_deadline(fn, seconds):
+            captured.append(seconds)
+            return pd.DataFrame()
+
+        monkeypatch.setattr(price_fetch, "_with_deadline", fake_with_deadline)
+        symbols = [f"SYM{i}" for i in range(50)]
+        price_fetch._default_batch_download_fn(symbols, date(2025, 6, 2), date(2025, 6, 3))
+        assert captured == [300.0]
+
+    def test_five_symbol_batch_gets_base_deadline(self, monkeypatch):
+        captured = []
+
+        def fake_with_deadline(fn, seconds):
+            captured.append(seconds)
+            return pd.DataFrame()
+
+        monkeypatch.setattr(price_fetch, "_with_deadline", fake_with_deadline)
+        symbols = [f"SYM{i}" for i in range(5)]
+        price_fetch._default_batch_download_fn(symbols, date(2025, 6, 2), date(2025, 6, 3))
+        assert captured == [60.0]
+
+    def test_eleven_symbol_batch_rounds_up_to_two_units(self, monkeypatch):
+        captured = []
+
+        def fake_with_deadline(fn, seconds):
+            captured.append(seconds)
+            return pd.DataFrame()
+
+        monkeypatch.setattr(price_fetch, "_with_deadline", fake_with_deadline)
+        symbols = [f"SYM{i}" for i in range(11)]
+        price_fetch._default_batch_download_fn(symbols, date(2025, 6, 2), date(2025, 6, 3))
+        assert captured == [120.0]
+
+
 class TestHistoryDeadlineSeconds:
     def test_default_when_env_unset(self, monkeypatch):
         monkeypatch.delenv("OPS_YF_DEADLINE_S", raising=False)
