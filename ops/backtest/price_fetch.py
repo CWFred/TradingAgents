@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -19,6 +19,7 @@ from typing import TypeVar
 import pandas as pd
 
 HistoryFn = Callable[[str, date, date], "pd.DataFrame"]
+BatchDownloadFn = Callable[[Sequence[str], date, date], "pd.DataFrame"]
 
 _PROVIDER = "yfinance"
 
@@ -127,6 +128,75 @@ def _default_history_fn(symbol: str, start: date, end: date) -> pd.DataFrame:
     if getattr(frame.index, "tz", None) is not None:
         frame.index = frame.index.tz_localize(None)
     return frame
+
+
+def _default_batch_download_fn(
+    symbols: Sequence[str], start: date, end: date
+) -> pd.DataFrame:
+    """Real ``yf.download`` call for many tickers in one request."""
+    import yfinance as yf
+
+    from tradingagents.dataflows.symbol_utils import normalize_symbol
+
+    canonical = [normalize_symbol(symbol) for symbol in symbols]
+    end_inclusive = end + timedelta(days=1)
+    frame = _with_deadline(
+        lambda: yf.download(
+            tickers=canonical,
+            start=start.isoformat(),
+            end=end_inclusive.isoformat(),
+            group_by="ticker",
+            auto_adjust=False,
+            actions=True,
+            threads=False,
+        ),
+        history_deadline_seconds(),
+    )
+    if getattr(frame.index, "tz", None) is not None:
+        frame.index = frame.index.tz_localize(None)
+    return frame
+
+
+def batch_history_fn(
+    symbols: Sequence[str],
+    start: date,
+    end: date,
+    *,
+    download_fn: BatchDownloadFn | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Fetch daily bars for many symbols in one ``yf.download`` request.
+
+    Returns a ``{symbol: DataFrame}`` map, each frame shaped exactly like
+    the single-ticker frame ``yfinance_bar_fetcher`` already knows how to
+    parse (so callers feed it straight back in via
+    ``history_fn=lambda *_: frames[symbol]``). A symbol yfinance had no data
+    for (bad ticker, delisted, empty result) is simply absent from the
+    returned dict — the caller falls back to the per-symbol fetcher for it,
+    isolation-preserving by construction rather than by error handling here.
+    """
+    download = download_fn or _default_batch_download_fn
+    normalized_symbols = [symbol.strip().upper() for symbol in symbols]
+    frame = download(normalized_symbols, start, end)
+    if frame is None or frame.empty:
+        return {}
+
+    result: dict[str, pd.DataFrame] = {}
+    if isinstance(frame.columns, pd.MultiIndex):
+        from tradingagents.dataflows.symbol_utils import normalize_symbol
+
+        top_level = set(frame.columns.get_level_values(0))
+        for symbol in normalized_symbols:
+            canonical = normalize_symbol(symbol)
+            if canonical not in top_level:
+                continue
+            sub = frame[canonical].dropna(how="all")
+            if not sub.empty:
+                result[symbol] = sub
+    elif len(normalized_symbols) == 1:
+        sub = frame.dropna(how="all")
+        if not sub.empty:
+            result[normalized_symbols[0]] = sub
+    return result
 
 
 def yfinance_bar_fetcher(

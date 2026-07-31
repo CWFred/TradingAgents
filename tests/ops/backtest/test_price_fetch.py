@@ -10,6 +10,7 @@ from ops.backtest import price_fetch
 from ops.backtest.price_fetch import (
     HISTORY_DEADLINE_SECONDS,
     _with_deadline,
+    batch_history_fn,
     history_deadline_seconds,
     yfinance_bar_fetcher,
 )
@@ -174,6 +175,82 @@ class TestWithDeadline:
 
         assert created == []  # no new executor constructed by any of the 3 calls
         assert price_fetch._DEADLINE_EXECUTOR is executor_before
+
+
+class TestBatchHistoryFn:
+    def test_maps_multiindex_frame_to_per_symbol_frames(self):
+        idx = pd.to_datetime(["2025-06-02", "2025-06-03"])
+        data = {}
+        for i, sym in enumerate(["AAA", "BBB"]):
+            base = 10.0 * (i + 1)
+            data[(sym, "Open")] = [base, base + 1]
+            data[(sym, "High")] = [base + 1, base + 2]
+            data[(sym, "Low")] = [base - 1, base]
+            data[(sym, "Close")] = [base, base + 1]
+            data[(sym, "Adj Close")] = [base, base + 1]
+            data[(sym, "Volume")] = [100, 200]
+            data[(sym, "Dividends")] = [0.0, 0.0]
+            data[(sym, "Stock Splits")] = [0.0, 0.0]
+        frame = pd.DataFrame(data, index=idx)
+        frame.columns = pd.MultiIndex.from_tuples(frame.columns)
+
+        def fake_download(symbols, start, end):
+            return frame
+
+        result = batch_history_fn(
+            ["AAA", "BBB"], date(2025, 6, 2), date(2025, 6, 3),
+            download_fn=fake_download,
+        )
+
+        assert set(result) == {"AAA", "BBB"}
+        bars_aaa = yfinance_bar_fetcher(
+            "AAA", date(2025, 6, 2), date(2025, 6, 3),
+            history_fn=lambda *_: result["AAA"],
+        )
+        assert bars_aaa[0].close == Decimal("10")
+        bars_bbb = yfinance_bar_fetcher(
+            "BBB", date(2025, 6, 2), date(2025, 6, 3),
+            history_fn=lambda *_: result["BBB"],
+        )
+        assert bars_bbb[0].close == Decimal("20")
+
+    def test_single_ticker_non_multiindex_shape(self):
+        frame = _frame()
+
+        def fake_download(symbols, start, end):
+            return frame
+
+        result = batch_history_fn(
+            ["ACMR"], date(2025, 6, 2), date(2025, 6, 3),
+            download_fn=fake_download,
+        )
+
+        assert set(result) == {"ACMR"}
+        bars = yfinance_bar_fetcher(
+            "ACMR", date(2025, 6, 2), date(2025, 6, 3),
+            history_fn=lambda *_: result["ACMR"],
+        )
+        assert bars[0].close == Decimal("10")
+
+    def test_symbol_missing_from_download_result_is_simply_absent(self):
+        idx = pd.to_datetime(["2025-06-02"])
+        columns = pd.MultiIndex.from_tuples([
+            ("AAA", "Open"), ("AAA", "High"), ("AAA", "Low"), ("AAA", "Close"),
+            ("AAA", "Adj Close"), ("AAA", "Volume"),
+        ])
+        frame = pd.DataFrame(
+            [[10.0, 11.0, 9.0, 10.0, 10.0, 100]], index=idx, columns=columns,
+        )
+
+        def fake_download(symbols, start, end):
+            return frame
+
+        result = batch_history_fn(
+            ["AAA", "ZZZ"], date(2025, 6, 2), date(2025, 6, 2),
+            download_fn=fake_download,
+        )
+
+        assert set(result) == {"AAA"}
 
 
 class TestHistoryDeadlineSeconds:

@@ -299,7 +299,10 @@ def backtest_prices(sleeve: str, start: str, end: str) -> None:
             )
     except Exception as exc:
         raise _backtest_error(exc) from exc
-    click.echo(f"prices: {summary.symbols} symbol(s), {summary.bars} bar(s)")
+    click.echo(
+        f"prices: {summary.symbols} symbol(s), {summary.bars} bar(s), "
+        f"{summary.skipped} skipped (already covered)"
+    )
     if summary.failures:
         click.echo(f"failures: {len(summary.failures)}")
         for symbol, reason in summary.failures:

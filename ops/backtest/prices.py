@@ -241,6 +241,25 @@ class PriceCache:
                 )
         return self.upsert_bars(supplied, fetched_at=fetched_at)
 
+    def coverage(self, symbol: str) -> tuple[date, date] | None:
+        """MIN/MAX cached session for ``symbol``, one query; ``None`` if uncached.
+
+        This assumes no interior gaps between the earliest and latest cached
+        session — acceptable here because callers only use it as a cheap
+        "is there anything to fetch" pre-check, upserts are idempotent, and
+        any real gap self-heals the next time that sub-range is (re)fetched.
+        It is not a substitute for a full per-session presence check.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MIN(session) AS lo, MAX(session) AS hi "
+                "FROM price_bars WHERE symbol = ?",
+                (symbol.strip().upper(),),
+            ).fetchone()
+        if row is None or row["lo"] is None:
+            return None
+        return date.fromisoformat(row["lo"]), date.fromisoformat(row["hi"])
+
     def _read_rows(
         self,
         symbol: str,
