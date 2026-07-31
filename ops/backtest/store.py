@@ -893,6 +893,45 @@ class BacktestStore:
                 ),
             )
 
+    def supersede_generation_job(self, generation_key: str) -> None:
+        """Discard a stale (never-started or failed) job so it can be re-enqueued.
+
+        A job that is ``running`` or ``complete`` reflects real in-flight or
+        finished work; deleting it out from under that work would be a data
+        loss bug, so those statuses raise instead.
+        """
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM generation_jobs WHERE generation_key = ?",
+                (generation_key,),
+            ).fetchone()
+            if row is None:
+                return
+            if row["status"] not in ("pending", "failed"):
+                raise CaseConflictError(
+                    f"generation key {generation_key} is {row['status']} "
+                    "and cannot be superseded"
+                )
+            conn.execute(
+                "DELETE FROM generation_jobs WHERE generation_key = ?",
+                (generation_key,),
+            )
+
+    def fail_stale_runs(self, older_than: datetime) -> int:
+        """Sweep ``running`` runs abandoned by a killed process; return count flipped."""
+        if older_than.tzinfo is None or older_than.utcoffset() is None:
+            raise ValueError("older_than must be timezone-aware")
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE runs SET status = 'failed', completed_at = ? "
+                "WHERE status = 'running' AND created_at < ?",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    older_than.astimezone(timezone.utc).isoformat(),
+                ),
+            )
+            return cursor.rowcount
+
     def enqueue_generation_jobs(self, generation_keys: Sequence[str]) -> int:
         """Opt pending jobs into automatic background processing."""
         keys = tuple(dict.fromkeys(generation_keys))

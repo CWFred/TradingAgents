@@ -17,6 +17,7 @@ from ops.backtest.service import (
     generate_cases,
     prepare_cases,
     process_enqueued_generation,
+    run_cached_backtest,
 )
 from ops.backtest.store import BacktestStore
 from ops.cli import cli
@@ -106,6 +107,29 @@ def test_run_uses_exact_unconditioned_memo_not_newest_lesson_variant(tmp_path):
             "SELECT memo_key FROM decisions WHERE sequence = 0",
         ).fetchone()[0]
     assert chosen == baseline.memo_key
+
+
+def test_run_marks_run_failed_and_propagates_when_replay_is_interrupted(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    _seed_case(path)
+    cfg = OpsConfig(backtest_store_path=str(path))
+
+    def interrupted(**_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("ops.backtest.service.replay_case", interrupted)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_cached_backtest(
+            config=cfg, sleeve="research",
+            start=date(2025, 6, 1), end=date(2025, 6, 30),
+            case_count=cfg.backtest_case_count, settings={}, today=date(2025, 6, 30),
+        )
+
+    with BacktestStore(path) as store, store.transaction() as conn:
+        row = conn.execute("SELECT status FROM runs").fetchone()
+    assert row is not None
+    assert row["status"] == "failed"
 
 
 def test_run_missing_memo_fails_without_starting_a_run(tmp_path):

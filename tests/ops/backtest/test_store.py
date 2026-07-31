@@ -581,6 +581,75 @@ def test_clear_sweep_candidates_removes_only_that_key(tmp_path):
         assert asof in store.load_sweep_candidates("sweep-keep")
 
 
+def test_supersede_generation_job_deletes_pending_or_failed_but_not_running(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    request = _generation_request(_case())
+    with BacktestStore(path) as store:
+        store.ensure_generation_job(request)
+        store.supersede_generation_job(request.generation_key)
+        with store.transaction() as conn:
+            assert conn.execute(
+                "SELECT 1 FROM generation_jobs WHERE generation_key = ?",
+                (request.generation_key,),
+            ).fetchone() is None
+
+        # Superseding an unknown key is a harmless no-op.
+        store.supersede_generation_job(request.generation_key)
+
+        store.ensure_generation_job(request)
+        store.claim_next_generation_job()  # -> running
+        with pytest.raises(CaseConflictError):
+            store.supersede_generation_job(request.generation_key)
+
+
+def test_supersede_generation_job_rejects_completed_job(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    request = _generation_request(_case())
+    record = FrozenMemoRecord.terminal(
+        request, status="rejected", reason="fixture rejection",
+    )
+    with BacktestStore(path) as store:
+        store.ensure_generation_job(request)
+        claim = store.claim_next_generation_job()
+        store.finish_generation_job(claim, record)
+        with pytest.raises(CaseConflictError):
+            store.supersede_generation_job(request.generation_key)
+
+
+def test_fail_stale_runs_flips_only_old_running_rows(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    case = _case()
+    old_created = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    fresh_created = datetime(2025, 7, 20, tzinfo=timezone.utc)
+    with BacktestStore(path) as store:
+        store.insert_case(case)
+        store.create_run(
+            run_id="run-old", sleeve="research", start_date=case.asof,
+            end_date=case.asof, benchmark="SPY", settings={}, resolved_config={},
+            metadata={}, case_ids=[case.case_id], created_at=old_created,
+        )
+        store.create_run(
+            run_id="run-fresh", sleeve="research", start_date=case.asof,
+            end_date=case.asof, benchmark="SPY", settings={}, resolved_config={},
+            metadata={}, case_ids=[case.case_id], created_at=fresh_created,
+        )
+        store.finish_run("run-fresh")  # already terminal; must be untouched
+
+        threshold = datetime(2025, 7, 1, tzinfo=timezone.utc)
+        flipped = store.fail_stale_runs(older_than=threshold)
+        assert flipped == 1
+
+        with store.transaction() as conn:
+            rows = {
+                row["run_id"]: row["status"]
+                for row in conn.execute("SELECT run_id, status FROM runs")
+            }
+        assert rows == {"run-old": "failed", "run-fresh": "complete"}
+
+        # Idempotent: nothing left to flip on a second sweep.
+        assert store.fail_stale_runs(older_than=threshold) == 0
+
+
 def test_schema_three_store_migrates_to_v4_preserving_rows(tmp_path):
     path = tmp_path / "backtest.sqlite"
     case = _case()

@@ -347,6 +347,7 @@ def run_cached_backtest(
         raise InvalidBacktestRequest("run timestamp must be timezone-aware")
 
     with BacktestStore(config.backtest_store_path, cutoff=config.backtest_cutoff) as store:
+        store.fail_stale_runs(older_than=when - timedelta(hours=24))
         effective_cutoff = store.effective_cutoff
         _validate_window(
             start=start, end=end, today=today, cutoff=effective_cutoff,
@@ -421,6 +422,7 @@ def run_cached_backtest(
             case_ids=[case.case_id for case in cases], created_at=when,
         )
         prices = PriceCache(config.backtest_store_path)
+        run_succeeded = False
         try:
             for case in cases:
                 record = records[case.case_id]
@@ -491,10 +493,13 @@ def run_cached_backtest(
                     ),
                 )
                 store.save_replay_evaluation(replay, outcomes, result)
-        except Exception:
-            store.finish_run(run_id, status="failed")
-            raise
-        store.finish_run(run_id)
+            run_succeeded = True
+        finally:
+            # Any escape -- including KeyboardInterrupt/SystemExit from a
+            # killed replay, not just Exception -- must not leave the run
+            # stuck at 'running' forever; a stale row is a lie about the
+            # backtest's outcome and blocks future replays from noticing it.
+            store.finish_run(run_id, status="complete" if run_succeeded else "failed")
 
     return BacktestRunResult(
         run_id=run_id, case_count=len(cases),

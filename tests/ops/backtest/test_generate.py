@@ -25,7 +25,7 @@ from ops.backtest.service import (
     _generation_requests,
     generate_cases,
 )
-from ops.backtest.store import BacktestStore
+from ops.backtest.store import BacktestStore, CaseConflictError
 from ops.config import OpsConfig
 
 LOCAL_MODEL = "openai_compatible:ds4@http://127.0.0.1:8000/v1"
@@ -198,6 +198,62 @@ def test_plan_is_oldest_first_idempotent_and_skips_frozen_cache():
     assert first.cached == (middle.generation_key,)
     assert first.pending == (oldest.generation_key, newest.generation_key)
     assert second.pending == first.pending
+
+
+def _mismatched_pair():
+    """Two requests sharing a generation_key but differing only in hit_payload.
+
+    ``hit_payload`` is stored verbatim in the persisted request content but is
+    NOT part of the identity hash that produces ``generation_key``, so this is
+    the real-world shape of "content changed after enqueue" (e.g. a richer
+    screen payload) without minting a new key.
+    """
+    case = _case("ABC", date(2025, 6, 15))
+    item = ContextItem.create(
+        kind="filing", source_ref="ABC-10k", available_at=case.asof, content="known",
+    )
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof, included=[item])
+    kwargs = {
+        "case": case, "manifest": manifest,
+        "brain_version": "brain-v1", "prompt_version": "prompt-v1",
+        "evidence_model_id": LOCAL_MODEL, "thesis_model_id": LOCAL_MODEL,
+        "lesson_fingerprint": "lessons-v1",
+    }
+    original = GenerationRequest.create(
+        **kwargs, hit_payload={"symbol": "ABC", "asof": case.asof.isoformat(), "note": "v1"},
+    )
+    richer = GenerationRequest.create(
+        **kwargs,
+        hit_payload={"symbol": "ABC", "asof": case.asof.isoformat(), "note": "v2-richer"},
+    )
+    assert original.generation_key == richer.generation_key
+    assert original != richer
+    return original, richer
+
+
+def test_plan_generation_auto_supersedes_pending_job_on_content_change(tmp_path, capsys):
+    original, richer = _mismatched_pair()
+    path = tmp_path / "backtest.sqlite"
+    with BacktestStore(path) as store:
+        plan_generation([original], store=store)
+
+        plan = plan_generation([richer], store=store)
+
+        assert plan.pending == (richer.generation_key,)
+        claim = store.claim_next_generation_job()
+        assert claim.generation_key == richer.generation_key
+
+    assert "superseded" in capsys.readouterr().out.lower()
+
+
+def test_plan_generation_still_raises_when_running_job_content_changes(tmp_path):
+    original, richer = _mismatched_pair()
+    path = tmp_path / "backtest.sqlite"
+    with BacktestStore(path) as store:
+        plan_generation([original], store=store)
+        store.claim_next_generation_job()  # -> running: a real conflict now
+        with pytest.raises(CaseConflictError):
+            plan_generation([richer], store=store)
 
 
 @dataclass
