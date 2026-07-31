@@ -800,19 +800,22 @@ def _reconstruction_prepare_cases(
     from ops.scheduler.market_calendar import MarketCalendar
 
     if fetcher is None:
+        from ops.backtest.fetch_cache import FetchCache, default_fetch_cache_path
         from ops.backtest.historical_source import ReconstructionScreenerFetcher
         from ops.research.run import fetch_price_context
-        from ops.research.triggers import find_triggers
         from ops.universe.smallcap import build_smallcap_universe
         from tradingagents.dataflows import edgar
         from tradingagents.dataflows.edgar_facts import get_company_facts
 
         edgar.get_user_agent()  # fail fast, same as run_screen
         universe = universe if universe is not None else build_smallcap_universe()
+        # No explicit triggers_finder: this takes the disk-backed cached path
+        # (trigger sources/facts/price context all through FetchCache) --
+        # see ReconstructionScreenerFetcher's docstring.
         fetcher = ReconstructionScreenerFetcher(
             universe=universe, facts_fetcher=get_company_facts,
             price_context_fetcher=fetch_price_context,
-            triggers_finder=find_triggers,
+            fetch_cache=FetchCache(default_fetch_cache_path()),
             include_near_misses=controls_count > 0,
         )
 
