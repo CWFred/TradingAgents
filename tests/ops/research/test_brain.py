@@ -129,13 +129,13 @@ def _price_fetcher(symbol):
     return PriceContext(closes={TODAY: Decimal("4.10")})
 
 
-def _run(evidence_llm, thesis_llm, memo_store, hit=None):
+def _run(evidence_llm, thesis_llm, memo_store, hit=None, lessons=()):
     return research_hit(
         hit or _hit(), evidence_llm=evidence_llm, thesis_llm=thesis_llm,
         memo_store=memo_store,
         list_filings=lambda ticker, **kw: FILINGS,
         fetch_text=lambda f, **kw: TEXTS[f.accession_number],
-        price_fetcher=_price_fetcher, today=TODAY,
+        price_fetcher=_price_fetcher, today=TODAY, lessons=lessons,
     )
 
 
@@ -197,6 +197,23 @@ def test_completed_hit_resume_reuses_memo_without_any_llm_work(memo_store):
     assert evidence.prompts == []
     assert thesis.prompts == []
     assert len(memo_store.list()) == 1
+
+
+def test_research_hit_injects_lessons_block_into_memo_prompt(memo_store):
+    thesis_llm = FakeLLM(["bear case", _draft()])
+    _run(
+        _good_evidence_llm(), thesis_llm, memo_store,
+        lessons=("Demand a named mechanism for margin expansion.",),
+    )
+    memo_prompts = [p for p in thesis_llm.prompts if "PROCESS LESSONS" in p]
+    assert memo_prompts, "lessons block missing from thesis prompt"
+    assert "named mechanism" in memo_prompts[0]
+
+
+def test_research_hit_without_lessons_has_no_lessons_block(memo_store):
+    thesis_llm = FakeLLM(["bear case", _draft()])
+    _run(_good_evidence_llm(), thesis_llm, memo_store)
+    assert all("PROCESS LESSONS" not in p for p in thesis_llm.prompts)
 
 
 def test_uncited_evidence_stripped_and_thin_research_fails(memo_store):

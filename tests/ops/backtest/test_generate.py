@@ -328,6 +328,48 @@ def test_research_adapter_uses_only_manifest_inputs_and_never_calls_live_fetcher
     assert json.loads(record.memo_json)["as_of_date"] == request.case.asof.isoformat()
 
 
+def test_generate_research_memo_passes_lesson_texts():
+    request = _request()
+    captured = {}
+
+    def fake_research(hit, **kwargs):
+        captured["lessons"] = kwargs.get("lessons")
+        memo = _Memo("memo-1", request.case.symbol, request.case.asof)
+        kwargs["memo_store"].save(memo)
+        return SimpleNamespace(
+            status="researched", memo_id=memo.memo_id,
+            recommendation="buy", errors=[],
+        )
+
+    generate_research_memo(
+        request, evidence_llm=object(), thesis_llm=object(),
+        research_fn=fake_research, lessons=("only sealed lesson text",),
+    )
+
+    assert captured["lessons"] == ("only sealed lesson text",)
+
+
+def test_generate_research_memo_omits_lessons_kwarg_when_empty():
+    request = _request()
+    captured = {}
+
+    def fake_research(hit, **kwargs):
+        captured["has_lessons"] = "lessons" in kwargs
+        memo = _Memo("memo-1", request.case.symbol, request.case.asof)
+        kwargs["memo_store"].save(memo)
+        return SimpleNamespace(
+            status="researched", memo_id=memo.memo_id,
+            recommendation="buy", errors=[],
+        )
+
+    generate_research_memo(
+        request, evidence_llm=object(), thesis_llm=object(),
+        research_fn=fake_research,
+    )
+
+    assert captured["has_lessons"] is False
+
+
 def test_generation_rejects_unsealed_precedent_memos():
     request = _request()
     precedent = SimpleNamespace(
@@ -528,6 +570,34 @@ def test_generation_requests_default_raise_mode_still_aborts_on_orphan(tmp_path)
                 store, [orphan], config=cfg,
                 brain_version=DEFAULT_BRAIN_VERSION, prompt_version=DEFAULT_PROMPT_VERSION,
             )
+
+
+def test_generation_request_fingerprints_eligible_lessons(tmp_path):
+    from ops.backtest.lessons import lesson_set_hash
+    from ops.backtest.models import Lesson
+
+    cfg = OpsConfig(backtest_store_path=str(tmp_path / "backtest.sqlite"))
+    case = _case("AAA", date(2025, 7, 1))
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof)
+    lesson = Lesson(
+        lesson_id="l1", sleeve="research", text="prefer named mechanisms",
+        source_case_ids=("c1",), eligible_from=date(2025, 6, 1), fingerprint="fp1",
+    )
+    late = Lesson(
+        lesson_id="l2", sleeve="research", text="too late to apply",
+        source_case_ids=("c2",), eligible_from=date(2026, 1, 1), fingerprint="fp2",
+    )
+
+    with BacktestStore(cfg.backtest_store_path) as store:
+        store.insert_case_with_manifest(case, manifest)
+        requests = _generation_requests(
+            store, [case], config=cfg,
+            brain_version=DEFAULT_BRAIN_VERSION, prompt_version=DEFAULT_PROMPT_VERSION,
+            lessons=(lesson, late),
+        )
+
+    assert requests[0].lesson_fingerprint == lesson_set_hash([lesson])
+    assert requests[0].lesson_texts == (lesson.text,)
 
 
 def test_generate_cases_excludes_orphan_from_available_and_dedupe(tmp_path, capsys):

@@ -104,6 +104,7 @@ class GenerationRequest:
     conditioning_hash: str
     hit_payload: Mapping[str, Any]
     conditioning: Mapping[str, Any] = field(default_factory=dict)
+    lesson_texts: tuple[str, ...] = ()
 
     @classmethod
     def create(
@@ -118,6 +119,7 @@ class GenerationRequest:
         lesson_fingerprint: str = "none",
         conditioning: Mapping[str, Any] | None = None,
         hit_payload: Mapping[str, Any] | None = None,
+        lesson_texts: Sequence[str] = (),
     ) -> GenerationRequest:
         case.validate_cutoff()
         manifest.validate_point_in_time()
@@ -168,6 +170,7 @@ class GenerationRequest:
             conditioning_hash=conditioning_hash,
             hit_payload=payload,
             conditioning=conditioning_payload,
+            lesson_texts=tuple(lesson_texts),
         )
 
 
@@ -368,6 +371,7 @@ def generate_research_memo(
     fetch_text: Callable[..., str] | None = None,
     price_fetcher: Callable[..., object] | None = None,
     precedent_memos: Sequence[object] = (),
+    lessons: Sequence[str] = (),
 ) -> FrozenMemoRecord:
     """Run the research brain using only content sealed in the manifest.
 
@@ -411,6 +415,8 @@ def generate_research_memo(
         "today": request.case.asof,
         "thesis_model_spec": request.thesis_model_id,
     }
+    if lessons:
+        kwargs["lessons"] = tuple(lessons)
     outcome = research_fn(hit, **kwargs)
     errors = tuple(str(error) for error in getattr(outcome, "errors", ()))
     if getattr(outcome, "status", None) != "researched":

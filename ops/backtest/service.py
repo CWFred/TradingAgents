@@ -35,12 +35,14 @@ from ops.backtest.generate import (
     run_generation_jobs,
     validate_local_model_spec,
 )
+from ops.backtest.lessons import eligible_lessons, lesson_set_hash
 from ops.backtest.models import (
     BacktestCase,
     CaseResult,
     CaseSource,
     DecisionAction,
     HorizonOutcome,
+    Lesson,
     OutcomeLabel,
     OutcomeState,
     ProcessOutcomeQuadrant,
@@ -525,6 +527,7 @@ def _generation_requests(
     brain_version: str,
     prompt_version: str,
     on_missing_manifest: str = "raise",
+    lessons: Sequence[Lesson] = (),
 ) -> tuple[GenerationRequest, ...]:
     """Build requests for cases with a sealed manifest.
 
@@ -534,6 +537,14 @@ def _generation_requests(
     :func:`generate_cases`) instead drops orphan cases and prints a warning
     listing them, so a batch with one orphan can still make progress while
     the orphan resurfaces for re-prepare (Task 5, 2026-07-31 plan).
+
+    ``lessons`` are process lessons distilled from prior graded memos. Each
+    case only sees lessons eligible as of its own ``asof`` (strictly earlier
+    than the case date -- see :func:`ops.backtest.lessons.eligible_lessons`),
+    so a request's ``lesson_fingerprint`` never leaks future knowledge into
+    a case's cache identity. Callers that omit ``lessons`` get the existing
+    ``lesson_fingerprint="none"`` default, so the no-lessons path changes no
+    cache keys.
     """
     if on_missing_manifest not in ("raise", "skip"):
         raise ValueError(f"unknown on_missing_manifest mode: {on_missing_manifest!r}")
@@ -546,11 +557,14 @@ def _generation_requests(
             missing_manifests.append(case.symbol)
             skipped_case_ids.append(case.case_id)
             continue
+        eligible = eligible_lessons(lessons, asof=case.asof)
         requests.append(GenerationRequest.create(
             case=case, manifest=manifest,
             brain_version=brain_version, prompt_version=prompt_version,
             evidence_model_id=config.research_evidence_model,
             thesis_model_id=config.research_thesis_model,
+            lesson_fingerprint=lesson_set_hash(eligible) if eligible else "none",
+            lesson_texts=tuple(lesson.text for lesson in eligible),
         ))
     if missing_manifests:
         if on_missing_manifest == "skip":
@@ -603,6 +617,7 @@ def _execute_generation(
         def generator(request):
             return generate_research_memo(
                 request, evidence_llm=evidence_llm, thesis_llm=thesis_llm,
+                lessons=request.lesson_texts,
             )
 
         return run_generation_jobs(
