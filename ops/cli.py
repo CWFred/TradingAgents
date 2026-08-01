@@ -369,6 +369,41 @@ def backtest_postmortem(
     )
 
 
+@backtest.command("lessons")
+@click.argument("run_id")
+@click.option("--execute", is_flag=True,
+              help="Distill lessons from training-case post-mortems via ds4.")
+@click.option("--holdout-size", default=None, type=int,
+              help="Holdout case count (default: configured backtest_holdout_size).")
+@click.option("--seed", default=None, type=int,
+              help="Holdout split seed (default: configured backtest_experiment_seed).")
+def backtest_lessons(
+    run_id: str, execute: bool, holdout_size: int | None, seed: int | None,
+) -> None:
+    """Fix holdout membership, then distill training-case lessons.
+
+    Near-miss control cases (trigger kind "near_miss_control") are excluded
+    from the run's case universe before the holdout split -- they measure
+    the screener, not the research brain, so they land in neither the
+    training set nor the holdout set.
+    """
+    from ops.backtest.service import lessons_run
+
+    config = load_config()
+    try:
+        result = lessons_run(
+            path=config.backtest_store_path, run_id=run_id, execute=execute,
+            holdout_size=holdout_size, seed=seed,
+        )
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    click.echo(
+        f"experiment {result.experiment_id}: {len(result.training)} training, "
+        f"{len(result.holdout)} holdout, {result.assessments} assessment(s), "
+        f"{result.lessons} lesson(s){'' if result.executed else ' (plan only)'}"
+    )
+
+
 @cli.command()
 @click.option("--asof", "asof_dt", default=None,
               type=click.DateTime(formats=["%Y-%m-%d"]),

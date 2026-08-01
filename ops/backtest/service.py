@@ -60,7 +60,7 @@ from ops.backtest.report import (
 from ops.backtest.sleeves import make_research_exit_policy, size_research_case
 from ops.backtest.store import BacktestStore, CaseConflictError
 from ops.backtest.verdicts import evaluate_replay
-from ops.config import OpsConfig
+from ops.config import OpsConfig, load_config
 
 DEFAULT_BRAIN_VERSION = "research-brain-v1"
 DEFAULT_PROMPT_VERSION = "research-prompt-v1"
@@ -104,6 +104,16 @@ class PostmortemResult:
     cached: int
     pending: int
     updated: int = 0
+
+
+@dataclass(frozen=True)
+class LessonsResult:
+    experiment_id: str
+    training: tuple[str, ...]
+    holdout: tuple[str, ...]
+    assessments: int
+    lessons: int
+    executed: bool
 
 
 @dataclass(frozen=True)
@@ -1339,3 +1349,114 @@ def postmortem_run(
                     (run_id,),
                 ).fetchone()[0])
     return PostmortemResult(run_id, total, cached, total - cached, updated)
+
+
+def lessons_run(
+    *,
+    path: str | Path,
+    run_id: str,
+    execute: bool = False,
+    distiller: Any | None = None,
+    holdout_size: int | None = None,
+    seed: int | None = None,
+) -> LessonsResult:
+    """Fix holdout membership for ``run_id``, then plan or distill lessons.
+
+    Case universe: every distinct case attached to the run, MINUS near-miss
+    control cases (``_is_control_case`` -- ``trigger.kind ==
+    "near_miss_control"``). Controls exist to falsify the screener, not to
+    teach the research brain, so they are excluded from the run's case ids
+    before ``EfficacyPlan.create`` and therefore land in neither the
+    training set nor the holdout set.
+
+    Order of operations (load-bearing): (1) collect the run's distinct,
+    non-control case ids; (2) ``EfficacyPlan.create`` with the configured (or
+    overridden) holdout size/seed; (3) ``store.save_experiment`` the plan,
+    idempotently -- if an experiment with this id already exists, it is left
+    untouched (its ``lesson_fingerprint`` stays "pending" forever; re-saving
+    with a different fingerprint would violate the store's identity
+    invariant); (4) load thesis assessments for TRAINING cases only; (5) if
+    not executing, report the plan; otherwise distill lessons from the
+    training assessments via ``distill_lessons_cached``.
+    """
+    from ops.backtest.lessons import DistillationRequest, EfficacyPlan, distill_lessons_cached
+
+    config = load_config()
+    holdout_n = holdout_size if holdout_size is not None else config.backtest_holdout_size
+    seed_n = seed if seed is not None else config.backtest_experiment_seed
+    with BacktestStore(path) as store:
+        with store.transaction() as conn:
+            case_rows = conn.execute(
+                "SELECT DISTINCT case_id FROM run_cases WHERE run_id = ? ORDER BY case_id",
+                (run_id,),
+            ).fetchall()
+        if not case_rows:
+            raise UnknownBacktestRun(f"unknown or empty backtest run {run_id!r}")
+        case_ids = []
+        for row in case_rows:
+            case = store.get_case(row["case_id"])
+            if case is None:
+                raise BacktestServiceError(f"lessons case {row['case_id']!r} disappeared")
+            if _is_control_case(case):
+                continue
+            case_ids.append(case.case_id)
+        if not case_ids:
+            raise BacktestServiceError(
+                f"run {run_id!r} has no non-control cases to distill lessons from"
+            )
+        plan = EfficacyPlan.create(
+            sleeve="research", case_ids=case_ids,
+            holdout_size=holdout_n, seed=seed_n,
+        )
+        if store.get_experiment(plan.experiment_id) is None:
+            store.save_experiment(plan.record(lesson_fingerprint="pending"))
+        assessments = _training_assessments(store, run_id, plan.training_case_ids)
+        if not execute:
+            return LessonsResult(
+                plan.experiment_id, plan.training_case_ids, plan.holdout_case_ids,
+                len(assessments), 0, False,
+            )
+        if not assessments:
+            raise BacktestServiceError(
+                "no thesis assessments for training cases; "
+                "run `backtest postmortem --execute` first"
+            )
+        if distiller is None:
+            from ops.backtest.distiller import DISTILL_PROMPT_VERSION, Ds4LessonDistiller
+
+            distiller = Ds4LessonDistiller(config.research_thesis_model)
+            prompt_version = DISTILL_PROMPT_VERSION
+            model_id = config.research_thesis_model
+        else:
+            prompt_version = getattr(distiller, "prompt_version", "distill-v1")
+            model_id = getattr(distiller, "model_spec", "injected")
+        request = DistillationRequest.create(
+            sleeve="research",
+            training_case_ids=plan.training_case_ids,
+            holdout_case_ids=plan.holdout_case_ids,
+            assessments=assessments,
+            model_id=model_id, prompt_version=prompt_version,
+        )
+        distilled = distill_lessons_cached(distiller, store, request=request)
+        return LessonsResult(
+            plan.experiment_id, plan.training_case_ids, plan.holdout_case_ids,
+            len(assessments), len(distilled), True,
+        )
+
+
+def _training_assessments(store, run_id, training_case_ids):
+    with store.transaction() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT a.assessment_key FROM thesis_assessments AS a "
+            "JOIN decisions AS d ON d.memo_key = a.memo_key "
+            "WHERE d.run_id = ? ORDER BY a.assessment_key",
+            (run_id,),
+        ).fetchall()
+    keys = [row["assessment_key"] for row in rows]
+    out = []
+    training = set(training_case_ids)
+    for key in keys:
+        assessment = store.get_thesis_assessment(key)
+        if assessment is not None and assessment.case_id in training:
+            out.append(assessment)
+    return tuple(out)

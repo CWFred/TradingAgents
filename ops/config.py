@@ -126,6 +126,8 @@ class OpsConfig:
     backtest_promising_min_mean_excess: Decimal = Decimal("0.03")
     backtest_dead_max_hit_rate: Decimal = Decimal("0.40")
     backtest_dead_max_mean_excess: Decimal = Decimal("0")
+    backtest_holdout_size: int = 10
+    backtest_experiment_seed: int = 1
     # Short sleeve (fourth ledger): own journal, memo store, and screen-hit
     # queue — the research trade step enters ALL open memos in its store
     # unfiltered, so short memos must live in a separate DB (spec decision 1).
@@ -286,6 +288,10 @@ class OpsConfig:
             raise ValueError(
                 "backtest_min_mature_cases must be in 1..backtest_case_count"
             )
+        if self.backtest_holdout_size < 0:
+            raise ValueError("backtest_holdout_size must be >= 0")
+        if self.backtest_experiment_seed < 0:
+            raise ValueError("backtest_experiment_seed must be >= 0")
         for fname in (
             "backtest_promising_min_hit_rate", "backtest_dead_max_hit_rate",
         ):
@@ -529,6 +535,8 @@ def load_config() -> OpsConfig:
         ("OPS_BACKTEST_PRIMARY_HORIZON", "backtest_primary_horizon"),
         ("OPS_BACKTEST_CASE_COUNT", "backtest_case_count"),
         ("OPS_BACKTEST_MIN_MATURE_CASES", "backtest_min_mature_cases"),
+        ("OPS_BACKTEST_HOLDOUT_SIZE", "backtest_holdout_size"),
+        ("OPS_BACKTEST_EXPERIMENT_SEED", "backtest_experiment_seed"),
     ):
         value = _env_int(env_name)
         if value is not None:

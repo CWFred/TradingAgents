@@ -25,6 +25,8 @@ def test_backtest_defaults_are_xdg_aware_and_match_approved_semantics(
     assert cfg.backtest_case_count == 40
     assert cfg.backtest_case_notional == Decimal("10000")
     assert cfg.backtest_min_mature_cases == 20
+    assert cfg.backtest_holdout_size == 10
+    assert cfg.backtest_experiment_seed == 1
 
 
 def test_load_config_reads_all_backtest_env_overrides(monkeypatch, tmp_path):
@@ -42,6 +44,8 @@ def test_load_config_reads_all_backtest_env_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("OPS_BACKTEST_PROMISING_MIN_MEAN_EXCESS", "0.04")
     monkeypatch.setenv("OPS_BACKTEST_DEAD_MAX_HIT_RATE", "0.35")
     monkeypatch.setenv("OPS_BACKTEST_DEAD_MAX_MEAN_EXCESS", "-0.01")
+    monkeypatch.setenv("OPS_BACKTEST_HOLDOUT_SIZE", "5")
+    monkeypatch.setenv("OPS_BACKTEST_EXPERIMENT_SEED", "42")
 
     cfg = load_config()
 
@@ -58,6 +62,8 @@ def test_load_config_reads_all_backtest_env_overrides(monkeypatch, tmp_path):
     assert cfg.backtest_promising_min_mean_excess == Decimal("0.04")
     assert cfg.backtest_dead_max_hit_rate == Decimal("0.35")
     assert cfg.backtest_dead_max_mean_excess == Decimal("-0.01")
+    assert cfg.backtest_holdout_size == 5
+    assert cfg.backtest_experiment_seed == 42
 
 
 def test_cutoff_can_advance_but_never_move_before_hard_minimum():
@@ -82,6 +88,8 @@ def test_cutoff_can_advance_but_never_move_before_hard_minimum():
         {"backtest_min_mature_cases": 41},
         {"backtest_promising_min_hit_rate": Decimal("0.30")},
         {"backtest_promising_min_mean_excess": Decimal("-0.01")},
+        {"backtest_holdout_size": -1},
+        {"backtest_experiment_seed": -1},
     ],
 )
 def test_backtest_config_fails_closed_on_invalid_values(kwargs):
