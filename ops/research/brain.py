@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Literal
@@ -309,6 +310,16 @@ def _run_evidence_stage(
     return items, allowed_refs, notes
 
 
+def _lessons_section(lessons: Sequence[str]) -> str:
+    if not lessons:
+        return ""
+    numbered = "\n".join(f"{i + 1}. {text}" for i, text in enumerate(lessons))
+    return (
+        "\n\nPROCESS LESSONS (distilled from prior graded memos; apply where "
+        f"relevant, never cite as evidence):\n{numbered}"
+    )
+
+
 def research_hit(
     hit: dict,
     *,
@@ -320,6 +331,7 @@ def research_hit(
     price_fetcher=None,
     today: date | None = None,
     thesis_model_spec: str | None = None,
+    lessons: Sequence[str] = (),
 ) -> ResearchOutcome:
     """Run the full two-stage pipeline for one pending screen hit."""
     from tradingagents.agents.utils.filing_reader_tools import summarize_memo
@@ -394,7 +406,7 @@ def research_hit(
             screen_summary=screen_summary, bear_case=bear,
             evidence_bullets=evidence_bullets, past_memos=past_memos_text,
             retry_feedback=retry_feedback,
-        )
+        ) + _lessons_section(lessons)
         try:
             draft = structured.invoke(prompt)
         except Exception as exc:

@@ -35,12 +35,14 @@ from ops.backtest.generate import (
     run_generation_jobs,
     validate_local_model_spec,
 )
+from ops.backtest.lessons import eligible_lessons, lesson_set_hash
 from ops.backtest.models import (
     BacktestCase,
     CaseResult,
     CaseSource,
     DecisionAction,
     HorizonOutcome,
+    Lesson,
     OutcomeLabel,
     OutcomeState,
     ProcessOutcomeQuadrant,
@@ -60,7 +62,7 @@ from ops.backtest.report import (
 from ops.backtest.sleeves import make_research_exit_policy, size_research_case
 from ops.backtest.store import BacktestStore, CaseConflictError
 from ops.backtest.verdicts import evaluate_replay
-from ops.config import OpsConfig
+from ops.config import OpsConfig, load_config
 
 DEFAULT_BRAIN_VERSION = "research-brain-v1"
 DEFAULT_PROMPT_VERSION = "research-prompt-v1"
@@ -104,6 +106,16 @@ class PostmortemResult:
     cached: int
     pending: int
     updated: int = 0
+
+
+@dataclass(frozen=True)
+class LessonsResult:
+    experiment_id: str
+    training: tuple[str, ...]
+    holdout: tuple[str, ...]
+    assessments: int
+    lessons: int
+    executed: bool
 
 
 @dataclass(frozen=True)
@@ -321,6 +333,92 @@ def _memo_and_exit_policy(record):
     return memo, make_research_exit_policy(memo=memo)
 
 
+def replay_and_evaluate_case(
+    *,
+    prices: PriceCache,
+    run_id: str,
+    case,
+    record,
+    resolved: Mapping[str, Any],
+    today: date,
+):
+    """Replay one case's frozen memo against cached prices and grade it.
+
+    Mechanical lift of ``run_cached_backtest``'s per-case loop body so the
+    paired-efficacy experiment can replay a single case (control or treated
+    memo variant) with the same wiring. Persistence stays with the caller:
+    this returns ``(replay, outcomes, result)`` and writes nothing, because
+    the experiment replays memos outside of any stored run.
+    """
+    initial = _initial_decision(record)
+    _memo, exit_policy = _memo_and_exit_policy(record)
+    notional = Decimal(resolved["case_notional"])
+    if initial.action == DecisionAction.BUY:
+        sizing = size_research_case(
+            tier=initial.conviction, fixed_equity=notional,
+            symbol=case.symbol,
+        )
+        if sizing.rejected is not None:
+            raise BacktestServiceError(
+                f"{case.symbol}: frozen conviction cannot be sized: {sizing.rejected}"
+            )
+        notional = sizing.notional
+    explicit_stock_state = prices.state(case.symbol)
+    stock_status = prices.classify(
+        case.symbol, required_through=today,
+    )
+    stock_reason = (
+        explicit_stock_state.reason
+        if explicit_stock_state is not None
+        else None
+    )
+    if stock_status == PriceSeriesStatus.STALE and not stock_reason:
+        stock_reason = f"cached series does not reach {today}"
+    explicit_benchmark_state = prices.state(resolved["benchmark"])
+    benchmark_status = prices.classify(
+        resolved["benchmark"], required_through=today,
+    )
+    benchmark_reason = (
+        explicit_benchmark_state.reason
+        if explicit_benchmark_state is not None
+        else None
+    )
+    if benchmark_status == PriceSeriesStatus.STALE and not benchmark_reason:
+        benchmark_reason = f"cached series does not reach {today}"
+    stock_bars = prices.bars(
+        case.symbol, start=case.asof, end=today,
+        adjusted_to=case.asof,
+    )
+    benchmark_bars = prices.bars(
+        resolved["benchmark"], start=case.asof, end=today,
+        adjusted_to=case.asof,
+    )
+    replay = replay_case(
+        run_id=run_id, case=case, initial=initial,
+        bars=stock_bars, notional=notional, settings=resolved,
+        exit_policy=exit_policy,
+        price_status=stock_status,
+        price_state_reason=stock_reason,
+    )
+    outcomes, result = evaluate_replay(
+        replay, stock_bars=stock_bars,
+        benchmark_bars=benchmark_bars,
+        adjudication_date=today,
+        horizons=tuple(resolved["horizons"]),
+        primary_horizon=resolved["primary_horizon"],
+        wash_band=Decimal(resolved["wash_band"]),
+        stock_status=stock_status,
+        benchmark_status=benchmark_status,
+        stock_status_reason=stock_reason,
+        benchmark_status_reason=benchmark_reason,
+        stock_terminal_session=(
+            explicit_stock_state.asof
+            if explicit_stock_state is not None else None
+        ),
+    )
+    return replay, outcomes, result
+
+
 def run_cached_backtest(
     *,
     config: OpsConfig,
@@ -425,72 +523,9 @@ def run_cached_backtest(
         run_succeeded = False
         try:
             for case in cases:
-                record = records[case.case_id]
-                initial = _initial_decision(record)
-                _memo, exit_policy = _memo_and_exit_policy(record)
-                notional = Decimal(resolved["case_notional"])
-                if initial.action == DecisionAction.BUY:
-                    sizing = size_research_case(
-                        tier=initial.conviction, fixed_equity=notional,
-                        symbol=case.symbol,
-                    )
-                    if sizing.rejected is not None:
-                        raise BacktestServiceError(
-                            f"{case.symbol}: frozen conviction cannot be sized: {sizing.rejected}"
-                        )
-                    notional = sizing.notional
-                explicit_stock_state = prices.state(case.symbol)
-                stock_status = prices.classify(
-                    case.symbol, required_through=today,
-                )
-                stock_reason = (
-                    explicit_stock_state.reason
-                    if explicit_stock_state is not None
-                    else None
-                )
-                if stock_status == PriceSeriesStatus.STALE and not stock_reason:
-                    stock_reason = f"cached series does not reach {today}"
-                explicit_benchmark_state = prices.state(resolved["benchmark"])
-                benchmark_status = prices.classify(
-                    resolved["benchmark"], required_through=today,
-                )
-                benchmark_reason = (
-                    explicit_benchmark_state.reason
-                    if explicit_benchmark_state is not None
-                    else None
-                )
-                if benchmark_status == PriceSeriesStatus.STALE and not benchmark_reason:
-                    benchmark_reason = f"cached series does not reach {today}"
-                stock_bars = prices.bars(
-                    case.symbol, start=case.asof, end=today,
-                    adjusted_to=case.asof,
-                )
-                benchmark_bars = prices.bars(
-                    resolved["benchmark"], start=case.asof, end=today,
-                    adjusted_to=case.asof,
-                )
-                replay = replay_case(
-                    run_id=run_id, case=case, initial=initial,
-                    bars=stock_bars, notional=notional, settings=resolved,
-                    exit_policy=exit_policy,
-                    price_status=stock_status,
-                    price_state_reason=stock_reason,
-                )
-                outcomes, result = evaluate_replay(
-                    replay, stock_bars=stock_bars,
-                    benchmark_bars=benchmark_bars,
-                    adjudication_date=today,
-                    horizons=tuple(resolved["horizons"]),
-                    primary_horizon=resolved["primary_horizon"],
-                    wash_band=Decimal(resolved["wash_band"]),
-                    stock_status=stock_status,
-                    benchmark_status=benchmark_status,
-                    stock_status_reason=stock_reason,
-                    benchmark_status_reason=benchmark_reason,
-                    stock_terminal_session=(
-                        explicit_stock_state.asof
-                        if explicit_stock_state is not None else None
-                    ),
+                replay, outcomes, result = replay_and_evaluate_case(
+                    prices=prices, run_id=run_id, case=case,
+                    record=records[case.case_id], resolved=resolved, today=today,
                 )
                 store.save_replay_evaluation(replay, outcomes, result)
             run_succeeded = True
@@ -515,6 +550,7 @@ def _generation_requests(
     brain_version: str,
     prompt_version: str,
     on_missing_manifest: str = "raise",
+    lessons: Sequence[Lesson] = (),
 ) -> tuple[GenerationRequest, ...]:
     """Build requests for cases with a sealed manifest.
 
@@ -524,6 +560,14 @@ def _generation_requests(
     :func:`generate_cases`) instead drops orphan cases and prints a warning
     listing them, so a batch with one orphan can still make progress while
     the orphan resurfaces for re-prepare (Task 5, 2026-07-31 plan).
+
+    ``lessons`` are process lessons distilled from prior graded memos. Each
+    case only sees lessons eligible as of its own ``asof`` (strictly earlier
+    than the case date -- see :func:`ops.backtest.lessons.eligible_lessons`),
+    so a request's ``lesson_fingerprint`` never leaks future knowledge into
+    a case's cache identity. Callers that omit ``lessons`` get the existing
+    ``lesson_fingerprint="none"`` default, so the no-lessons path changes no
+    cache keys.
     """
     if on_missing_manifest not in ("raise", "skip"):
         raise ValueError(f"unknown on_missing_manifest mode: {on_missing_manifest!r}")
@@ -536,11 +580,14 @@ def _generation_requests(
             missing_manifests.append(case.symbol)
             skipped_case_ids.append(case.case_id)
             continue
+        eligible = eligible_lessons(lessons, asof=case.asof)
         requests.append(GenerationRequest.create(
             case=case, manifest=manifest,
             brain_version=brain_version, prompt_version=prompt_version,
             evidence_model_id=config.research_evidence_model,
             thesis_model_id=config.research_thesis_model,
+            lesson_fingerprint=lesson_set_hash(eligible) if eligible else "none",
+            lesson_texts=tuple(lesson.text for lesson in eligible),
         ))
     if missing_manifests:
         if on_missing_manifest == "skip":
@@ -593,6 +640,7 @@ def _execute_generation(
         def generator(request):
             return generate_research_memo(
                 request, evidence_llm=evidence_llm, thesis_llm=thesis_llm,
+                lessons=request.lesson_texts,
             )
 
         return run_generation_jobs(
@@ -956,9 +1004,9 @@ def generate_cases(
     *,
     config: OpsConfig,
     sleeve: str,
-    start: date,
-    end: date,
-    case_count: int,
+    start: date | None = None,
+    end: date | None = None,
+    case_count: int = 0,
     today: date,
     execute: bool = False,
     enqueue: bool = False,
@@ -972,21 +1020,59 @@ def generate_cases(
     append: bool = False,
     controls_count: int = 0,
     fresh_sweep: bool = False,
+    experiment_id: str | None = None,
 ) -> GenerationResult:
+    """Plan or run frozen-memo generation for a case window.
+
+    ``experiment_id`` switches generation to an experiment's TREATED arm:
+    that experiment's lessons are loaded (same read path
+    ``experiment_run`` grades with) and threaded into
+    ``_generation_requests``, so each case's memo identity carries the
+    lesson fingerprint eligible as of its own asof instead of "none".
+    Without it, generation can only ever (re)produce the control arm --
+    which is why ``backtest experiment`` prints this flag in the command it
+    tells the operator to run.
+
+    In that mode the case set is the experiment's frozen holdout membership,
+    exactly -- no window, no ``case_count`` budget, no preparation of new
+    cases. Flowing the treated arm through the window/budget machinery would
+    truncate it (holdout cases are a seeded random subset scattered across
+    the corpus, so the first N cases by ``(asof, symbol)`` are mostly
+    training cases): the operator would burn model time on the wrong cases
+    and ``backtest experiment`` would report the same missing memos forever.
+    ``start``/``end``/``case_count`` are therefore ignored -- and rejected if
+    passed -- when ``experiment_id`` is set.
+    """
     if execute and enqueue:
         raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
     if append and source == "recorded":
         raise InvalidBacktestRequest("append is reconstruction-only")
     if fresh_sweep and source == "recorded":
         raise InvalidBacktestRequest("fresh-sweep is reconstruction-only")
-    _validate_window(
-        start=start, end=end, today=today, cutoff=config.backtest_cutoff,
-        case_count=case_count,
-    )
+    if experiment_id is not None:
+        if start is not None or end is not None or case_count:
+            raise InvalidBacktestRequest(
+                "--experiment generates exactly the experiment's holdout cases; "
+                "it takes no window or case budget"
+            )
+    elif start is None or end is None:
+        raise InvalidBacktestRequest("a case window (start and end) is required")
+    else:
+        _validate_window(
+            start=start, end=end, today=today, cutoff=config.backtest_cutoff,
+            case_count=case_count,
+        )
     if max_jobs is not None and max_jobs <= 0:
         raise InvalidBacktestRequest("max-jobs must be positive")
     with BacktestStore(config.backtest_store_path, cutoff=config.backtest_cutoff) as store:
         effective_cutoff = store.effective_cutoff
+        if experiment_id is not None:
+            return _generate_experiment_arm(
+                store, config=config, sleeve=sleeve, experiment_id=experiment_id,
+                brain_version=brain_version, prompt_version=prompt_version,
+                execute=execute, enqueue=enqueue, max_jobs=max_jobs,
+                executor=executor,
+            )
         _validate_window(
             start=start, end=end, today=today, cutoff=effective_cutoff,
             case_count=case_count,
@@ -1050,20 +1136,77 @@ def generate_cases(
             brain_version=brain_version, prompt_version=prompt_version,
             on_missing_manifest="skip",
         )
-        plan = plan_generation(requests, store=store)
-        if enqueue:
-            store.enqueue_generation_jobs(plan.pending)
-        summary = None
-        if execute and plan.pending:
-            runner = executor or _execute_generation
-            summary = runner(
-                plan, store=store, config=config, max_jobs=max_jobs,
-            )
-        return GenerationResult(
-            total=len(plan.requests), cached=len(plan.cached),
-            pending=(summary.still_pending if summary is not None else len(plan.pending)),
-            summary=summary,
+        return _run_generation_plan(
+            requests, store=store, config=config, execute=execute,
+            enqueue=enqueue, max_jobs=max_jobs, executor=executor,
         )
+
+
+def _run_generation_plan(
+    requests,
+    *,
+    store: BacktestStore,
+    config: OpsConfig,
+    execute: bool,
+    enqueue: bool,
+    max_jobs: int | None,
+    executor: Callable[..., GenerationSummary] | None,
+) -> GenerationResult:
+    plan = plan_generation(requests, store=store)
+    if enqueue:
+        store.enqueue_generation_jobs(plan.pending)
+    summary = None
+    if execute and plan.pending:
+        runner = executor or _execute_generation
+        summary = runner(plan, store=store, config=config, max_jobs=max_jobs)
+    return GenerationResult(
+        total=len(plan.requests), cached=len(plan.cached),
+        pending=(summary.still_pending if summary is not None else len(plan.pending)),
+        summary=summary,
+    )
+
+
+def _generate_experiment_arm(
+    store: BacktestStore,
+    *,
+    config: OpsConfig,
+    sleeve: str,
+    experiment_id: str,
+    brain_version: str,
+    prompt_version: str,
+    execute: bool,
+    enqueue: bool,
+    max_jobs: int | None,
+    executor: Callable[..., GenerationSummary] | None,
+) -> GenerationResult:
+    """Generate the treated arm for exactly one experiment's holdout cases."""
+    record, _training, lessons = load_experiment_lessons(store, experiment_id)
+    if record.sleeve != sleeve:
+        raise InvalidBacktestRequest(
+            f"experiment {experiment_id} is sleeve {record.sleeve!r}, not {sleeve!r}"
+        )
+    if not lessons:
+        raise MissingBacktestArtifacts(
+            f"experiment {experiment_id} has no distilled lessons; "
+            "run `ops backtest lessons RUN_ID --execute` first"
+        )
+    cases = []
+    for case_id in record.holdout_case_ids:
+        case = store.get_case(case_id)
+        if case is None:
+            raise BacktestServiceError(f"holdout case {case_id!r} disappeared")
+        cases.append(case)
+    # Cases already carrying a treated memo come back as plan.cached, so the
+    # command is idempotent and resumable over the whole holdout.
+    requests = _generation_requests(
+        store, cases, config=config,
+        brain_version=brain_version, prompt_version=prompt_version,
+        on_missing_manifest="skip", lessons=lessons,
+    )
+    return _run_generation_plan(
+        requests, store=store, config=config, execute=execute,
+        enqueue=enqueue, max_jobs=max_jobs, executor=executor,
+    )
 
 
 def _readonly_connection(path: str | Path) -> sqlite3.Connection:
@@ -1339,3 +1482,243 @@ def postmortem_run(
                     (run_id,),
                 ).fetchone()[0])
     return PostmortemResult(run_id, total, cached, total - cached, updated)
+
+
+def lessons_run(
+    *,
+    path: str | Path,
+    run_id: str,
+    execute: bool = False,
+    distiller: Any | None = None,
+    holdout_size: int | None = None,
+    seed: int | None = None,
+) -> LessonsResult:
+    """Fix holdout membership for ``run_id``, then plan or distill lessons.
+
+    Case universe: every distinct case attached to the run, MINUS near-miss
+    control cases (``_is_control_case`` -- ``trigger.kind ==
+    "near_miss_control"``). Controls exist to falsify the screener, not to
+    teach the research brain, so they are excluded from the run's case ids
+    before ``EfficacyPlan.create`` and therefore land in neither the
+    training set nor the holdout set.
+
+    Order of operations (load-bearing): (1) collect the run's distinct,
+    non-control case ids; (2) ``EfficacyPlan.create`` with the configured (or
+    overridden) holdout size/seed; (3) ``store.save_experiment`` the plan,
+    idempotently -- if an experiment with this id already exists, it is left
+    untouched (its ``lesson_fingerprint`` stays "pending" forever; re-saving
+    with a different fingerprint would violate the store's identity
+    invariant); (4) load thesis assessments for TRAINING cases only; (5) if
+    not executing, report the plan; otherwise distill lessons from the
+    training assessments via ``distill_lessons_cached``.
+    """
+    from ops.backtest.lessons import DistillationRequest, EfficacyPlan, distill_lessons_cached
+
+    config = load_config()
+    holdout_n = holdout_size if holdout_size is not None else config.backtest_holdout_size
+    seed_n = seed if seed is not None else config.backtest_experiment_seed
+    with BacktestStore(path) as store:
+        with store.transaction() as conn:
+            case_rows = conn.execute(
+                "SELECT DISTINCT case_id FROM run_cases WHERE run_id = ? ORDER BY case_id",
+                (run_id,),
+            ).fetchall()
+        if not case_rows:
+            raise UnknownBacktestRun(f"unknown or empty backtest run {run_id!r}")
+        case_ids = []
+        for row in case_rows:
+            case = store.get_case(row["case_id"])
+            if case is None:
+                raise BacktestServiceError(f"lessons case {row['case_id']!r} disappeared")
+            if _is_control_case(case):
+                continue
+            case_ids.append(case.case_id)
+        if not case_ids:
+            raise BacktestServiceError(
+                f"run {run_id!r} has no non-control cases to distill lessons from"
+            )
+        plan = EfficacyPlan.create(
+            sleeve="research", case_ids=case_ids,
+            holdout_size=holdout_n, seed=seed_n,
+        )
+        if store.get_experiment(plan.experiment_id) is None:
+            store.save_experiment(plan.record(lesson_fingerprint="pending"))
+        assessments = _training_assessments(store, run_id, plan.training_case_ids)
+        if not execute:
+            return LessonsResult(
+                plan.experiment_id, plan.training_case_ids, plan.holdout_case_ids,
+                len(assessments), 0, False,
+            )
+        if not assessments:
+            raise BacktestServiceError(
+                "no thesis assessments for training cases; "
+                "run `backtest postmortem --execute` first"
+            )
+        if distiller is None:
+            from ops.backtest.distiller import DISTILL_PROMPT_VERSION, Ds4LessonDistiller
+
+            distiller = Ds4LessonDistiller(config.research_thesis_model)
+            prompt_version = DISTILL_PROMPT_VERSION
+            model_id = config.research_thesis_model
+        else:
+            prompt_version = getattr(distiller, "prompt_version", "distill-v1")
+            model_id = getattr(distiller, "model_spec", "injected")
+        request = DistillationRequest.create(
+            sleeve="research",
+            training_case_ids=plan.training_case_ids,
+            holdout_case_ids=plan.holdout_case_ids,
+            assessments=assessments,
+            model_id=model_id, prompt_version=prompt_version,
+        )
+        distilled = distill_lessons_cached(distiller, store, request=request)
+        return LessonsResult(
+            plan.experiment_id, plan.training_case_ids, plan.holdout_case_ids,
+            len(assessments), len(distilled), True,
+        )
+
+
+def _training_assessments(store, run_id, training_case_ids):
+    with store.transaction() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT a.assessment_key FROM thesis_assessments AS a "
+            "JOIN decisions AS d ON d.memo_key = a.memo_key "
+            "WHERE d.run_id = ? ORDER BY a.assessment_key",
+            (run_id,),
+        ).fetchall()
+    keys = [row["assessment_key"] for row in rows]
+    out = []
+    training = set(training_case_ids)
+    for key in keys:
+        assessment = store.get_thesis_assessment(key)
+        if assessment is not None and assessment.case_id in training:
+            out.append(assessment)
+    return tuple(out)
+
+
+def _experiment_training_case_ids(store: BacktestStore, record) -> tuple[str, ...]:
+    """Reconstruct the experiment's training set from its stored holdout.
+
+    ``ExperimentRecord`` persists only the holdout membership, so the
+    training set is rebuilt as "every non-control case in the sleeve that is
+    not in the holdout".  That is a superset of the run-scoped universe
+    ``lessons_run`` split, which is safe in both directions that matter:
+    holdout cases are still excluded (so ``validate_lesson_sources`` still
+    catches a leaked lesson), and a lesson distilled from a training case is
+    still recognised as this experiment's.
+    """
+    holdout = set(record.holdout_case_ids)
+    return tuple(sorted(
+        case.case_id for case in store.list_cases(sleeve=record.sleeve)
+        if case.case_id not in holdout and not _is_control_case(case)
+    ))
+
+
+def load_experiment_lessons(store: BacktestStore, experiment_id: str):
+    """``(record, training_case_ids, lessons)`` for one saved experiment.
+
+    Single read path shared by ``experiment_run`` (which grades the treated
+    arm) and ``generate_cases(experiment_id=...)`` (which creates it), so the
+    fingerprint the generator writes and the one the experiment looks up can
+    never drift apart.
+    """
+    record = store.get_experiment(experiment_id)
+    if record is None:
+        raise UnknownBacktestRun(f"unknown experiment {experiment_id!r}")
+    training = _experiment_training_case_ids(store, record)
+    lessons = store.lessons_for_training_cases(
+        sleeve=record.sleeve, case_ids=training,
+    )
+    return record, training, lessons
+
+
+def experiment_run(
+    *,
+    path: str | Path,
+    experiment_id: str,
+    execute: bool = False,
+    evaluator: Any | None = None,
+    today: date | None = None,
+) -> dict:
+    """Plan or run the paired control/treated efficacy of an experiment.
+
+    Membership is read, never recomputed: the holdout is whatever
+    ``backtest lessons`` froze into the ``ExperimentRecord``.  Lessons are
+    loaded by training-set provenance (``lessons_for_training_cases``), not
+    from the record's ``lesson_fingerprint`` -- that field is deliberately
+    left at "pending" by ``lessons_run``, since the store treats it as part
+    of the experiment's immutable identity.  The real per-case fingerprints
+    are derived from the lesson objects by ``run_paired_efficacy``.
+
+    Plan-only mode (the default) reports holdout size, lesson count, and the
+    treated memo variants that still have to be generated; ``execute=True``
+    replays both arms and returns the paired summary merged in.
+    """
+    from ops.backtest.experiment import (
+        ReplayPairedEvaluator,
+        generate_command_span,
+        variant_request,
+    )
+    from ops.backtest.lessons import (
+        EfficacyPlan,
+        PairedCaseInput,
+        paired_experiment_summary,
+        run_paired_efficacy,
+    )
+
+    config = load_config()
+    adjudication = today or datetime.now(timezone.utc).date()
+    with BacktestStore(path) as store:
+        record, training, lessons = load_experiment_lessons(store, experiment_id)
+        plan = EfficacyPlan(
+            experiment_id=record.experiment_id, sleeve=record.sleeve,
+            seed=record.seed, training_case_ids=training,
+            holdout_case_ids=record.holdout_case_ids,
+        )
+        case_inputs: dict[str, PairedCaseInput] = {}
+        missing_treated: list[str] = []
+        for case_id in plan.holdout_case_ids:
+            case = store.get_case(case_id)
+            if case is None:
+                raise BacktestServiceError(f"holdout case {case_id!r} disappeared")
+            manifest = store.get_context_manifest(case_id)
+            if manifest is None:
+                raise MissingBacktestArtifacts(
+                    f"holdout case {case_id} has no sealed context manifest"
+                )
+            case_inputs[case_id] = PairedCaseInput(
+                case_id=case_id, asof=case.asof,
+                pinned_input_hash=manifest.manifest_hash,
+            )
+            request = variant_request(store, case, config=config, lessons=lessons)
+            if store.get_frozen_memo(request.memo_key) is None:
+                missing_treated.append(case_id)
+        identity = {
+            "experiment_id": record.experiment_id,
+            "sleeve": record.sleeve,
+            "seed": record.seed,
+            "holdout_cases": len(plan.holdout_case_ids),
+            "training_cases": len(plan.training_case_ids),
+            "lessons": len(lessons),
+            "missing_treated": tuple(sorted(missing_treated)),
+            # The generation to-do list is only useful if the command it
+            # implies actually produces TREATED memos -- hence --experiment.
+            "generate_command": (
+                generate_command_span(
+                    sleeve=record.sleeve, experiment_id=record.experiment_id,
+                ) if missing_treated else ""
+            ),
+        }
+        if not execute:
+            return {
+                **identity, "executed": False, "pairs": None, "mean_delta": None,
+            }
+        if evaluator is None:
+            evaluator = ReplayPairedEvaluator(
+                store=store, config=config, lessons=lessons,
+                today=adjudication, experiment_id=record.experiment_id,
+            )
+        results = run_paired_efficacy(
+            plan, case_inputs=case_inputs, lessons=lessons, evaluator=evaluator,
+        )
+        summary = paired_experiment_summary(results)
+        return {**identity, **summary, "executed": True}

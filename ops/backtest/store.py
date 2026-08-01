@@ -854,6 +854,14 @@ class BacktestStore:
             "lesson_fingerprint": request.lesson_fingerprint,
             "conditioning": request.conditioning,
             "hit_payload": request.hit_payload,
+            # Only persisted when non-empty, so a lessons-free request keeps
+            # producing byte-identical request_json and already-queued jobs
+            # cannot trip the "different request data" conflict. The texts
+            # are load-bearing: the background drain rehydrates from this
+            # payload, and generating without them under a treated
+            # lesson_fingerprint would cache a control memo under the
+            # treated identity.
+            **({"lesson_texts": list(request.lesson_texts)} if request.lesson_texts else {}),
         })
         with self.transaction() as conn:
             frozen = conn.execute(
@@ -985,6 +993,7 @@ class BacktestStore:
                 evidence_model_id=payload["evidence_model_id"],
                 thesis_model_id=payload["thesis_model_id"],
                 lesson_fingerprint=payload["lesson_fingerprint"],
+                lesson_texts=tuple(payload.get("lesson_texts", ())),
                 conditioning=payload.get("conditioning", {}),
                 hit_payload=payload.get("hit_payload", {}),
             )
@@ -1417,6 +1426,43 @@ class BacktestStore:
             "eligible_from": lesson.eligible_from, "fingerprint": lesson.fingerprint,
             "tags": lesson.tags,
         })
+
+    def lessons_for_training_cases(
+        self, *, sleeve: str, case_ids: Sequence[str],
+    ) -> tuple[Lesson, ...]:
+        """Read-only: lessons whose every source case lies inside ``case_ids``.
+
+        Used by the paired-efficacy experiment to load "this experiment's"
+        lessons without a lessons-by-fingerprint index: a lesson belongs to
+        an experiment exactly when it was distilled from that experiment's
+        training cases. Any lesson touching a case outside the set (i.e. a
+        holdout case) is dropped, so a leaked lesson can never be served
+        into the treated arm. Source-less lessons are dropped too -- they
+        cannot be attributed to a training set at all.
+        """
+        allowed = set(case_ids)
+        results: list[Lesson] = []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM lessons WHERE sleeve = ? ORDER BY lesson_id",
+                (sleeve,),
+            ).fetchall()
+            for row in rows:
+                sources = tuple(item["case_id"] for item in self._conn.execute(
+                    "SELECT case_id FROM lesson_sources WHERE lesson_id = ? "
+                    "ORDER BY case_id", (row["lesson_id"],),
+                ).fetchall())
+                if not sources or not set(sources) <= allowed:
+                    continue
+                results.append(Lesson(
+                    lesson_id=row["lesson_id"], sleeve=row["sleeve"],
+                    text=row["text"], source_case_ids=sources,
+                    eligible_from=date.fromisoformat(row["eligible_from"]),
+                    fingerprint=row["fingerprint"],
+                    tags=tuple(json.loads(row["tags_json"])),
+                    created_at=_parse_utc(row["created_at"]),
+                ))
+        return tuple(results)
 
     def get_distilled_lessons(self, distillation_key: str):
         from ops.backtest.lessons import DistilledLesson

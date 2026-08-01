@@ -24,10 +24,11 @@ from ops.cli import cli
 from ops.config import OpsConfig
 
 
-def _seed_case(path, *, frozen=True, symbol="AAA"):
+def _seed_case(path, *, frozen=True, symbol="AAA", trigger=None):
     case = BacktestCase.create(
         sleeve="research", symbol=symbol, asof=date(2025, 6, 1),
         created_at=datetime(2025, 6, 1, tzinfo=timezone.utc),
+        trigger=trigger,
     )
     manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof)
     cfg = OpsConfig(backtest_store_path=str(path))
@@ -938,3 +939,139 @@ def test_generate_append_top_up_ignores_controls_in_passer_budget(tmp_path):
         ("NM1", date(2025, 6, 16)),
         ("NM2", date(2025, 6, 17)),
     }
+
+
+def _seed_lessons_run(runner, path, monkeypatch):
+    """Seed 5 non-control cases + 1 near-miss control, run + postmortem them.
+
+    Returns ``(run_id, control_case)``. All six cases end up with a thesis
+    assessment (postmortem does not discriminate control cases -- only
+    ``lessons_run``'s case-universe filter does).
+    """
+    control_case = _seed_case(path, symbol="CTL", trigger={"kind": "near_miss_control"})
+    for symbol in ("AAA", "BBB", "CCC", "DDD", "EEE"):
+        _seed_case(path, symbol=symbol)
+
+    first = _invoke(runner, path, [
+        "backtest", "run", "--start", "2025-06-01", "--end", "2025-06-30",
+    ])
+    assert first.exit_code == 0, first.output
+    assert "Cases: 6 total" in first.output
+    run_id = re.search(r"# Backtest report: (\S+)", first.output).group(1)
+
+    with BacktestStore(path) as store, store.transaction() as conn:
+        conn.execute("UPDATE frozen_memos SET memo_json = '{\"thesis\":\"fixture\"}'")
+        conn.execute(
+            "UPDATE case_results SET primary_label = 'win' WHERE run_id = ?",
+            (run_id,),
+        )
+
+    class Assessor:
+        def assess(self, **_kwargs):
+            return {
+                "thesis_correct": False, "narrative": "Mechanism failed.",
+                "evidence": [],
+            }
+
+    class Evidence:
+        def evidence_for(self, **_kwargs):
+            return []
+
+    module = ModuleType("test_lessons_adapter")
+    module.build = lambda: {
+        "assessor": Assessor(), "evidence_provider": Evidence(),
+        "model_id": "local:judge", "prompt_version": "pm-v1",
+    }
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    pm_result = _invoke(runner, path, [
+        "backtest", "postmortem", run_id, "--execute",
+        "--adapter", "test_lessons_adapter:build",
+        "--facts-through", "2025-09-01",
+    ])
+    assert pm_result.exit_code == 0, pm_result.output
+    assert "6 updated" in pm_result.output
+
+    return run_id, control_case
+
+
+def test_lessons_cli_fixes_holdout_before_distillation(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    runner = CliRunner()
+    run_id, control_case = _seed_lessons_run(runner, path, monkeypatch)
+
+    calls = []
+
+    class _RecordingDistiller:
+        def __init__(self, model_spec, client_factory=None):
+            pass
+
+        def distill(self, *, assessments, model_id, prompt_version):
+            calls.append([a.case_id for a in assessments])
+            return [{
+                "text": "Demand a named mechanism for margin expansion.",
+                "source_assessment_keys": [assessments[0].assessment_key],
+            }]
+
+    monkeypatch.setattr("ops.backtest.distiller.Ds4LessonDistiller", _RecordingDistiller)
+
+    # plan-only: writes the experiment record, no distiller call
+    result_plan = _invoke(runner, path, [
+        "backtest", "lessons", run_id, "--holdout-size", "2", "--seed", "7",
+    ])
+    assert result_plan.exit_code == 0, result_plan.output
+    assert "holdout" in result_plan.output
+    assert calls == []
+    experiment_id = re.search(r"experiment (\S+):", result_plan.output).group(1)
+
+    # execute: distills from training cases only
+    result = _invoke(runner, path, [
+        "backtest", "lessons", run_id, "--holdout-size", "2", "--seed", "7", "--execute",
+    ])
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+
+    with BacktestStore(path) as store:
+        record = store.get_experiment(experiment_id)
+    holdout_ids = record.holdout_case_ids
+
+    assert not (set(calls[0]) & set(holdout_ids))
+    # the control case is excluded from both training and holdout
+    assert control_case.case_id not in calls[0]
+    assert control_case.case_id not in holdout_ids
+    assert len(calls[0]) + len(holdout_ids) == 5
+
+
+def test_lessons_cli_excludes_control_cases_from_training_and_holdout(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.sqlite"
+    runner = CliRunner()
+    run_id, control_case = _seed_lessons_run(runner, path, monkeypatch)
+
+    calls = []
+
+    class _RecordingDistiller:
+        def __init__(self, model_spec, client_factory=None):
+            pass
+
+        def distill(self, *, assessments, model_id, prompt_version):
+            calls.append([a.case_id for a in assessments])
+            return [{
+                "text": "Demand a named mechanism for margin expansion.",
+                "source_assessment_keys": [assessments[0].assessment_key],
+            }]
+
+    monkeypatch.setattr("ops.backtest.distiller.Ds4LessonDistiller", _RecordingDistiller)
+
+    result = _invoke(runner, path, [
+        "backtest", "lessons", run_id, "--holdout-size", "1", "--seed", "3", "--execute",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "4 training" in result.output
+    assert "1 holdout" in result.output
+
+    experiment_id = re.search(r"experiment (\S+):", result.output).group(1)
+    with BacktestStore(path) as store:
+        record = store.get_experiment(experiment_id)
+
+    assert control_case.case_id not in record.holdout_case_ids
+    assert control_case.case_id not in calls[0]

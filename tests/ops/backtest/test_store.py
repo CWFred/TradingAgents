@@ -513,6 +513,53 @@ def test_lesson_and_experiment_caches_are_durable_and_idempotent(tmp_path):
         assert reopened.get_experiment(experiment.experiment_id) == experiment
 
 
+def test_lessons_for_training_cases_excludes_out_of_set_sources(tmp_path):
+    path = tmp_path / "backtest.sqlite"
+    case = _case()
+    other = _case(symbol="other")
+    with BacktestStore(path) as store:
+        request = _seed_learning_rows(store, case)
+        store.insert_case(other)
+        assessment = ThesisAssessment(
+            assessment_key="assessment-lessons-reader", memo_key=request.memo_key,
+            case_id=case.case_id, correctness=ThesisCorrectness.WRONG,
+            rationale="Missed balance-sheet risk.", evidence_cutoff=date(2025, 9, 1),
+            model_id="local:judge", prompt_version="pm-v1",
+        )
+        store.save_thesis_assessment(assessment)
+        lesson = Lesson(
+            lesson_id="lesson-in", sleeve="research", text="Check leverage.",
+            source_case_ids=(case.case_id,), eligible_from=date(2025, 9, 1),
+            fingerprint="fingerprint-in",
+        )
+        store.save_distilled_lessons("distillation-in", [
+            DistilledLesson(lesson, "distillation-in", (assessment.assessment_key,)),
+        ])
+        # A lesson sourced from a case outside the training set must never be
+        # served -- that is exactly the holdout leak the reader has to block.
+        with store.transaction() as conn:
+            conn.execute(
+                "INSERT INTO lessons (lesson_id, sleeve, text, eligible_from, "
+                "fingerprint, tags_json, created_at) VALUES "
+                "('lesson-out', 'research', 'Leaked.', '2025-09-01', "
+                "'fingerprint-out', '[]', '2025-09-02T00:00:00+00:00')"
+            )
+            conn.execute(
+                "INSERT INTO lesson_sources (lesson_id, case_id, assessment_key) "
+                "VALUES ('lesson-out', ?, NULL)", (other.case_id,),
+            )
+
+        served = store.lessons_for_training_cases(
+            sleeve="research", case_ids=(case.case_id,),
+        )
+        assert [item.lesson_id for item in served] == ["lesson-in"]
+        assert served[0] == lesson
+        assert store.lessons_for_training_cases(sleeve="research", case_ids=()) == ()
+        assert store.lessons_for_training_cases(
+            sleeve="short", case_ids=(case.case_id,),
+        ) == ()
+
+
 def test_sweep_candidates_round_trip_decimal_score_and_date(tmp_path):
     path = tmp_path / "backtest.sqlite"
     asof = date(2025, 6, 16)

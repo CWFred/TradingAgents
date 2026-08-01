@@ -212,7 +212,8 @@ def backtest_run(
 @backtest.command("generate")
 @click.option("--sleeve", default="research", show_default=True,
               type=click.Choice(["research"]))
-@click.option("--start", required=True, help="First case date (YYYY-MM-DD).")
+@click.option("--start", default=None,
+              help="First case date (YYYY-MM-DD); required unless --experiment.")
 @click.option("--end", default="today", show_default=True,
               help="Last case date (YYYY-MM-DD or today).")
 @click.option("--cases", "case_count", default=None, type=int,
@@ -241,23 +242,48 @@ def backtest_run(
                    "logic -- checkpoints are content-addressed by sweep params "
                    "only and do not detect code changes, so stale results "
                    "would otherwise be served silently.")
+@click.option("--experiment", "experiment_id", default=None,
+              help="Generate the TREATED arm of this experiment: memos are "
+                   "conditioned on its distilled lessons and carry the "
+                   "matching lesson fingerprint. Without it, generation only "
+                   "ever produces the control arm.")
 def backtest_generate(
-    sleeve: str, start: str, end: str, case_count: int | None,
+    sleeve: str, start: str | None, end: str, case_count: int | None,
     execute: bool, enqueue: bool, max_jobs: int | None, source: str,
     spacing: int, append: bool, controls_count: int, fresh_sweep: bool,
+    experiment_id: str | None,
 ) -> None:
-    """Plan or explicitly execute resumable frozen-memo generation."""
+    """Plan or explicitly execute resumable frozen-memo generation.
+
+    With --experiment the case set is that experiment's frozen holdout
+    membership, so --start/--end/--cases do not apply (and are rejected):
+    a window plus a case budget would truncate the holdout and quietly
+    leave treated memos missing.
+    """
     from ops.backtest.service import generate_cases
 
     config = load_config()
     try:
-        start_date, end_date, today = _backtest_window(start, end)
+        if experiment_id is not None:
+            if start is not None or case_count is not None:
+                raise click.ClickException(
+                    "--experiment takes no --start/--end/--cases; it generates "
+                    "exactly the experiment's holdout cases"
+                )
+            start_date = end_date = None
+            budget = 0
+            today = datetime.now().date()
+        else:
+            if start is None:
+                raise click.ClickException("--start is required")
+            start_date, end_date, today = _backtest_window(start, end)
+            budget = case_count or config.backtest_case_count
         result = generate_cases(
             config=config, sleeve=sleeve, start=start_date, end=end_date,
-            case_count=case_count or config.backtest_case_count, today=today,
+            case_count=budget, today=today,
             execute=execute, enqueue=enqueue, max_jobs=max_jobs, source=source,
             spacing_sessions=spacing, append=append, controls_count=controls_count,
-            fresh_sweep=fresh_sweep,
+            fresh_sweep=fresh_sweep, experiment_id=experiment_id,
         )
     except Exception as exc:
         raise _backtest_error(exc) from exc
@@ -367,6 +393,69 @@ def backtest_postmortem(
         f"postmortem {run_id}: {result.total} memo(s), {result.cached} cached, "
         f"{result.pending} pending, {result.updated} updated"
     )
+
+
+@backtest.command("lessons")
+@click.argument("run_id")
+@click.option("--execute", is_flag=True,
+              help="Distill lessons from training-case post-mortems via ds4.")
+@click.option("--holdout-size", default=None, type=int,
+              help="Holdout case count (default: configured backtest_holdout_size).")
+@click.option("--seed", default=None, type=int,
+              help="Holdout split seed (default: configured backtest_experiment_seed).")
+def backtest_lessons(
+    run_id: str, execute: bool, holdout_size: int | None, seed: int | None,
+) -> None:
+    """Fix holdout membership, then distill training-case lessons.
+
+    Near-miss control cases (trigger kind "near_miss_control") are excluded
+    from the run's case universe before the holdout split -- they measure
+    the screener, not the research brain, so they land in neither the
+    training set nor the holdout set.
+    """
+    from ops.backtest.service import lessons_run
+
+    config = load_config()
+    try:
+        result = lessons_run(
+            path=config.backtest_store_path, run_id=run_id, execute=execute,
+            holdout_size=holdout_size, seed=seed,
+        )
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    click.echo(
+        f"experiment {result.experiment_id}: {len(result.training)} training, "
+        f"{len(result.holdout)} holdout, {result.assessments} assessment(s), "
+        f"{result.lessons} lesson(s){'' if result.executed else ' (plan only)'}"
+    )
+
+
+@backtest.command("experiment")
+@click.argument("experiment_id")
+@click.option("--execute", is_flag=True,
+              help="Replay both memo variants over the holdout; default only "
+                   "prints the plan and the treated memos still to generate.")
+def backtest_experiment(experiment_id: str, execute: bool) -> None:
+    """Paired control/treated efficacy over an experiment's fixed holdout.
+
+    Control is the ordinary frozen memo (lesson fingerprint "none"); treated
+    is the memo generated with the lessons eligible as of each case's asof.
+    Both arms are replayed from cached prices -- no model or network calls.
+    The result is descriptive only: no significance is claimed.
+    """
+    from ops.backtest.service import experiment_run
+
+    config = load_config()
+    try:
+        summary = experiment_run(
+            path=config.backtest_store_path, experiment_id=experiment_id,
+            execute=execute,
+        )
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    width = max(len(key) for key in summary)
+    for key, value in summary.items():
+        click.echo(f"{key.ljust(width)}  {value}")
 
 
 @cli.command()
