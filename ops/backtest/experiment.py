@@ -24,7 +24,7 @@ from datetime import date
 from typing import Any
 
 from ops.backtest.lessons import PairedCaseInput
-from ops.backtest.models import Lesson
+from ops.backtest.models import Lesson, OutcomeState
 from ops.backtest.service import (
     DEFAULT_BRAIN_VERSION,
     DEFAULT_PROMPT_VERSION,
@@ -38,11 +38,29 @@ from ops.backtest.store import BacktestStore
 from ops.config import OpsConfig
 
 
-def generate_command(case) -> str:
-    """The exact command that would create this case's missing memo."""
+def generate_command_span(
+    *, sleeve: str, start: date, end: date, experiment_id: str | None = None,
+) -> str:
+    """The exact command that generates memos for a case window.
+
+    ``--experiment`` is what makes the treated arm reachable: without it
+    ``backtest generate`` threads no lessons and can only ever (re)produce
+    the control memo, so an operator following the printed command would
+    loop forever on a missing treated memo.
+    """
+    variant = f" --experiment {experiment_id}" if experiment_id else ""
     return (
-        f"ops backtest generate --sleeve {case.sleeve} "
-        f"--start {case.asof.isoformat()} --end {case.asof.isoformat()} --execute"
+        f"ops backtest generate --sleeve {sleeve} "
+        f"--start {start.isoformat()} --end {end.isoformat()}"
+        f"{variant} --execute"
+    )
+
+
+def generate_command(case, experiment_id: str | None = None) -> str:
+    """The exact command that creates this one case's missing memo variant."""
+    return generate_command_span(
+        sleeve=case.sleeve, start=case.asof, end=case.asof,
+        experiment_id=experiment_id,
     )
 
 
@@ -78,14 +96,26 @@ def primary_utility(outcomes, result) -> float:
 
     ``CaseResult`` has no ``utility`` field (the plan's ``primary_utility``
     does not exist): utility lives on the per-horizon ``HorizonOutcome``, so
-    the primary horizon's row is selected here.  An ungraded horizon
-    (unpriceable/pending -- ``utility is None``) scores 0.0: no measurable
-    edge either way, which keeps the paired delta finite and honest instead
-    of dropping the pair.
+    the primary horizon's row is selected here.
+
+    An ungraded horizon (``PENDING``/``UNPRICEABLE``, i.e. cached prices do
+    not reach the adjudication date) is a **refusal**, not a 0.0: scoring it
+    zero would make a stale-price experiment report ``mean_delta 0.0``,
+    indistinguishable from a genuine null result -- and stale prices are the
+    default path, since the adjudication date is today.  Both arms replay
+    the same bars, so raising here is symmetric and cannot bias a variant.
     """
     for outcome in outcomes:
-        if outcome.horizon_sessions == result.primary_horizon:
-            return float(outcome.utility) if outcome.utility is not None else 0.0
+        if outcome.horizon_sessions != result.primary_horizon:
+            continue
+        if outcome.state != OutcomeState.MATURE or outcome.utility is None:
+            raise MissingBacktestArtifacts(
+                f"{result.case_id}: {result.primary_horizon}-session outcome is "
+                f"{outcome.state.value}, not mature ({outcome.detail or 'no detail'}); "
+                "refresh cached prices with `ops backtest prices` before grading "
+                "this experiment"
+            )
+        return float(outcome.utility)
     raise BacktestServiceError(
         f"replay of {result.case_id} produced no {result.primary_horizon}-session outcome"
     )
@@ -137,7 +167,10 @@ class ReplayPairedEvaluator:
                 f"{variant} memo missing for case {case.case_id} "
                 f"({case.symbol} {case.asof.isoformat()}, "
                 f"lesson_fingerprint={request.lesson_fingerprint}); "
-                f"create it with: {generate_command(case)}"
+                "create it with: "
+                + generate_command(
+                    case, self.experiment_id if variant == "treated" else None,
+                )
             )
         if self._prices is None:
             from ops.backtest.prices import PriceCache

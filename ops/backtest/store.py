@@ -854,6 +854,14 @@ class BacktestStore:
             "lesson_fingerprint": request.lesson_fingerprint,
             "conditioning": request.conditioning,
             "hit_payload": request.hit_payload,
+            # Only persisted when non-empty, so a lessons-free request keeps
+            # producing byte-identical request_json and already-queued jobs
+            # cannot trip the "different request data" conflict. The texts
+            # are load-bearing: the background drain rehydrates from this
+            # payload, and generating without them under a treated
+            # lesson_fingerprint would cache a control memo under the
+            # treated identity.
+            **({"lesson_texts": list(request.lesson_texts)} if request.lesson_texts else {}),
         })
         with self.transaction() as conn:
             frozen = conn.execute(
@@ -985,6 +993,7 @@ class BacktestStore:
                 evidence_model_id=payload["evidence_model_id"],
                 thesis_model_id=payload["thesis_model_id"],
                 lesson_fingerprint=payload["lesson_fingerprint"],
+                lesson_texts=tuple(payload.get("lesson_texts", ())),
                 conditioning=payload.get("conditioning", {}),
                 hit_payload=payload.get("hit_payload", {}),
             )

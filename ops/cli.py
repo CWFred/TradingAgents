@@ -241,10 +241,16 @@ def backtest_run(
                    "logic -- checkpoints are content-addressed by sweep params "
                    "only and do not detect code changes, so stale results "
                    "would otherwise be served silently.")
+@click.option("--experiment", "experiment_id", default=None,
+              help="Generate the TREATED arm of this experiment: memos are "
+                   "conditioned on its distilled lessons and carry the "
+                   "matching lesson fingerprint. Without it, generation only "
+                   "ever produces the control arm.")
 def backtest_generate(
     sleeve: str, start: str, end: str, case_count: int | None,
     execute: bool, enqueue: bool, max_jobs: int | None, source: str,
     spacing: int, append: bool, controls_count: int, fresh_sweep: bool,
+    experiment_id: str | None,
 ) -> None:
     """Plan or explicitly execute resumable frozen-memo generation."""
     from ops.backtest.service import generate_cases
@@ -257,7 +263,7 @@ def backtest_generate(
             case_count=case_count or config.backtest_case_count, today=today,
             execute=execute, enqueue=enqueue, max_jobs=max_jobs, source=source,
             spacing_sessions=spacing, append=append, controls_count=controls_count,
-            fresh_sweep=fresh_sweep,
+            fresh_sweep=fresh_sweep, experiment_id=experiment_id,
         )
     except Exception as exc:
         raise _backtest_error(exc) from exc

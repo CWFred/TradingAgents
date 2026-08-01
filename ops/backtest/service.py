@@ -1020,7 +1020,19 @@ def generate_cases(
     append: bool = False,
     controls_count: int = 0,
     fresh_sweep: bool = False,
+    experiment_id: str | None = None,
 ) -> GenerationResult:
+    """Plan or run frozen-memo generation for a case window.
+
+    ``experiment_id`` switches generation to an experiment's TREATED arm:
+    that experiment's lessons are loaded (same read path
+    ``experiment_run`` grades with) and threaded into
+    ``_generation_requests``, so each case's memo identity carries the
+    lesson fingerprint eligible as of its own asof instead of "none".
+    Without it, generation can only ever (re)produce the control arm --
+    which is why ``backtest experiment`` prints this flag in the command it
+    tells the operator to run.
+    """
     if execute and enqueue:
         raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
     if append and source == "recorded":
@@ -1093,10 +1105,23 @@ def generate_cases(
         cases = _selected_cases(
             store, sleeve=sleeve, start=start, end=end, case_count=case_count,
         )
+        lessons: Sequence[Lesson] = ()
+        if experiment_id is not None:
+            record, _training, lessons = load_experiment_lessons(store, experiment_id)
+            if record.sleeve != sleeve:
+                raise InvalidBacktestRequest(
+                    f"experiment {experiment_id} is sleeve {record.sleeve!r}, "
+                    f"not {sleeve!r}"
+                )
+            if not lessons:
+                raise MissingBacktestArtifacts(
+                    f"experiment {experiment_id} has no distilled lessons; "
+                    "run `ops backtest lessons RUN_ID --execute` first"
+                )
         requests = _generation_requests(
             store, cases, config=config,
             brain_version=brain_version, prompt_version=prompt_version,
-            on_missing_manifest="skip",
+            on_missing_manifest="skip", lessons=lessons,
         )
         plan = plan_generation(requests, store=store)
         if enqueue:
@@ -1518,6 +1543,24 @@ def _experiment_training_case_ids(store: BacktestStore, record) -> tuple[str, ..
     ))
 
 
+def load_experiment_lessons(store: BacktestStore, experiment_id: str):
+    """``(record, training_case_ids, lessons)`` for one saved experiment.
+
+    Single read path shared by ``experiment_run`` (which grades the treated
+    arm) and ``generate_cases(experiment_id=...)`` (which creates it), so the
+    fingerprint the generator writes and the one the experiment looks up can
+    never drift apart.
+    """
+    record = store.get_experiment(experiment_id)
+    if record is None:
+        raise UnknownBacktestRun(f"unknown experiment {experiment_id!r}")
+    training = _experiment_training_case_ids(store, record)
+    lessons = store.lessons_for_training_cases(
+        sleeve=record.sleeve, case_ids=training,
+    )
+    return record, training, lessons
+
+
 def experiment_run(
     *,
     path: str | Path,
@@ -1540,7 +1583,11 @@ def experiment_run(
     treated memo variants that still have to be generated; ``execute=True``
     replays both arms and returns the paired summary merged in.
     """
-    from ops.backtest.experiment import ReplayPairedEvaluator, variant_request
+    from ops.backtest.experiment import (
+        ReplayPairedEvaluator,
+        generate_command_span,
+        variant_request,
+    )
     from ops.backtest.lessons import (
         EfficacyPlan,
         PairedCaseInput,
@@ -1551,20 +1598,15 @@ def experiment_run(
     config = load_config()
     adjudication = today or datetime.now(timezone.utc).date()
     with BacktestStore(path) as store:
-        record = store.get_experiment(experiment_id)
-        if record is None:
-            raise UnknownBacktestRun(f"unknown experiment {experiment_id!r}")
-        training = _experiment_training_case_ids(store, record)
+        record, training, lessons = load_experiment_lessons(store, experiment_id)
         plan = EfficacyPlan(
             experiment_id=record.experiment_id, sleeve=record.sleeve,
             seed=record.seed, training_case_ids=training,
             holdout_case_ids=record.holdout_case_ids,
         )
-        lessons = store.lessons_for_training_cases(
-            sleeve=record.sleeve, case_ids=training,
-        )
         case_inputs: dict[str, PairedCaseInput] = {}
         missing_treated: list[str] = []
+        missing_asofs: list[date] = []
         for case_id in plan.holdout_case_ids:
             case = store.get_case(case_id)
             if case is None:
@@ -1581,6 +1623,7 @@ def experiment_run(
             request = variant_request(store, case, config=config, lessons=lessons)
             if store.get_frozen_memo(request.memo_key) is None:
                 missing_treated.append(case_id)
+                missing_asofs.append(case.asof)
         identity = {
             "experiment_id": record.experiment_id,
             "sleeve": record.sleeve,
@@ -1589,6 +1632,14 @@ def experiment_run(
             "training_cases": len(plan.training_case_ids),
             "lessons": len(lessons),
             "missing_treated": tuple(sorted(missing_treated)),
+            # The generation to-do list is only useful if the command it
+            # implies actually produces TREATED memos -- hence --experiment.
+            "generate_command": (
+                generate_command_span(
+                    sleeve=record.sleeve, start=min(missing_asofs),
+                    end=max(missing_asofs), experiment_id=record.experiment_id,
+                ) if missing_asofs else ""
+            ),
         }
         if not execute:
             return {
