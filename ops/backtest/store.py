@@ -1418,6 +1418,43 @@ class BacktestStore:
             "tags": lesson.tags,
         })
 
+    def lessons_for_training_cases(
+        self, *, sleeve: str, case_ids: Sequence[str],
+    ) -> tuple[Lesson, ...]:
+        """Read-only: lessons whose every source case lies inside ``case_ids``.
+
+        Used by the paired-efficacy experiment to load "this experiment's"
+        lessons without a lessons-by-fingerprint index: a lesson belongs to
+        an experiment exactly when it was distilled from that experiment's
+        training cases. Any lesson touching a case outside the set (i.e. a
+        holdout case) is dropped, so a leaked lesson can never be served
+        into the treated arm. Source-less lessons are dropped too -- they
+        cannot be attributed to a training set at all.
+        """
+        allowed = set(case_ids)
+        results: list[Lesson] = []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM lessons WHERE sleeve = ? ORDER BY lesson_id",
+                (sleeve,),
+            ).fetchall()
+            for row in rows:
+                sources = tuple(item["case_id"] for item in self._conn.execute(
+                    "SELECT case_id FROM lesson_sources WHERE lesson_id = ? "
+                    "ORDER BY case_id", (row["lesson_id"],),
+                ).fetchall())
+                if not sources or not set(sources) <= allowed:
+                    continue
+                results.append(Lesson(
+                    lesson_id=row["lesson_id"], sleeve=row["sleeve"],
+                    text=row["text"], source_case_ids=sources,
+                    eligible_from=date.fromisoformat(row["eligible_from"]),
+                    fingerprint=row["fingerprint"],
+                    tags=tuple(json.loads(row["tags_json"])),
+                    created_at=_parse_utc(row["created_at"]),
+                ))
+        return tuple(results)
+
     def get_distilled_lessons(self, distillation_key: str):
         from ops.backtest.lessons import DistilledLesson
 

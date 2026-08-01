@@ -333,6 +333,92 @@ def _memo_and_exit_policy(record):
     return memo, make_research_exit_policy(memo=memo)
 
 
+def replay_and_evaluate_case(
+    *,
+    prices: PriceCache,
+    run_id: str,
+    case,
+    record,
+    resolved: Mapping[str, Any],
+    today: date,
+):
+    """Replay one case's frozen memo against cached prices and grade it.
+
+    Mechanical lift of ``run_cached_backtest``'s per-case loop body so the
+    paired-efficacy experiment can replay a single case (control or treated
+    memo variant) with the same wiring. Persistence stays with the caller:
+    this returns ``(replay, outcomes, result)`` and writes nothing, because
+    the experiment replays memos outside of any stored run.
+    """
+    initial = _initial_decision(record)
+    _memo, exit_policy = _memo_and_exit_policy(record)
+    notional = Decimal(resolved["case_notional"])
+    if initial.action == DecisionAction.BUY:
+        sizing = size_research_case(
+            tier=initial.conviction, fixed_equity=notional,
+            symbol=case.symbol,
+        )
+        if sizing.rejected is not None:
+            raise BacktestServiceError(
+                f"{case.symbol}: frozen conviction cannot be sized: {sizing.rejected}"
+            )
+        notional = sizing.notional
+    explicit_stock_state = prices.state(case.symbol)
+    stock_status = prices.classify(
+        case.symbol, required_through=today,
+    )
+    stock_reason = (
+        explicit_stock_state.reason
+        if explicit_stock_state is not None
+        else None
+    )
+    if stock_status == PriceSeriesStatus.STALE and not stock_reason:
+        stock_reason = f"cached series does not reach {today}"
+    explicit_benchmark_state = prices.state(resolved["benchmark"])
+    benchmark_status = prices.classify(
+        resolved["benchmark"], required_through=today,
+    )
+    benchmark_reason = (
+        explicit_benchmark_state.reason
+        if explicit_benchmark_state is not None
+        else None
+    )
+    if benchmark_status == PriceSeriesStatus.STALE and not benchmark_reason:
+        benchmark_reason = f"cached series does not reach {today}"
+    stock_bars = prices.bars(
+        case.symbol, start=case.asof, end=today,
+        adjusted_to=case.asof,
+    )
+    benchmark_bars = prices.bars(
+        resolved["benchmark"], start=case.asof, end=today,
+        adjusted_to=case.asof,
+    )
+    replay = replay_case(
+        run_id=run_id, case=case, initial=initial,
+        bars=stock_bars, notional=notional, settings=resolved,
+        exit_policy=exit_policy,
+        price_status=stock_status,
+        price_state_reason=stock_reason,
+    )
+    outcomes, result = evaluate_replay(
+        replay, stock_bars=stock_bars,
+        benchmark_bars=benchmark_bars,
+        adjudication_date=today,
+        horizons=tuple(resolved["horizons"]),
+        primary_horizon=resolved["primary_horizon"],
+        wash_band=Decimal(resolved["wash_band"]),
+        stock_status=stock_status,
+        benchmark_status=benchmark_status,
+        stock_status_reason=stock_reason,
+        benchmark_status_reason=benchmark_reason,
+        stock_terminal_session=(
+            explicit_stock_state.asof
+            if explicit_stock_state is not None else None
+        ),
+    )
+    return replay, outcomes, result
+
+
 def run_cached_backtest(
     *,
     config: OpsConfig,
@@ -437,72 +523,9 @@ def run_cached_backtest(
         run_succeeded = False
         try:
             for case in cases:
-                record = records[case.case_id]
-                initial = _initial_decision(record)
-                _memo, exit_policy = _memo_and_exit_policy(record)
-                notional = Decimal(resolved["case_notional"])
-                if initial.action == DecisionAction.BUY:
-                    sizing = size_research_case(
-                        tier=initial.conviction, fixed_equity=notional,
-                        symbol=case.symbol,
-                    )
-                    if sizing.rejected is not None:
-                        raise BacktestServiceError(
-                            f"{case.symbol}: frozen conviction cannot be sized: {sizing.rejected}"
-                        )
-                    notional = sizing.notional
-                explicit_stock_state = prices.state(case.symbol)
-                stock_status = prices.classify(
-                    case.symbol, required_through=today,
-                )
-                stock_reason = (
-                    explicit_stock_state.reason
-                    if explicit_stock_state is not None
-                    else None
-                )
-                if stock_status == PriceSeriesStatus.STALE and not stock_reason:
-                    stock_reason = f"cached series does not reach {today}"
-                explicit_benchmark_state = prices.state(resolved["benchmark"])
-                benchmark_status = prices.classify(
-                    resolved["benchmark"], required_through=today,
-                )
-                benchmark_reason = (
-                    explicit_benchmark_state.reason
-                    if explicit_benchmark_state is not None
-                    else None
-                )
-                if benchmark_status == PriceSeriesStatus.STALE and not benchmark_reason:
-                    benchmark_reason = f"cached series does not reach {today}"
-                stock_bars = prices.bars(
-                    case.symbol, start=case.asof, end=today,
-                    adjusted_to=case.asof,
-                )
-                benchmark_bars = prices.bars(
-                    resolved["benchmark"], start=case.asof, end=today,
-                    adjusted_to=case.asof,
-                )
-                replay = replay_case(
-                    run_id=run_id, case=case, initial=initial,
-                    bars=stock_bars, notional=notional, settings=resolved,
-                    exit_policy=exit_policy,
-                    price_status=stock_status,
-                    price_state_reason=stock_reason,
-                )
-                outcomes, result = evaluate_replay(
-                    replay, stock_bars=stock_bars,
-                    benchmark_bars=benchmark_bars,
-                    adjudication_date=today,
-                    horizons=tuple(resolved["horizons"]),
-                    primary_horizon=resolved["primary_horizon"],
-                    wash_band=Decimal(resolved["wash_band"]),
-                    stock_status=stock_status,
-                    benchmark_status=benchmark_status,
-                    stock_status_reason=stock_reason,
-                    benchmark_status_reason=benchmark_reason,
-                    stock_terminal_session=(
-                        explicit_stock_state.asof
-                        if explicit_stock_state is not None else None
-                    ),
+                replay, outcomes, result = replay_and_evaluate_case(
+                    prices=prices, run_id=run_id, case=case,
+                    record=records[case.case_id], resolved=resolved, today=today,
                 )
                 store.save_replay_evaluation(replay, outcomes, result)
             run_succeeded = True
@@ -1475,3 +1498,109 @@ def _training_assessments(store, run_id, training_case_ids):
         if assessment is not None and assessment.case_id in training:
             out.append(assessment)
     return tuple(out)
+
+
+def _experiment_training_case_ids(store: BacktestStore, record) -> tuple[str, ...]:
+    """Reconstruct the experiment's training set from its stored holdout.
+
+    ``ExperimentRecord`` persists only the holdout membership, so the
+    training set is rebuilt as "every non-control case in the sleeve that is
+    not in the holdout".  That is a superset of the run-scoped universe
+    ``lessons_run`` split, which is safe in both directions that matter:
+    holdout cases are still excluded (so ``validate_lesson_sources`` still
+    catches a leaked lesson), and a lesson distilled from a training case is
+    still recognised as this experiment's.
+    """
+    holdout = set(record.holdout_case_ids)
+    return tuple(sorted(
+        case.case_id for case in store.list_cases(sleeve=record.sleeve)
+        if case.case_id not in holdout and not _is_control_case(case)
+    ))
+
+
+def experiment_run(
+    *,
+    path: str | Path,
+    experiment_id: str,
+    execute: bool = False,
+    evaluator: Any | None = None,
+    today: date | None = None,
+) -> dict:
+    """Plan or run the paired control/treated efficacy of an experiment.
+
+    Membership is read, never recomputed: the holdout is whatever
+    ``backtest lessons`` froze into the ``ExperimentRecord``.  Lessons are
+    loaded by training-set provenance (``lessons_for_training_cases``), not
+    from the record's ``lesson_fingerprint`` -- that field is deliberately
+    left at "pending" by ``lessons_run``, since the store treats it as part
+    of the experiment's immutable identity.  The real per-case fingerprints
+    are derived from the lesson objects by ``run_paired_efficacy``.
+
+    Plan-only mode (the default) reports holdout size, lesson count, and the
+    treated memo variants that still have to be generated; ``execute=True``
+    replays both arms and returns the paired summary merged in.
+    """
+    from ops.backtest.experiment import ReplayPairedEvaluator, variant_request
+    from ops.backtest.lessons import (
+        EfficacyPlan,
+        PairedCaseInput,
+        paired_experiment_summary,
+        run_paired_efficacy,
+    )
+
+    config = load_config()
+    adjudication = today or datetime.now(timezone.utc).date()
+    with BacktestStore(path) as store:
+        record = store.get_experiment(experiment_id)
+        if record is None:
+            raise UnknownBacktestRun(f"unknown experiment {experiment_id!r}")
+        training = _experiment_training_case_ids(store, record)
+        plan = EfficacyPlan(
+            experiment_id=record.experiment_id, sleeve=record.sleeve,
+            seed=record.seed, training_case_ids=training,
+            holdout_case_ids=record.holdout_case_ids,
+        )
+        lessons = store.lessons_for_training_cases(
+            sleeve=record.sleeve, case_ids=training,
+        )
+        case_inputs: dict[str, PairedCaseInput] = {}
+        missing_treated: list[str] = []
+        for case_id in plan.holdout_case_ids:
+            case = store.get_case(case_id)
+            if case is None:
+                raise BacktestServiceError(f"holdout case {case_id!r} disappeared")
+            manifest = store.get_context_manifest(case_id)
+            if manifest is None:
+                raise MissingBacktestArtifacts(
+                    f"holdout case {case_id} has no sealed context manifest"
+                )
+            case_inputs[case_id] = PairedCaseInput(
+                case_id=case_id, asof=case.asof,
+                pinned_input_hash=manifest.manifest_hash,
+            )
+            request = variant_request(store, case, config=config, lessons=lessons)
+            if store.get_frozen_memo(request.memo_key) is None:
+                missing_treated.append(case_id)
+        identity = {
+            "experiment_id": record.experiment_id,
+            "sleeve": record.sleeve,
+            "seed": record.seed,
+            "holdout_cases": len(plan.holdout_case_ids),
+            "training_cases": len(plan.training_case_ids),
+            "lessons": len(lessons),
+            "missing_treated": tuple(sorted(missing_treated)),
+        }
+        if not execute:
+            return {
+                **identity, "executed": False, "pairs": None, "mean_delta": None,
+            }
+        if evaluator is None:
+            evaluator = ReplayPairedEvaluator(
+                store=store, config=config, lessons=lessons,
+                today=adjudication, experiment_id=record.experiment_id,
+            )
+        results = run_paired_efficacy(
+            plan, case_inputs=case_inputs, lessons=lessons, evaluator=evaluator,
+        )
+        summary = paired_experiment_summary(results)
+        return {**identity, **summary, "executed": True}

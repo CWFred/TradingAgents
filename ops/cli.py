@@ -404,6 +404,34 @@ def backtest_lessons(
     )
 
 
+@backtest.command("experiment")
+@click.argument("experiment_id")
+@click.option("--execute", is_flag=True,
+              help="Replay both memo variants over the holdout; default only "
+                   "prints the plan and the treated memos still to generate.")
+def backtest_experiment(experiment_id: str, execute: bool) -> None:
+    """Paired control/treated efficacy over an experiment's fixed holdout.
+
+    Control is the ordinary frozen memo (lesson fingerprint "none"); treated
+    is the memo generated with the lessons eligible as of each case's asof.
+    Both arms are replayed from cached prices -- no model or network calls.
+    The result is descriptive only: no significance is claimed.
+    """
+    from ops.backtest.service import experiment_run
+
+    config = load_config()
+    try:
+        summary = experiment_run(
+            path=config.backtest_store_path, experiment_id=experiment_id,
+            execute=execute,
+        )
+    except Exception as exc:
+        raise _backtest_error(exc) from exc
+    width = max(len(key) for key in summary)
+    for key, value in summary.items():
+        click.echo(f"{key.ljust(width)}  {value}")
+
+
 @cli.command()
 @click.option("--asof", "asof_dt", default=None,
               type=click.DateTime(formats=["%Y-%m-%d"]),
