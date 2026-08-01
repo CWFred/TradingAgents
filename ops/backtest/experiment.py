@@ -39,20 +39,30 @@ from ops.config import OpsConfig
 
 
 def generate_command_span(
-    *, sleeve: str, start: date, end: date, experiment_id: str | None = None,
+    *,
+    sleeve: str,
+    start: date | None = None,
+    end: date | None = None,
+    experiment_id: str | None = None,
 ) -> str:
-    """The exact command that generates memos for a case window.
+    """The exact command that generates the memos being asked for.
 
     ``--experiment`` is what makes the treated arm reachable: without it
     ``backtest generate`` threads no lessons and can only ever (re)produce
     the control memo, so an operator following the printed command would
-    loop forever on a missing treated memo.
+    loop forever on a missing treated memo.  In that mode the command takes
+    no window and no ``--cases`` budget -- generation covers exactly the
+    experiment's holdout membership -- so what is printed here is literally
+    what the code honours, with no budget arithmetic to get wrong.
     """
-    variant = f" --experiment {experiment_id}" if experiment_id else ""
+    if experiment_id:
+        return (
+            f"ops backtest generate --sleeve {sleeve} "
+            f"--experiment {experiment_id} --execute"
+        )
     return (
         f"ops backtest generate --sleeve {sleeve} "
-        f"--start {start.isoformat()} --end {end.isoformat()}"
-        f"{variant} --execute"
+        f"--start {start.isoformat()} --end {end.isoformat()} --execute"
     )
 
 

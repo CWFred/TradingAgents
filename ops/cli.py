@@ -212,7 +212,8 @@ def backtest_run(
 @backtest.command("generate")
 @click.option("--sleeve", default="research", show_default=True,
               type=click.Choice(["research"]))
-@click.option("--start", required=True, help="First case date (YYYY-MM-DD).")
+@click.option("--start", default=None,
+              help="First case date (YYYY-MM-DD); required unless --experiment.")
 @click.option("--end", default="today", show_default=True,
               help="Last case date (YYYY-MM-DD or today).")
 @click.option("--cases", "case_count", default=None, type=int,
@@ -247,20 +248,39 @@ def backtest_run(
                    "matching lesson fingerprint. Without it, generation only "
                    "ever produces the control arm.")
 def backtest_generate(
-    sleeve: str, start: str, end: str, case_count: int | None,
+    sleeve: str, start: str | None, end: str, case_count: int | None,
     execute: bool, enqueue: bool, max_jobs: int | None, source: str,
     spacing: int, append: bool, controls_count: int, fresh_sweep: bool,
     experiment_id: str | None,
 ) -> None:
-    """Plan or explicitly execute resumable frozen-memo generation."""
+    """Plan or explicitly execute resumable frozen-memo generation.
+
+    With --experiment the case set is that experiment's frozen holdout
+    membership, so --start/--end/--cases do not apply (and are rejected):
+    a window plus a case budget would truncate the holdout and quietly
+    leave treated memos missing.
+    """
     from ops.backtest.service import generate_cases
 
     config = load_config()
     try:
-        start_date, end_date, today = _backtest_window(start, end)
+        if experiment_id is not None:
+            if start is not None or case_count is not None:
+                raise click.ClickException(
+                    "--experiment takes no --start/--end/--cases; it generates "
+                    "exactly the experiment's holdout cases"
+                )
+            start_date = end_date = None
+            budget = 0
+            today = datetime.now().date()
+        else:
+            if start is None:
+                raise click.ClickException("--start is required")
+            start_date, end_date, today = _backtest_window(start, end)
+            budget = case_count or config.backtest_case_count
         result = generate_cases(
             config=config, sleeve=sleeve, start=start_date, end=end_date,
-            case_count=case_count or config.backtest_case_count, today=today,
+            case_count=budget, today=today,
             execute=execute, enqueue=enqueue, max_jobs=max_jobs, source=source,
             spacing_sessions=spacing, append=append, controls_count=controls_count,
             fresh_sweep=fresh_sweep, experiment_id=experiment_id,

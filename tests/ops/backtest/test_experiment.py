@@ -146,11 +146,11 @@ def test_experiment_plan_only_lists_missing_treated_memos(seeded_experiment):
     assert summary["missing_treated"] == tuple(
         sorted(case.case_id for case in holdout)
     )
-    # The to-do command must actually be able to create the TREATED arm.
+    # The to-do command must actually create the TREATED arm, and must carry
+    # no window/budget -- either would truncate the scattered holdout.
     assert summary["generate_command"] == (
-        "ops backtest generate --sleeve research "
-        "--start 2025-07-01 --end 2025-07-02 "
-        f"--experiment {EXPERIMENT_ID} --execute"
+        f"ops backtest generate --sleeve research --experiment {EXPERIMENT_ID} "
+        "--execute"
     )
 
 
@@ -294,14 +294,15 @@ def test_generate_with_experiment_creates_the_treated_variant(seeded_experiment)
     path, _training, holdout, lesson = seeded_experiment
     config = load_config()
     treated = lesson_set_hash(eligible_lessons((lesson,), asof=holdout[0].asof))
-    window = {
-        "config": config, "sleeve": "research",
-        "start": date(2025, 7, 1), "end": date(2025, 7, 2),
-        "case_count": 30, "today": date(2025, 8, 1), "enqueue": True,
-    }
-
-    control_plan = generate_cases(**window)
-    treated_plan = generate_cases(**window, experiment_id=EXPERIMENT_ID)
+    control_plan = generate_cases(
+        config=config, sleeve="research",
+        start=date(2025, 7, 1), end=date(2025, 7, 2),
+        case_count=30, today=date(2025, 8, 1), enqueue=True,
+    )
+    treated_plan = generate_cases(
+        config=config, sleeve="research", today=date(2025, 8, 1),
+        enqueue=True, experiment_id=EXPERIMENT_ID,
+    )
 
     assert control_plan.total == 2
     assert treated_plan.total == 2
@@ -330,8 +331,54 @@ def test_generate_with_unknown_experiment_is_rejected(seeded_experiment):
     with pytest.raises(UnknownBacktestRun):
         generate_cases(
             config=load_config(), sleeve="research",
-            start=date(2025, 7, 1), end=date(2025, 7, 2), case_count=30,
             today=date(2025, 8, 1), enqueue=True, experiment_id="experiment-nope",
+        )
+
+
+def test_generate_with_experiment_ignores_window_and_case_budget(seeded_experiment):
+    """A holdout case a window/budget would truncate away is still generated."""
+    from ops.backtest.lessons import eligible_lessons, lesson_set_hash
+    from ops.backtest.service import (
+        InvalidBacktestRequest,
+        _selected_cases,
+        generate_cases,
+    )
+    from ops.config import load_config
+
+    path, training, holdout, lesson = seeded_experiment
+    config = load_config()
+    treated = lesson_set_hash(eligible_lessons((lesson,), asof=holdout[0].asof))
+
+    # Baseline: the ordinary window/budget path, given the smallest budget,
+    # selects the EARLIEST case (a training case) and drops both holdout
+    # cases -- exactly the truncation that would strand the treated arm.
+    with BacktestStore(path) as store:
+        truncated = _selected_cases(
+            store, sleeve="research", start=date(2025, 6, 1),
+            end=date(2025, 7, 31), case_count=1,
+        )
+    assert [case.case_id for case in truncated] == [training.case_id]
+
+    result = generate_cases(
+        config=config, sleeve="research", today=date(2025, 8, 1),
+        enqueue=True, experiment_id=EXPERIMENT_ID,
+    )
+
+    assert result.total == 2
+    with BacktestStore(path) as store:
+        queued = store.queued_generation_requests()
+    assert {request.case.case_id for request in queued} == {
+        case.case_id for case in holdout
+    }
+    assert {request.lesson_fingerprint for request in queued} == {treated}
+
+    # And the mode refuses a window/budget outright, so the printed command
+    # (which carries neither) cannot silently mean something narrower.
+    with pytest.raises(InvalidBacktestRequest, match="no window or case budget"):
+        generate_cases(
+            config=config, sleeve="research", start=date(2025, 7, 1),
+            end=date(2025, 7, 2), case_count=30, today=date(2025, 8, 1),
+            enqueue=True, experiment_id=EXPERIMENT_ID,
         )
 
 
@@ -356,6 +403,42 @@ def test_experiment_cli_echoes_plan_and_missing_variants(seeded_experiment):
     assert holdout[0].case_id in echoed["missing_treated"]
     # Values are echoed in a single aligned column.
     assert len({len(line) - len(line.split(maxsplit=1)[1]) for line in lines}) == 1
+
+
+def test_generate_cli_experiment_flag_contract(seeded_experiment):
+    from click.testing import CliRunner
+
+    from ops.cli import cli
+
+    path, _training, holdout, _lesson = seeded_experiment
+    env = {"OPS_BACKTEST_STORE_PATH": str(path)}
+    runner = CliRunner()
+
+    ok = runner.invoke(
+        cli, ["backtest", "generate", "--experiment", EXPERIMENT_ID, "--enqueue"],
+        env=env,
+    )
+    assert ok.exit_code == 0, ok.output
+    assert "generation plan: 2 case(s)" in ok.output
+
+    clash = runner.invoke(
+        cli,
+        ["backtest", "generate", "--experiment", EXPERIMENT_ID,
+         "--start", "2025-07-01"],
+        env=env,
+    )
+    assert clash.exit_code != 0
+    assert "takes no --start/--end/--cases" in clash.output
+
+    windowless = runner.invoke(cli, ["backtest", "generate"], env=env)
+    assert windowless.exit_code != 0
+    assert "--start is required" in windowless.output
+
+    with BacktestStore(path) as store:
+        queued = store.queued_generation_requests()
+    assert {request.case.case_id for request in queued} == {
+        case.case_id for case in holdout
+    }
 
 
 def test_experiment_cli_reports_unknown_experiment(tmp_path):
@@ -399,7 +482,6 @@ def test_replay_evaluator_missing_treated_memo_names_generate_command(
     message = str(excinfo.value)
     assert case.symbol in message
     assert message.endswith(
-        "ops backtest generate --sleeve research "
-        f"--start {case.asof.isoformat()} --end {case.asof.isoformat()} "
-        f"--experiment {EXPERIMENT_ID} --execute"
+        f"ops backtest generate --sleeve research --experiment {EXPERIMENT_ID} "
+        "--execute"
     )

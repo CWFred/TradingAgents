@@ -1004,9 +1004,9 @@ def generate_cases(
     *,
     config: OpsConfig,
     sleeve: str,
-    start: date,
-    end: date,
-    case_count: int,
+    start: date | None = None,
+    end: date | None = None,
+    case_count: int = 0,
     today: date,
     execute: bool = False,
     enqueue: bool = False,
@@ -1032,6 +1032,16 @@ def generate_cases(
     Without it, generation can only ever (re)produce the control arm --
     which is why ``backtest experiment`` prints this flag in the command it
     tells the operator to run.
+
+    In that mode the case set is the experiment's frozen holdout membership,
+    exactly -- no window, no ``case_count`` budget, no preparation of new
+    cases. Flowing the treated arm through the window/budget machinery would
+    truncate it (holdout cases are a seeded random subset scattered across
+    the corpus, so the first N cases by ``(asof, symbol)`` are mostly
+    training cases): the operator would burn model time on the wrong cases
+    and ``backtest experiment`` would report the same missing memos forever.
+    ``start``/``end``/``case_count`` are therefore ignored -- and rejected if
+    passed -- when ``experiment_id`` is set.
     """
     if execute and enqueue:
         raise InvalidBacktestRequest("choose either immediate execution or background enqueue")
@@ -1039,14 +1049,30 @@ def generate_cases(
         raise InvalidBacktestRequest("append is reconstruction-only")
     if fresh_sweep and source == "recorded":
         raise InvalidBacktestRequest("fresh-sweep is reconstruction-only")
-    _validate_window(
-        start=start, end=end, today=today, cutoff=config.backtest_cutoff,
-        case_count=case_count,
-    )
+    if experiment_id is not None:
+        if start is not None or end is not None or case_count:
+            raise InvalidBacktestRequest(
+                "--experiment generates exactly the experiment's holdout cases; "
+                "it takes no window or case budget"
+            )
+    elif start is None or end is None:
+        raise InvalidBacktestRequest("a case window (start and end) is required")
+    else:
+        _validate_window(
+            start=start, end=end, today=today, cutoff=config.backtest_cutoff,
+            case_count=case_count,
+        )
     if max_jobs is not None and max_jobs <= 0:
         raise InvalidBacktestRequest("max-jobs must be positive")
     with BacktestStore(config.backtest_store_path, cutoff=config.backtest_cutoff) as store:
         effective_cutoff = store.effective_cutoff
+        if experiment_id is not None:
+            return _generate_experiment_arm(
+                store, config=config, sleeve=sleeve, experiment_id=experiment_id,
+                brain_version=brain_version, prompt_version=prompt_version,
+                execute=execute, enqueue=enqueue, max_jobs=max_jobs,
+                executor=executor,
+            )
         _validate_window(
             start=start, end=end, today=today, cutoff=effective_cutoff,
             case_count=case_count,
@@ -1105,38 +1131,82 @@ def generate_cases(
         cases = _selected_cases(
             store, sleeve=sleeve, start=start, end=end, case_count=case_count,
         )
-        lessons: Sequence[Lesson] = ()
-        if experiment_id is not None:
-            record, _training, lessons = load_experiment_lessons(store, experiment_id)
-            if record.sleeve != sleeve:
-                raise InvalidBacktestRequest(
-                    f"experiment {experiment_id} is sleeve {record.sleeve!r}, "
-                    f"not {sleeve!r}"
-                )
-            if not lessons:
-                raise MissingBacktestArtifacts(
-                    f"experiment {experiment_id} has no distilled lessons; "
-                    "run `ops backtest lessons RUN_ID --execute` first"
-                )
         requests = _generation_requests(
             store, cases, config=config,
             brain_version=brain_version, prompt_version=prompt_version,
-            on_missing_manifest="skip", lessons=lessons,
+            on_missing_manifest="skip",
         )
-        plan = plan_generation(requests, store=store)
-        if enqueue:
-            store.enqueue_generation_jobs(plan.pending)
-        summary = None
-        if execute and plan.pending:
-            runner = executor or _execute_generation
-            summary = runner(
-                plan, store=store, config=config, max_jobs=max_jobs,
-            )
-        return GenerationResult(
-            total=len(plan.requests), cached=len(plan.cached),
-            pending=(summary.still_pending if summary is not None else len(plan.pending)),
-            summary=summary,
+        return _run_generation_plan(
+            requests, store=store, config=config, execute=execute,
+            enqueue=enqueue, max_jobs=max_jobs, executor=executor,
         )
+
+
+def _run_generation_plan(
+    requests,
+    *,
+    store: BacktestStore,
+    config: OpsConfig,
+    execute: bool,
+    enqueue: bool,
+    max_jobs: int | None,
+    executor: Callable[..., GenerationSummary] | None,
+) -> GenerationResult:
+    plan = plan_generation(requests, store=store)
+    if enqueue:
+        store.enqueue_generation_jobs(plan.pending)
+    summary = None
+    if execute and plan.pending:
+        runner = executor or _execute_generation
+        summary = runner(plan, store=store, config=config, max_jobs=max_jobs)
+    return GenerationResult(
+        total=len(plan.requests), cached=len(plan.cached),
+        pending=(summary.still_pending if summary is not None else len(plan.pending)),
+        summary=summary,
+    )
+
+
+def _generate_experiment_arm(
+    store: BacktestStore,
+    *,
+    config: OpsConfig,
+    sleeve: str,
+    experiment_id: str,
+    brain_version: str,
+    prompt_version: str,
+    execute: bool,
+    enqueue: bool,
+    max_jobs: int | None,
+    executor: Callable[..., GenerationSummary] | None,
+) -> GenerationResult:
+    """Generate the treated arm for exactly one experiment's holdout cases."""
+    record, _training, lessons = load_experiment_lessons(store, experiment_id)
+    if record.sleeve != sleeve:
+        raise InvalidBacktestRequest(
+            f"experiment {experiment_id} is sleeve {record.sleeve!r}, not {sleeve!r}"
+        )
+    if not lessons:
+        raise MissingBacktestArtifacts(
+            f"experiment {experiment_id} has no distilled lessons; "
+            "run `ops backtest lessons RUN_ID --execute` first"
+        )
+    cases = []
+    for case_id in record.holdout_case_ids:
+        case = store.get_case(case_id)
+        if case is None:
+            raise BacktestServiceError(f"holdout case {case_id!r} disappeared")
+        cases.append(case)
+    # Cases already carrying a treated memo come back as plan.cached, so the
+    # command is idempotent and resumable over the whole holdout.
+    requests = _generation_requests(
+        store, cases, config=config,
+        brain_version=brain_version, prompt_version=prompt_version,
+        on_missing_manifest="skip", lessons=lessons,
+    )
+    return _run_generation_plan(
+        requests, store=store, config=config, execute=execute,
+        enqueue=enqueue, max_jobs=max_jobs, executor=executor,
+    )
 
 
 def _readonly_connection(path: str | Path) -> sqlite3.Connection:
@@ -1606,7 +1676,6 @@ def experiment_run(
         )
         case_inputs: dict[str, PairedCaseInput] = {}
         missing_treated: list[str] = []
-        missing_asofs: list[date] = []
         for case_id in plan.holdout_case_ids:
             case = store.get_case(case_id)
             if case is None:
@@ -1623,7 +1692,6 @@ def experiment_run(
             request = variant_request(store, case, config=config, lessons=lessons)
             if store.get_frozen_memo(request.memo_key) is None:
                 missing_treated.append(case_id)
-                missing_asofs.append(case.asof)
         identity = {
             "experiment_id": record.experiment_id,
             "sleeve": record.sleeve,
@@ -1636,9 +1704,8 @@ def experiment_run(
             # implies actually produces TREATED memos -- hence --experiment.
             "generate_command": (
                 generate_command_span(
-                    sleeve=record.sleeve, start=min(missing_asofs),
-                    end=max(missing_asofs), experiment_id=record.experiment_id,
-                ) if missing_asofs else ""
+                    sleeve=record.sleeve, experiment_id=record.experiment_id,
+                ) if missing_treated else ""
             ),
         }
         if not execute:
