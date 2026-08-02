@@ -44,7 +44,19 @@ class Ds4ThesisAssessor:
         reply = client.invoke(prompt)
         text = getattr(reply, "content", reply)
         text = str(text).strip().removeprefix("```json").removeprefix("```").removesuffix("```")
-        return json.loads(text)
+        raw = json.loads(text)
+        # The model reliably cites the memo's own filing accessions alongside
+        # the provided facts; the postmortem validator rejects any ref outside
+        # the facts set, so intersect here (dropping a citation is safe --
+        # provenance only, never content).
+        try:
+            allowed = {row.get("source_ref") for row in json.loads(facts_json)}
+        except (ValueError, TypeError, AttributeError):
+            allowed = set()
+        cited = raw.get("evidence")
+        if isinstance(cited, (list, tuple)):
+            raw["evidence"] = [ref for ref in cited if ref in allowed]
+        return raw
 
 
 def _default_client_factory(model_spec: str) -> Any:

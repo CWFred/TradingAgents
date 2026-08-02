@@ -638,3 +638,44 @@ def test_generate_cases_excludes_orphan_from_available_and_dedupe(tmp_path, caps
     assert seen["case_count"] == 29
     warning = capsys.readouterr().out
     assert orphan.case_id in warning
+
+
+def test_generation_requests_can_bypass_lesson_temporal_eligibility(tmp_path):
+    """Paired-experiment arms must inject lessons whose eligible_from
+    postdates every historical holdout asof (2026-08-02: all deltas were
+    identically 0.0 because per-case eligibility filtered every lesson and
+    the 'treated' arm silently reused control memo keys). Within an
+    experiment, leakage protection is train/holdout membership, not time."""
+    from datetime import date as _date
+
+    from ops.backtest.models import Lesson
+    from ops.backtest.service import _generation_requests
+    from ops.backtest.store import BacktestStore
+    from ops.config import OpsConfig
+
+    config = OpsConfig(
+        backtest_store_path=str(tmp_path / "bt.sqlite"),
+        research_evidence_model=LOCAL_MODEL, research_thesis_model=LOCAL_MODEL,
+    )
+    case = _case("XYZ", date(2025, 6, 16))
+    manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof)
+    lesson = Lesson(
+        lesson_id="lesson-x", sleeve="research", text="verify the mechanism",
+        source_case_ids=("case-train",), eligible_from=_date(2026, 8, 2),
+        fingerprint="f" * 8,
+    )
+    with BacktestStore(config.backtest_store_path) as store:
+        store.insert_case_with_manifest(case, manifest)
+        default = _generation_requests(
+            store, [case], config=config,
+            brain_version="b", prompt_version="p", lessons=[lesson],
+        )
+        bypassed = _generation_requests(
+            store, [case], config=config,
+            brain_version="b", prompt_version="p", lessons=[lesson],
+            enforce_lesson_eligibility=False,
+        )
+    assert default[0].lesson_fingerprint == "none"          # temporal gate holds
+    assert bypassed[0].lesson_fingerprint != "none"         # experiment arm injects
+    assert bypassed[0].lesson_texts == ("verify the mechanism",)
+    assert bypassed[0].memo_key != default[0].memo_key      # distinct frozen identity

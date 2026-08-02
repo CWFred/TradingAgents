@@ -246,3 +246,43 @@ def test_paired_results_reject_nonfinite_and_duplicates():
         paired_experiment_summary([
             PairedResult("a", 0, 1), PairedResult("a", 0, 1),
         ])
+
+
+def test_run_paired_efficacy_can_bypass_temporal_eligibility():
+    """Historical-case experiments are vacuous under the strict temporal gate:
+    lessons adjudicated today are never eligible_from-earlier than a 2025
+    holdout asof. With temporal_eligibility=False every holdout case gets the
+    full validated lesson set and a real treated fingerprint."""
+    from datetime import date
+
+    from ops.backtest.lessons import (
+        EfficacyPlan,
+        PairedCaseInput,
+        run_paired_efficacy,
+    )
+    from ops.backtest.models import Lesson
+
+    plan = EfficacyPlan.create(
+        sleeve="research", case_ids=["case-a", "case-b", "case-h"],
+        holdout_size=1, seed=7,
+    )
+    (holdout_id,) = plan.holdout_case_ids
+    lesson = Lesson(
+        lesson_id="lesson-x", sleeve="research", text="t",
+        source_case_ids=tuple(plan.training_case_ids[:1]),
+        eligible_from=date(2026, 8, 2), fingerprint="f" * 8,
+    )
+    seen = {}
+
+    class _Eval:
+        def evaluate(self, *, case_input, variant, lesson_fingerprint):
+            seen[variant] = lesson_fingerprint
+            return 1.0
+
+    inputs = {holdout_id: PairedCaseInput(
+        case_id=holdout_id, asof=date(2025, 6, 16), pinned_input_hash="h",
+    )}
+    run_paired_efficacy(plan, case_inputs=inputs, lessons=[lesson],
+                        evaluator=_Eval(), temporal_eligibility=False)
+    assert seen["control"] is None
+    assert seen["treated"] is not None      # gate bypassed inside the experiment
