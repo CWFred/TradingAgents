@@ -12,6 +12,7 @@ import importlib
 import json
 import sqlite3
 import subprocess
+import sys
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -1553,8 +1554,22 @@ def lessons_run(
             sleeve="research", case_ids=case_ids,
             holdout_size=holdout_n, seed=seed_n,
         )
-        if store.get_experiment(plan.experiment_id) is None:
+        existing_record = store.get_experiment(plan.experiment_id)
+        if existing_record is None:
             store.save_experiment(plan.record(lesson_fingerprint="pending"))
+        elif not existing_record.training_case_ids:
+            # Backfill a pre-v5 record's training membership. The identity
+            # check compares created_at, so preserve the stored stamp (and
+            # status) rather than regenerating them.
+            from dataclasses import replace as _dc_replace
+
+            store.save_experiment(_dc_replace(
+                plan.record(lesson_fingerprint=existing_record.lesson_fingerprint),
+                created_at=existing_record.created_at,
+                status=existing_record.status,
+                control_metrics=existing_record.control_metrics,
+                treated_metrics=existing_record.treated_metrics,
+            ))
         assessments = _training_assessments(store, run_id, plan.training_case_ids)
         if not execute:
             return LessonsResult(
@@ -1618,6 +1633,15 @@ def _experiment_training_case_ids(store: BacktestStore, record) -> tuple[str, ..
     catches a leaked lesson), and a lesson distilled from a training case is
     still recognised as this experiment's.
     """
+    if record.training_case_ids:
+        return record.training_case_ids
+    print(
+        f"[experiment] {record.experiment_id} has no persisted training "
+        "membership (pre-v5 record); reconstructing from the CURRENT corpus -- "
+        "re-run `backtest lessons RUN_ID` with the same seed/holdout to "
+        "backfill before the corpus grows further",
+        file=sys.stderr,
+    )
     holdout = set(record.holdout_case_ids)
     return tuple(sorted(
         case.case_id for case in store.list_cases(sleeve=record.sleeve)

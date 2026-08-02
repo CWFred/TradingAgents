@@ -1075,3 +1075,37 @@ def test_lessons_cli_excludes_control_cases_from_training_and_holdout(tmp_path, 
 
     assert control_case.case_id not in record.holdout_case_ids
     assert control_case.case_id not in calls[0]
+
+
+def test_experiment_training_set_does_not_drift_with_corpus_growth(tmp_path):
+    """Persisted training membership must be immune to later case inserts
+    (legacy reconstruction grew with the corpus — 2026-08-02 finding)."""
+    from datetime import date as _d
+
+    from ops.backtest.models import BacktestCase, ContextManifest, ExperimentRecord
+    from ops.backtest.service import _experiment_training_case_ids
+    from ops.backtest.store import BacktestStore
+
+    def _mk(sym, day):
+        return BacktestCase.create(sleeve="research", symbol=sym,
+                                   asof=_d(2025, 6, day), trigger={"kind": "screen"})
+
+    with BacktestStore(tmp_path / "bt.sqlite") as store:
+        ids = []
+        for i, sym in enumerate(["AAA", "BBB", "CCC"]):
+            case = _mk(sym, 16 + i)
+            store.insert_case_with_manifest(
+                case, ContextManifest.create(case_id=case.case_id, asof=case.asof))
+            ids.append(case.case_id)
+        record = ExperimentRecord(
+            experiment_id="experiment-drift-x", sleeve="research", seed=1,
+            holdout_case_ids=(ids[2],), training_case_ids=tuple(ids[:2]),
+            lesson_fingerprint="pending",
+        )
+        store.save_experiment(record)
+        before = _experiment_training_case_ids(store, store.get_experiment("experiment-drift-x"))
+        late = _mk("DDD", 20)
+        store.insert_case_with_manifest(
+            late, ContextManifest.create(case_id=late.case_id, asof=late.asof))
+        after = _experiment_training_case_ids(store, store.get_experiment("experiment-drift-x"))
+    assert before == after == tuple(ids[:2])      # DDD never absorbed

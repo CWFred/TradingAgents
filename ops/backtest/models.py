@@ -441,6 +441,10 @@ class ExperimentRecord:
     seed: int
     holdout_case_ids: tuple[str, ...]
     lesson_fingerprint: str
+    # Persisted training membership (schema v5). Empty tuple = legacy record
+    # written before persistence existed; consumers fall back to legacy
+    # reconstruction with a warning.
+    training_case_ids: tuple[str, ...] = ()
     status: Literal["planned", "running", "complete", "failed"] = "planned"
     control_metrics: Mapping[str, Any] = field(default_factory=dict)
     treated_metrics: Mapping[str, Any] = field(default_factory=dict)

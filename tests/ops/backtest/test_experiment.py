@@ -88,6 +88,7 @@ def _seed_experiment(path):
         store.save_experiment(ExperimentRecord(
             experiment_id=EXPERIMENT_ID, sleeve="research", seed=7,
             holdout_case_ids=tuple(case.case_id for case in holdout),
+            training_case_ids=(training.case_id,),
             lesson_fingerprint="pending",
         ))
     return training, holdout, lesson
