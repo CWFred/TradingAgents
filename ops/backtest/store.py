@@ -33,7 +33,7 @@ from ops.backtest.models import (
     stable_hash,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 BUSY_TIMEOUT_MS = 5_000
 
 
@@ -267,6 +267,7 @@ CREATE TABLE IF NOT EXISTS experiment_cases (
     experiment_id TEXT NOT NULL REFERENCES experiments(experiment_id) ON DELETE CASCADE,
     case_id TEXT NOT NULL REFERENCES cases(case_id) ON DELETE RESTRICT,
     ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    role TEXT NOT NULL DEFAULT 'holdout' CHECK (role IN ('training', 'holdout')),
     control_memo_key TEXT REFERENCES frozen_memos(memo_key) ON DELETE RESTRICT,
     treated_memo_key TEXT REFERENCES frozen_memos(memo_key) ON DELETE RESTRICT,
     PRIMARY KEY (experiment_id, case_id),
@@ -453,6 +454,32 @@ class BacktestStore:
                     + "PRAGMA user_version = 4;\nCOMMIT;"
                 )
                 current = 4
+            if current == 4:
+                # v5: persisted experiment training membership. ALTER is not
+                # naturally idempotent -- mirror the v2->v3 try/except.
+                try:
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    existing_cols = {
+                        row[1] for row in self._conn.execute(
+                            "PRAGMA table_info(experiment_cases)"
+                        ).fetchall()
+                    }
+                    if "role" not in existing_cols:
+                        self._conn.execute(
+                            "ALTER TABLE experiment_cases ADD COLUMN role TEXT "
+                            "NOT NULL DEFAULT 'holdout' "
+                            "CHECK (role IN ('training', 'holdout'))"
+                        )
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO schema_metadata (key, value) "
+                        "VALUES ('schema_version', '5')"
+                    )
+                    self._conn.execute("PRAGMA user_version = 5")
+                    self._conn.execute("COMMIT")
+                except BaseException:
+                    self._conn.execute("ROLLBACK")
+                    raise
+                current = 5
             columns = {
                 row[1]
                 for row in self._conn.execute(
@@ -1595,13 +1622,18 @@ class BacktestStore:
             ).fetchone()
             if row is None:
                 return None
-            cases = self._conn.execute(
+            holdout_rows = self._conn.execute(
                 "SELECT case_id FROM experiment_cases WHERE experiment_id = ? "
-                "ORDER BY ordinal", (experiment_id,),
+                "AND role = 'holdout' ORDER BY ordinal", (experiment_id,),
+            ).fetchall()
+            training_rows = self._conn.execute(
+                "SELECT case_id FROM experiment_cases WHERE experiment_id = ? "
+                "AND role = 'training' ORDER BY ordinal", (experiment_id,),
             ).fetchall()
         return ExperimentRecord(
             experiment_id=row["experiment_id"], sleeve=row["sleeve"], seed=int(row["seed"]),
-            holdout_case_ids=tuple(item[0] for item in cases),
+            holdout_case_ids=tuple(item[0] for item in holdout_rows),
+            training_case_ids=tuple(item[0] for item in training_rows),
             lesson_fingerprint=row["lesson_fingerprint"], status=row["status"],
             control_metrics=json.loads(row["control_metrics_json"]),
             treated_metrics=json.loads(row["treated_metrics_json"]),
@@ -1639,6 +1671,25 @@ class BacktestStore:
                 if immutable != incoming:
                     raise CaseConflictError(
                         f"experiment {record.experiment_id!r} has different identity"
+                    )
+                if existing.training_case_ids and record.training_case_ids and (
+                    existing.training_case_ids != record.training_case_ids
+                ):
+                    raise CaseConflictError(
+                        f"experiment {record.experiment_id!r} training membership "
+                        "is immutable"
+                    )
+                if record.training_case_ids and not existing.training_case_ids:
+                    # Backfill path: a legacy (pre-v5) record gains its
+                    # persisted training rows exactly once.
+                    holdout_count = len(existing.holdout_case_ids)
+                    conn.executemany(
+                        "INSERT INTO experiment_cases "
+                        "(experiment_id, case_id, ordinal, role) VALUES (?, ?, ?, 'training')",
+                        [
+                            (record.experiment_id, case, holdout_count + ordinal)
+                            for ordinal, case in enumerate(record.training_case_ids)
+                        ],
                     )
                 transitions = {
                     "planned": {"planned", "running", "complete", "failed"},
@@ -1682,13 +1733,23 @@ class BacktestStore:
                 ),
             )
             conn.executemany(
-                "INSERT INTO experiment_cases (experiment_id, case_id, ordinal) "
-                "VALUES (?, ?, ?)",
+                "INSERT INTO experiment_cases (experiment_id, case_id, ordinal, role) "
+                "VALUES (?, ?, ?, 'holdout')",
                 [
                     (record.experiment_id, case, ordinal)
                     for ordinal, case in enumerate(record.holdout_case_ids)
                 ],
             )
+            if record.training_case_ids:
+                holdout_count = len(record.holdout_case_ids)
+                conn.executemany(
+                    "INSERT INTO experiment_cases "
+                    "(experiment_id, case_id, ordinal, role) VALUES (?, ?, ?, 'training')",
+                    [
+                        (record.experiment_id, case, holdout_count + ordinal)
+                        for ordinal, case in enumerate(record.training_case_ids)
+                    ],
+                )
 
     def record_cutoff_probe(
         self,

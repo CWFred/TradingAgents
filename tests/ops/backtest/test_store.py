@@ -751,3 +751,41 @@ def test_contaminated_probe_advances_effective_cutoff_and_seals_old_cases(tmp_pa
 
     with BacktestStore(path) as reopened:
         assert reopened.effective_cutoff == date(2025, 7, 1)
+
+
+def test_experiment_persists_training_membership_and_backfills_legacy(tmp_path):
+    """Training membership must be immutable data, not a live recomputation:
+    the legacy reconstruction ("every non-control case not in holdout") grows
+    with the corpus, silently absorbing new cases into an old experiment's
+    training set (2026-08-02 finding)."""
+    from ops.backtest.models import ExperimentRecord
+
+    store_path = tmp_path / "bt.sqlite"
+    with BacktestStore(store_path) as store:
+        for i in range(4):
+            case = _case(date(2025, 6, 16 + i), symbol=f"SY{i}")
+            manifest = ContextManifest.create(case_id=case.case_id, asof=case.asof)
+            store.insert_case_with_manifest(case, manifest)
+        cases = sorted(c.case_id for c in store.list_cases(sleeve="research"))
+        record = ExperimentRecord(
+            experiment_id="experiment-persist-x", sleeve="research", seed=7,
+            holdout_case_ids=(cases[3],), training_case_ids=tuple(cases[:3]),
+            lesson_fingerprint="pending",
+        )
+        store.save_experiment(record)
+        loaded = store.get_experiment("experiment-persist-x")
+        assert loaded.holdout_case_ids == (cases[3],)
+        assert loaded.training_case_ids == tuple(cases[:3])
+
+        # Legacy row: holdout-only (simulate pre-v5 write via raw SQL delete
+        # of the training rows), then a re-save backfills them.
+        with store.transaction() as conn:
+            conn.execute(
+                "DELETE FROM experiment_cases WHERE experiment_id=? AND role='training'",
+                ("experiment-persist-x",),
+            )
+        legacy = store.get_experiment("experiment-persist-x")
+        assert legacy.training_case_ids == ()
+        store.save_experiment(record)          # backfill path
+        assert store.get_experiment(
+            "experiment-persist-x").training_case_ids == tuple(cases[:3])

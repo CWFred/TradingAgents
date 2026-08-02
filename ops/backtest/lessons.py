@@ -309,6 +309,7 @@ class EfficacyPlan:
             sleeve=self.sleeve,
             seed=self.seed,
             holdout_case_ids=self.holdout_case_ids,
+            training_case_ids=self.training_case_ids,
             lesson_fingerprint=lesson_fingerprint,
         )
 
