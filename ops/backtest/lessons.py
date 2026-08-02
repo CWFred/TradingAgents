@@ -329,8 +329,18 @@ def run_paired_efficacy(
     case_inputs: Mapping[str, PairedCaseInput],
     lessons: Sequence[Lesson],
     evaluator: PairedEvaluator,
+    temporal_eligibility: bool = True,
 ) -> tuple[PairedResult, ...]:
-    """Evaluate paired control/treated memos over fixed holdout membership."""
+    """Evaluate paired control/treated memos over fixed holdout membership.
+
+    ``temporal_eligibility=False`` treats every validated lesson as
+    applicable to every holdout case. Freshly distilled lessons carry
+    ``eligible_from`` == the adjudication date, which postdates every
+    historical holdout asof -- under the strict gate a backtest experiment
+    is vacuous by construction (all deltas 0.0, observed 2026-08-02).
+    Inside the experiment, leakage protection is train/holdout membership
+    (``validate_lesson_sources``), not time.
+    """
     for lesson in lessons:
         validate_lesson_sources(lesson, training_case_ids=set(plan.training_case_ids))
     rows: list[PairedResult] = []
@@ -340,7 +350,10 @@ def run_paired_efficacy(
             raise ValueError(f"missing or mismatched pinned input for holdout case {case_id}")
         if not case_input.pinned_input_hash.strip():
             raise ValueError(f"holdout case {case_id} has no pinned input hash")
-        case_lessons = eligible_lessons(lessons, asof=case_input.asof)
+        case_lessons = (
+            eligible_lessons(lessons, asof=case_input.asof)
+            if temporal_eligibility else tuple(lessons)
+        )
         fingerprint = lesson_set_hash(case_lessons) if case_lessons else None
         control = evaluator.evaluate(
             case_input=case_input, variant="control", lesson_fingerprint=None,

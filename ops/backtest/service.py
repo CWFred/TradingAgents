@@ -551,6 +551,7 @@ def _generation_requests(
     prompt_version: str,
     on_missing_manifest: str = "raise",
     lessons: Sequence[Lesson] = (),
+    enforce_lesson_eligibility: bool = True,
 ) -> tuple[GenerationRequest, ...]:
     """Build requests for cases with a sealed manifest.
 
@@ -580,7 +581,17 @@ def _generation_requests(
             missing_manifests.append(case.symbol)
             skipped_case_ids.append(case.case_id)
             continue
-        eligible = eligible_lessons(lessons, asof=case.asof)
+        # enforce_lesson_eligibility=False is the paired-experiment arm:
+        # freshly distilled lessons carry eligible_from == the adjudication
+        # date, which postdates every historical holdout asof, so the strict
+        # temporal gate would filter ALL of them and the "treated" arm would
+        # silently reuse control identities (observed 2026-08-02: 10/10
+        # deltas exactly 0.0). Inside an experiment, leakage protection is
+        # train/holdout membership (validate_lesson_sources), not time.
+        eligible = (
+            eligible_lessons(lessons, asof=case.asof)
+            if enforce_lesson_eligibility else tuple(lessons)
+        )
         requests.append(GenerationRequest.create(
             case=case, manifest=manifest,
             brain_version=brain_version, prompt_version=prompt_version,
@@ -1202,6 +1213,7 @@ def _generate_experiment_arm(
         store, cases, config=config,
         brain_version=brain_version, prompt_version=prompt_version,
         on_missing_manifest="skip", lessons=lessons,
+        enforce_lesson_eligibility=False,
     )
     return _run_generation_plan(
         requests, store=store, config=config, execute=execute,
@@ -1719,6 +1731,7 @@ def experiment_run(
             )
         results = run_paired_efficacy(
             plan, case_inputs=case_inputs, lessons=lessons, evaluator=evaluator,
+            temporal_eligibility=False,
         )
         summary = paired_experiment_summary(results)
         return {**identity, **summary, "executed": True}

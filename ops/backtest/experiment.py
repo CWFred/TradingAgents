@@ -93,6 +93,9 @@ def variant_request(
         store, [case], config=config,
         brain_version=brain_version, prompt_version=prompt_version,
         lessons=lessons,
+        # Experiment identities bypass the temporal lesson gate -- see
+        # _generation_requests(enforce_lesson_eligibility=...) rationale.
+        enforce_lesson_eligibility=False,
     )
     if not requests:  # pragma: no cover - _generation_requests raises first
         raise MissingBacktestArtifacts(
