@@ -96,3 +96,26 @@ def test_configured_shape():
     cfg = configured()
     assert set(cfg) >= {"assessor", "evidence_provider", "model_id", "prompt_version"}
     assert cfg["prompt_version"] == "postmortem-v1"
+
+
+def test_assessor_filters_citations_to_provided_facts():
+    """ds4 naturally cites the memo's own filing accessions; the postmortem
+    validator rejects any ref outside the provided facts (2026-08-02: every
+    assessment failed). The assessor must intersect citations with facts."""
+    import json as _json
+
+    facts = _json.dumps([
+        {"source_ref": "price:ACME:2025-09-02", "content": "{}"},
+        {"source_ref": "price:ACME:2025-09-03", "content": "{}"},
+    ])
+    reply = _json.dumps({
+        "thesis_correct": True, "narrative": "held up",
+        "evidence": ["price:ACME:2025-09-02", "0000037785-25-000127:mdna"],
+    })
+    assessor = Ds4ThesisAssessor(
+        "openai_compatible:deepseek-v4-flash@http://127.0.0.1:8000/v1",
+        client_factory=lambda spec: _FakeChat(reply),
+    )
+    raw = assessor.assess(memo_json="{}", facts_json=facts,
+                          facts_through=date(2025, 9, 30))
+    assert raw["evidence"] == ["price:ACME:2025-09-02"]
