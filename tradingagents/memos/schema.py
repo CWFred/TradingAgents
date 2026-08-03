@@ -37,7 +37,7 @@ from datetime import date, datetime, timezone
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ThesisType = Literal["value", "event", "short"]
 ConvictionTier = Literal["starter", "medium", "high"]
@@ -115,6 +115,19 @@ class Falsifier(BaseModel):
     operator: Literal["<", "<=", ">", ">="] | None = Field(
         default=None, description="Comparison applied as: metric OPERATOR threshold."
     )
+
+    @field_validator("operator", mode="before")
+    @classmethod
+    def _normalize_operator(cls, value: object) -> object:
+        """Models reliably emit unicode/padded operator variants; normalize
+        mechanically rather than crashing the whole memo (2026-08-03)."""
+        if isinstance(value, str):
+            cleaned = value.strip()
+            cleaned = {"≥": ">=", "≤": "<=", "=>": ">=", "=<": "<="}.get(
+                cleaned, cleaned
+            )
+            return cleaned or None
+        return value
     threshold: float | None = Field(default=None, description="Trip threshold for the metric.")
     consecutive_periods: int = Field(
         default=1,

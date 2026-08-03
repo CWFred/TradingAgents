@@ -30,7 +30,7 @@ from datetime import date
 from typing import Literal
 from uuid import NAMESPACE_URL, uuid5
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ops.research.memo_validation import resolve_evidence, validate_memo
 from ops.research.prices import fetch_price_context
@@ -88,6 +88,20 @@ class MemoDraft(BaseModel):
     catalysts: list[Catalyst] = Field(default_factory=list)
     precedent_memo_ids: list[str] = Field(default_factory=list)
     recommendation: Literal["buy", "pass"]
+
+    @field_validator("precedent_memo_ids", mode="before")
+    @classmethod
+    def _drop_precedent_sentinels(cls, value: object) -> object:
+        """The prompt says 'empty if none apply' but models write sentinel
+        strings ('none found', 'N/A') that fail existence validation and
+        crash the memo. Dropping them IS the documented 'none found'."""
+        if isinstance(value, (list, tuple)):
+            sentinels = {"", "none", "none found", "n/a", "na", "null"}
+            return [
+                item for item in value
+                if not (isinstance(item, str) and item.strip().lower() in sentinels)
+            ]
+        return value
 
 
 EVIDENCE_PROMPT = """\

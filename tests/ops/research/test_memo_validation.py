@@ -119,3 +119,33 @@ def test_drawdown_falsifier_canonical_form_accepted():
         metric="drawdown_from_cost_pct", operator=">", threshold=25.0,
     )])
     assert validate_memo(memo, allowed_refs={REF}, known_precedents=set()) == []
+
+
+def test_falsifier_operator_sanitizes_common_model_variants():
+    """ds4 emits unicode and space-padded comparison operators; the schema
+    rejected them and crashed whole memos (2026-08-03 autopsy: 7 of 11
+    changed experiment pairs were operator/format crashes, not decisions)."""
+    from tradingagents.memos.schema import Falsifier
+
+    for raw, want in [("≥", ">="), ("≤", "<="), (" >=", ">="), (">= ", ">="),
+                      ("=>", ">="), ("=<", "<="), (" < ", "<")]:
+        f = Falsifier(description="d", check_type="fundamental", metric="m",
+                      operator=raw, threshold=1.0)
+        assert f.operator == want, (raw, f.operator)
+    assert Falsifier(description="d", check_type="event").operator is None
+
+
+def test_memo_draft_drops_precedent_sentinels():
+    """The brain's prompt says 'empty if none apply' but the model writes
+    'none found' — validation then rejects the whole memo."""
+    from ops.research.brain import MemoDraft
+
+    draft = MemoDraft(
+        thesis_type="value", thesis="t", conviction_tier="starter",
+        price_target_low=1.0, price_target_high=2.0,
+        expected_holding_months=6, must_be_true=["x"],
+        falsifiers=[{"description": "d", "check_type": "price"}],
+        precedent_memo_ids=["none found", "N/A", "", "memo-real123"],
+        recommendation="pass",
+    )
+    assert draft.precedent_memo_ids == ["memo-real123"]

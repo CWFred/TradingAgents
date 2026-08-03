@@ -1712,6 +1712,7 @@ def experiment_run(
         )
         case_inputs: dict[str, PairedCaseInput] = {}
         missing_treated: list[str] = []
+        arm_statuses: dict[str, tuple[str, str]] = {}
         for case_id in plan.holdout_case_ids:
             case = store.get_case(case_id)
             if case is None:
@@ -1726,8 +1727,19 @@ def experiment_run(
                 pinned_input_hash=manifest.manifest_hash,
             )
             request = variant_request(store, case, config=config, lessons=lessons)
-            if store.get_frozen_memo(request.memo_key) is None:
+            treated_memo = store.get_frozen_memo(request.memo_key)
+            if treated_memo is None:
                 missing_treated.append(case_id)
+            control_request = variant_request(store, case, config=config, lessons=())
+            control_memo = store.get_frozen_memo(control_request.memo_key)
+            # A guardrail-rejected/failed memo is a forced PASS -- a crash,
+            # not a decision. Pairs where either arm crashed carry coin-flip
+            # noise and are reported separately (2026-08-03 autopsy: 7 of 11
+            # changed pairs were crashes).
+            arm_statuses[case_id] = (
+                control_memo.guardrail_status if control_memo else "missing",
+                treated_memo.guardrail_status if treated_memo else "missing",
+            )
         identity = {
             "experiment_id": record.experiment_id,
             "sleeve": record.sleeve,
@@ -1758,4 +1770,21 @@ def experiment_run(
             temporal_eligibility=False,
         )
         summary = paired_experiment_summary(results)
+        contaminated = tuple(sorted(
+            case_id for case_id, (ctl, trt) in arm_statuses.items()
+            if ctl != "accepted" or trt != "accepted"
+        ))
+        clean = [row for row in results if row.case_id not in contaminated]
+        clean_deltas = [row.delta for row in clean]
+        summary.update({
+            "clean_pairs": len(clean),
+            "contaminated_pairs": len(results) - len(clean),
+            "contaminated_case_ids": contaminated,
+            "clean_mean_delta": (
+                sum(clean_deltas) / len(clean_deltas) if clean_deltas else None
+            ),
+            "clean_improved": sum(d > 0 for d in clean_deltas),
+            "clean_worsened": sum(d < 0 for d in clean_deltas),
+            "clean_unchanged": sum(d == 0 for d in clean_deltas),
+        })
         return {**identity, **summary, "executed": True}

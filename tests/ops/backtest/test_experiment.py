@@ -486,3 +486,26 @@ def test_replay_evaluator_missing_treated_memo_names_generate_command(
         f"ops backtest generate --sleeve research --experiment {EXPERIMENT_ID} "
         "--execute"
     )
+
+
+def test_experiment_summary_separates_crash_contaminated_pairs(seeded_experiment, monkeypatch):
+    """A validation-rejected memo becomes a forced PASS — a crash wearing a
+    decision's clothes. 7 of 11 changed pairs in the 2026-08-02 run were
+    crashes; the summary must report clean-pair statistics separately."""
+    from ops.backtest.service import experiment_run
+
+    path, _training, holdout, _lesson = seeded_experiment
+
+    class _Eval:
+        def evaluate(self, *, case_input, variant, lesson_fingerprint):
+            return 1.0 if variant == "treated" else 0.5
+
+    result = experiment_run(
+        path=path, experiment_id=EXPERIMENT_ID, execute=True, evaluator=_Eval(),
+    )
+    assert "clean_pairs" in result and "contaminated_pairs" in result
+    # The fixture's holdout case(s) whose treated memo is missing/rejected
+    # must be counted contaminated; clean stats exclude them.
+    assert result["clean_pairs"] + result["contaminated_pairs"] == result["pairs"]
+    assert isinstance(result["clean_mean_delta"], (float, type(None)))
+    assert isinstance(result["contaminated_case_ids"], tuple)
